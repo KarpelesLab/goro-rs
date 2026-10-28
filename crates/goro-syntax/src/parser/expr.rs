@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 use super::strings::{self, Number, Quote};
-use super::{PResult, Parser};
+use super::{BVec, PResult, Parser};
 use crate::ast::*;
 use crate::token::{T, TF_BINARY_PREFIX, TF_DOUBLE, TF_TAG, Token};
 
@@ -196,221 +196,332 @@ impl<'a> Parser<'a> {
     /// Parses an expression; the flag tells whether it is a bare `(...)`.
     pub(crate) fn expr_bp_p(&mut self, min: u8) -> PResult<(Expr<'a>, bool)> {
         self.enter()?;
+        let r = self.expr_inner(min);
+        self.leave();
+        r
+    }
+
+    /// Prefix operators whose operand is an expression (`!`, `~`, `-`,
+    /// `+`, `@`, casts) are collected iteratively, so long chains use no
+    /// recursion; each one then binds the operand parsed at its own
+    /// precedence. Recursive functions here keep small stack frames:
+    /// rarely used paths live in separate non-inlined functions.
+    fn expr_inner(&mut self, min: u8) -> PResult<(Expr<'a>, bool)> {
+        let mut ops: Vec<(usize, u8)> = Vec::new();
+        loop {
+            let bp = match self.peek_kind() {
+                T::Bang => BP_NOT,
+                T::Tilde | T::Minus | T::Plus | T::At => BP_UNARY,
+                T::IntCast
+                | T::DoubleCast
+                | T::StringCast
+                | T::ArrayCast
+                | T::ObjectCast
+                | T::BoolCast
+                | T::UnsetCast => {
+                    let t = *self.peek();
+                    self.check_cast_spelling(&t);
+                    BP_UNARY
+                }
+                // `(void)` is a statement, not an expression (PHP 8.5 RFC
+                // "Marking return values as important").
+                T::VoidCast => return Err(self.unexpected(&[])),
+                _ => break,
+            };
+            ops.push((self.pos, bp));
+            self.bump();
+        }
+        if !ops.is_empty() {
+            self.depth += ops.len() as u32;
+            self.enter()?;
+            self.leave();
+            self.depth -= ops.len() as u32;
+        }
         let start = self.pos;
-        let (mut lhs, mut paren) = self.prefix()?;
+        let (lhs, paren) = self.prefix()?;
+        let inner_min = ops.last().map_or(min, |o| o.1);
+        let (mut lhs, mut paren) = self.infix(lhs, paren, inner_min, start)?;
+        while let Some((at, _)) = ops.pop() {
+            lhs = self.wrap_prefix(at, lhs);
+            let m = ops.last().map_or(min, |o| o.1);
+            (lhs, paren) = self.infix(lhs, false, m, at)?;
+        }
+        Ok((lhs, paren))
+    }
+
+    #[inline(never)]
+    fn wrap_prefix(&self, at: usize, e: Expr<'a>) -> Expr<'a> {
+        let t = self.toks[at];
+        let kind = match t.kind {
+            T::Bang => ExprKind::Unary {
+                op: UnaryOp::Not,
+                expr: self.alloc(e),
+            },
+            T::Tilde => ExprKind::Unary {
+                op: UnaryOp::BitNot,
+                expr: self.alloc(e),
+            },
+            T::Minus => ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr: self.alloc(e),
+            },
+            T::Plus => ExprKind::Unary {
+                op: UnaryOp::Plus,
+                expr: self.alloc(e),
+            },
+            T::At => ExprKind::Unary {
+                op: UnaryOp::Silence,
+                expr: self.alloc(e),
+            },
+            k => ExprKind::Cast {
+                kind: match k {
+                    T::IntCast => CastKind::Int,
+                    T::DoubleCast => CastKind::Float,
+                    T::StringCast => CastKind::String,
+                    T::ArrayCast => CastKind::Array,
+                    T::ObjectCast => CastKind::Object,
+                    T::BoolCast => CastKind::Bool,
+                    _ => CastKind::Unset,
+                },
+                expr: self.alloc(e),
+            },
+        };
+        self.mk(kind, at)
+    }
+
+    /// The infix / postfix-operator loop after an operand starting at
+    /// token `start`.
+    fn infix(
+        &mut self,
+        mut lhs: Expr<'a>,
+        mut paren: bool,
+        min: u8,
+        start: usize,
+    ) -> PResult<(Expr<'a>, bool)> {
         loop {
             let k = self.peek_kind();
-            if k == T::Eq {
-                if paren
-                    || !(is_variable(&lhs)
-                        || matches!(
-                            lhs.kind,
-                            ExprKind::Array { short: true, .. } | ExprKind::List { .. }
-                        ))
-                {
+            if let Some((bp, assoc, op)) = binary_op(k) {
+                if bp < min {
                     break;
                 }
-                self.bump();
-                if matches!(
-                    self.peek_kind(),
-                    T::AmpFollowedByVarOrVararg | T::AmpNotFollowedByVarOrVararg
-                ) {
-                    if !is_variable(&lhs) {
-                        // `[$a] = &$b` is not valid PHP syntax.
-                        return Err(self.unexpected(&[]));
+                lhs = self.binary_rest(lhs, bp, assoc, op, start)?;
+                paren = false;
+                continue;
+            }
+            match k {
+                T::Eq => {
+                    if paren
+                        || !(is_variable(&lhs)
+                            || matches!(
+                                lhs.kind,
+                                ExprKind::Array { short: true, .. } | ExprKind::List { .. }
+                            ))
+                    {
+                        break;
+                    }
+                    lhs = self.assign_rest(lhs, start)?;
+                }
+                T::Inc | T::Dec => {
+                    if paren || !is_variable(&lhs) {
+                        break;
                     }
                     self.bump();
-                    // `$a = &$b`: the right side is a variable or `new`
-                    // (observed on PHP 8.5: `$a = &$b + 1` is
-                    // `($a = &$b) + 1`).
-                    let value = if self.at(T::New) {
-                        let v = self.new_expr()?;
-                        if matches!(v.kind, ExprKind::New { args: None, .. }) {
-                            return Err(self.unexpected(&[T::LParen]));
-                        }
-                        v
+                    let op = if k == T::Inc {
+                        IncDec::PostInc
                     } else {
-                        if !matches!(
-                            self.peek_kind(),
-                            T::Variable
-                                | T::Dollar
-                                | T::String
-                                | T::NameQualified
-                                | T::NameFullyQualified
-                                | T::NameRelative
-                                | T::Static
-                                | T::LParen
-                        ) {
-                            return Err(self.unexpected(&[]));
-                        }
-                        let v = self.expr_bp(BP_POW + 1)?;
-                        if !is_variable(&v) {
-                            return Err(self.unexpected(&[]));
-                        }
-                        v
+                        IncDec::PostDec
                     };
-                    let span = self.span_from(start);
-                    lhs = Expr {
-                        kind: ExprKind::AssignRef {
-                            target: Box::new(lhs),
-                            value: Box::new(value),
+                    lhs = self.mk(
+                        ExprKind::IncDec {
+                            op,
+                            expr: self.alloc(lhs),
                         },
-                        span,
-                    };
-                } else {
-                    let target = self.to_assign_target(lhs);
-                    let value = self.expr_bp(BP_ASSIGN)?;
-                    let span = self.span_from(start);
-                    lhs = Expr {
-                        kind: ExprKind::Assign {
-                            target: Box::new(target),
-                            value: Box::new(value),
-                        },
-                        span,
-                    };
+                        start,
+                    );
                 }
-                paren = false;
-                continue;
-            }
-            if let Some(op) = assign_op(k) {
-                if paren || !is_variable(&lhs) {
-                    break;
-                }
-                self.bump();
-                let value = self.expr_bp(BP_ASSIGN)?;
-                let span = self.span_from(start);
-                lhs = Expr {
-                    kind: ExprKind::AssignOp {
-                        op,
-                        target: Box::new(lhs),
-                        value: Box::new(value),
-                    },
-                    span,
-                };
-                paren = false;
-                continue;
-            }
-            if k == T::Inc || k == T::Dec {
-                if paren || !is_variable(&lhs) {
-                    break;
-                }
-                self.bump();
-                let span = self.span_from(start);
-                lhs = Expr {
-                    kind: ExprKind::IncDec {
-                        op: if k == T::Inc {
-                            IncDec::PostInc
-                        } else {
-                            IncDec::PostDec
-                        },
-                        expr: Box::new(lhs),
-                    },
-                    span,
-                };
-                paren = false;
-                continue;
-            }
-            if k == T::Question {
-                if BP_TERNARY < min {
-                    break;
-                }
-                self.bump();
-                if let ExprKind::Ternary { then, .. } = &lhs.kind
-                    && !paren
-                {
-                    let inner_short = then.is_none();
-                    let outer_short = self.at(T::Colon);
-                    let msg = match (inner_short, outer_short) {
-                        (true, true) => None,
-                        (false, false) => Some(
-                            "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`",
-                        ),
-                        (true, false) => Some(
-                            "Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`",
-                        ),
-                        (false, true) => Some(
-                            "Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`",
-                        ),
-                    };
-                    if let Some(m) = msg {
-                        let sp = lhs.span;
-                        self.compile_error(m, sp);
+                T::Question => {
+                    if BP_TERNARY < min {
+                        break;
                     }
+                    lhs = self.ternary_rest(lhs, paren, start)?;
                 }
-                let then = if self.eat(T::Colon) {
-                    None
-                } else {
-                    let t = self.expr()?;
-                    self.expect(T::Colon, &[])?;
-                    Some(Box::new(t))
-                };
-                let else_ = self.expr_bp(BP_TERNARY + 1)?;
-                let span = self.span_from(start);
-                lhs = Expr {
-                    kind: ExprKind::Ternary {
-                        cond: Box::new(lhs),
-                        then,
-                        else_: Box::new(else_),
-                    },
-                    span,
-                };
-                paren = false;
-                continue;
-            }
-            if k == T::Instanceof {
-                if BP_INSTANCEOF < min {
-                    break;
+                T::Instanceof => {
+                    if BP_INSTANCEOF < min {
+                        break;
+                    }
+                    self.bump();
+                    let class = self.class_name_reference(true)?;
+                    lhs = self.mk(
+                        ExprKind::Instanceof {
+                            expr: self.alloc(lhs),
+                            class,
+                        },
+                        start,
+                    );
                 }
-                self.bump();
-                let class = self.class_name_reference(true)?;
-                let span = self.span_from(start);
-                lhs = Expr {
-                    kind: ExprKind::Instanceof {
-                        expr: Box::new(lhs),
-                        class,
-                    },
-                    span,
-                };
-                paren = false;
-                continue;
+                _ => {
+                    let Some(op) = assign_op(k) else { break };
+                    if paren || !is_variable(&lhs) {
+                        break;
+                    }
+                    self.bump();
+                    let value = self.expr_bp(BP_ASSIGN)?;
+                    lhs = self.mk(
+                        ExprKind::AssignOp {
+                            op,
+                            target: self.alloc(lhs),
+                            value: self.alloc(value),
+                        },
+                        start,
+                    );
+                }
             }
-            let Some((bp, assoc, op)) = binary_op(k) else {
-                break;
-            };
-            if bp < min {
-                break;
-            }
-            self.bump();
-            let rbp = if assoc == Assoc::Right { bp } else { bp + 1 };
-            let (right, rparen) = self.expr_bp_p(rbp)?;
-            if op == BinaryOp::Pipe && !rparen && matches!(right.kind, ExprKind::ArrowFn(_)) {
-                let sp = right.span;
-                self.compile_error(
-                    "Arrow functions on the right hand side of |> must be parenthesized",
-                    sp,
-                );
-            }
-            let span = self.span_from(start);
-            lhs = Expr {
-                kind: ExprKind::Binary {
-                    op,
-                    left: Box::new(lhs),
-                    right: Box::new(right),
-                },
-                span,
-            };
             paren = false;
-            if assoc == Assoc::Non
-                && let Some((bp2, _, _)) = binary_op(self.peek_kind())
-                && bp2 == bp
-            {
-                // Non-associative: `1 == 2 == 3` (observed on PHP 8.5:
-                // "unexpected token "=="").
+        }
+        Ok((lhs, paren))
+    }
+
+    /// A binary operator and its right operand.
+    #[inline(never)]
+    fn binary_rest(
+        &mut self,
+        lhs: Expr<'a>,
+        bp: u8,
+        assoc: Assoc,
+        op: BinaryOp,
+        start: usize,
+    ) -> PResult<Expr<'a>> {
+        self.bump();
+        let rbp = if assoc == Assoc::Right { bp } else { bp + 1 };
+        let (right, rparen) = self.expr_bp_p(rbp)?;
+        if op == BinaryOp::Pipe && !rparen && matches!(right.kind, ExprKind::ArrowFn(_)) {
+            let sp = right.span;
+            self.compile_error(
+                "Arrow functions on the right hand side of |> must be parenthesized",
+                sp,
+            );
+        }
+        let e = self.mk(
+            ExprKind::Binary {
+                op,
+                left: self.alloc(lhs),
+                right: self.alloc(right),
+            },
+            start,
+        );
+        if assoc == Assoc::Non
+            && let Some((bp2, _, _)) = binary_op(self.peek_kind())
+            && bp2 == bp
+        {
+            // Non-associative: `1 == 2 == 3` (observed on PHP 8.5:
+            // "unexpected token "=="").
+            return Err(self.unexpected(&[]));
+        }
+        Ok(e)
+    }
+
+    /// `= value` or `= &value` after an assignable `lhs`.
+    #[inline(never)]
+    fn assign_rest(&mut self, lhs: Expr<'a>, start: usize) -> PResult<Expr<'a>> {
+        self.bump();
+        if matches!(
+            self.peek_kind(),
+            T::AmpFollowedByVarOrVararg | T::AmpNotFollowedByVarOrVararg
+        ) {
+            if !is_variable(&lhs) {
+                // `[$a] = &$b` is not valid PHP syntax.
                 return Err(self.unexpected(&[]));
             }
+            self.bump();
+            // `$a = &$b`: the right side is a variable or `new` (observed
+            // on PHP 8.5: `$a = &$b + 1` is `($a = &$b) + 1`).
+            let value = if self.at(T::New) {
+                let v = self.new_expr()?;
+                if matches!(v.kind, ExprKind::New { args: None, .. }) {
+                    return Err(self.unexpected(&[T::LParen]));
+                }
+                v
+            } else {
+                if !matches!(
+                    self.peek_kind(),
+                    T::Variable
+                        | T::Dollar
+                        | T::String
+                        | T::NameQualified
+                        | T::NameFullyQualified
+                        | T::NameRelative
+                        | T::Static
+                        | T::LParen
+                ) {
+                    return Err(self.unexpected(&[]));
+                }
+                let v = self.expr_bp(BP_POW + 1)?;
+                if !is_variable(&v) {
+                    return Err(self.unexpected(&[]));
+                }
+                v
+            };
+            return Ok(self.mk(
+                ExprKind::AssignRef {
+                    target: self.alloc(lhs),
+                    value: self.alloc(value),
+                },
+                start,
+            ));
         }
-        self.leave();
-        Ok((lhs, paren))
+        let target = self.to_assign_target(lhs);
+        let value = self.expr_bp(BP_ASSIGN)?;
+        Ok(self.mk(
+            ExprKind::Assign {
+                target: self.alloc(target),
+                value: self.alloc(value),
+            },
+            start,
+        ))
+    }
+
+    /// `? then : else` / `?: else` after the condition.
+    #[inline(never)]
+    fn ternary_rest(&mut self, lhs: Expr<'a>, paren: bool, start: usize) -> PResult<Expr<'a>> {
+        self.bump();
+        if let ExprKind::Ternary { then, .. } = &lhs.kind
+            && !paren
+        {
+            let inner_short = then.is_none();
+            let outer_short = self.at(T::Colon);
+            let msg = match (inner_short, outer_short) {
+                (true, true) => None,
+                (false, false) => Some(
+                    "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`",
+                ),
+                (true, false) => Some(
+                    "Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`",
+                ),
+                (false, true) => Some(
+                    "Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`",
+                ),
+            };
+            if let Some(m) = msg {
+                let sp = lhs.span;
+                self.compile_error(m, sp);
+            }
+        }
+        let then = if self.eat(T::Colon) {
+            None
+        } else {
+            let t = self.expr()?;
+            self.expect(T::Colon, &[])?;
+            Some(self.alloc(t))
+        };
+        let else_ = self.expr_bp(BP_TERNARY + 1)?;
+        Ok(self.mk(
+            ExprKind::Ternary {
+                cond: self.alloc(lhs),
+                then,
+                else_: self.alloc(else_),
+            },
+            start,
+        ))
     }
 
     /// `[...]` used as an assignment target becomes a destructuring list.
@@ -418,20 +529,18 @@ impl<'a> Parser<'a> {
         match e.kind {
             ExprKind::Array { items, short: true } => Expr {
                 kind: ExprKind::List {
-                    items: items
-                        .into_iter()
-                        .map(|i| i.map(|it| self.list_item(it)))
-                        .collect(),
+                    items: self.arena.alloc_slice_fill_iter(
+                        items.iter().map(|i| i.map(|it| self.list_item(it))),
+                    ),
                     short: true,
                 },
                 span: e.span,
             },
             ExprKind::List { items, short } => Expr {
                 kind: ExprKind::List {
-                    items: items
-                        .into_iter()
-                        .map(|i| i.map(|it| self.list_item(it)))
-                        .collect(),
+                    items: self.arena.alloc_slice_fill_iter(
+                        items.iter().map(|i| i.map(|it| self.list_item(it))),
+                    ),
                     short,
                 },
                 span: e.span,
@@ -455,207 +564,186 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A prefix operator, a primary expression and its postfix chain. The
-    /// flag tells whether the result is a bare parenthesized expression.
+    /// A prefix keyword construct or a primary expression with its postfix
+    /// chain. The flag tells whether the result is a bare parenthesized
+    /// expression.
+    #[inline(never)]
     fn prefix(&mut self) -> PResult<(Expr<'a>, bool)> {
         let start = self.pos;
-        let t = *self.peek();
-        let unary = |p: &mut Self, op: UnaryOp, bp: u8| -> PResult<(Expr<'a>, bool)> {
-            p.bump();
-            let e = p.expr_bp(bp)?;
-            Ok((
-                p.mk(
-                    ExprKind::Unary {
-                        op,
-                        expr: Box::new(e),
-                    },
-                    start,
-                ),
-                false,
-            ))
+        let e = match self.peek_kind() {
+            T::Variable => {
+                let t = self.bump();
+                let e = self.mk(ExprKind::Variable(&self.text(&t)[1..]), start);
+                if !self.is_postfix_start() {
+                    return Ok((e, false));
+                }
+                self.postfix(e, start)?
+            }
+            T::LParen => return self.paren_expr_primary(),
+            T::Inc | T::Dec => self.pre_inc_dec()?,
+            T::New => self.new_expr()?,
+            T::Clone => return self.clone_expr(),
+            T::Print
+            | T::YieldFrom
+            | T::Throw
+            | T::Include
+            | T::IncludeOnce
+            | T::Require
+            | T::RequireOnce => self.keyword_operand()?,
+            T::Yield => self.yield_expr()?,
+            T::Function | T::Fn => self.closure(start, &[], false)?,
+            T::Attribute => self.attributed_closure()?,
+            T::Static => self.static_prefix()?,
+            T::Match => self.match_expr()?,
+            _ => return self.primary(),
         };
-        match t.kind {
-            T::Bang => unary(self, UnaryOp::Not, BP_NOT),
-            T::Tilde => unary(self, UnaryOp::BitNot, BP_UNARY),
-            T::Minus => unary(self, UnaryOp::Neg, BP_UNARY),
-            T::Plus => unary(self, UnaryOp::Plus, BP_UNARY),
-            T::At => unary(self, UnaryOp::Silence, BP_UNARY),
-            T::IntCast
-            | T::DoubleCast
-            | T::StringCast
-            | T::ArrayCast
-            | T::ObjectCast
-            | T::BoolCast
-            | T::UnsetCast
-            | T::VoidCast => {
-                self.bump();
-                let kind = match t.kind {
-                    T::IntCast => CastKind::Int,
-                    T::DoubleCast => CastKind::Float,
-                    T::StringCast => CastKind::String,
-                    T::ArrayCast => CastKind::Array,
-                    T::ObjectCast => CastKind::Object,
-                    T::BoolCast => CastKind::Bool,
-                    T::UnsetCast => CastKind::Unset,
-                    _ => CastKind::Void,
-                };
-                self.check_cast_spelling(&t);
-                if kind == CastKind::Void {
-                    // `(void)` is a statement, not an expression (PHP 8.5
-                    // RFC "Marking return values as important").
-                    return Err(self.unexpected_at(start));
-                }
-                let e = self.expr_bp(BP_UNARY)?;
-                Ok((
-                    self.mk(
-                        ExprKind::Cast {
-                            kind,
-                            expr: Box::new(e),
-                        },
-                        start,
-                    ),
-                    false,
-                ))
-            }
-            T::Inc | T::Dec => {
-                self.bump();
-                let (e, paren) = self.expr_bp_p(BP_POW + 1)?;
-                if paren {
-                    // `++($a)` (observed on PHP 8.5).
-                    return Err(self.unexpected(&[
-                        T::ObjectOperator,
-                        T::NullsafeObjectOperator,
-                        T::LBracket,
-                    ]));
-                }
-                if !is_variable(&e) {
-                    return Err(self.unexpected(&[]));
-                }
-                let op = if t.kind == T::Inc {
-                    IncDec::PreInc
-                } else {
-                    IncDec::PreDec
-                };
-                Ok((
-                    self.mk(
-                        ExprKind::IncDec {
-                            op,
-                            expr: Box::new(e),
-                        },
-                        start,
-                    ),
-                    false,
-                ))
-            }
-            T::New => Ok((self.new_expr()?, false)),
-            T::Clone => self.clone_expr(),
-            T::Print => {
-                self.bump();
-                let e = self.expr_bp(BP_ASSIGN)?;
-                Ok((self.mk(ExprKind::Print(Box::new(e)), start), false))
-            }
-            T::Yield => {
-                self.bump();
-                if !starts_expr(self.peek_kind()) {
-                    return Ok((
-                        self.mk(
-                            ExprKind::Yield {
-                                key: None,
-                                value: None,
-                            },
-                            start,
-                        ),
-                        false,
-                    ));
-                }
-                let v = self.expr_bp(BP_ASSIGN)?;
-                if self.eat(T::DoubleArrow) {
-                    let value = self.expr_bp(BP_ASSIGN)?;
-                    return Ok((
-                        self.mk(
-                            ExprKind::Yield {
-                                key: Some(Box::new(v)),
-                                value: Some(Box::new(value)),
-                            },
-                            start,
-                        ),
-                        false,
-                    ));
-                }
-                Ok((
-                    self.mk(
-                        ExprKind::Yield {
-                            key: None,
-                            value: Some(Box::new(v)),
-                        },
-                        start,
-                    ),
-                    false,
-                ))
-            }
-            T::YieldFrom => {
-                self.bump();
-                let e = self.expr_bp(BP_ASSIGN)?;
-                Ok((self.mk(ExprKind::YieldFrom(Box::new(e)), start), false))
-            }
-            T::Throw => {
-                self.bump();
-                let e = self.expr_bp(0)?;
-                Ok((self.mk(ExprKind::Throw(Box::new(e)), start), false))
-            }
-            T::Include | T::IncludeOnce | T::Require | T::RequireOnce => {
-                self.bump();
-                let kind = match t.kind {
-                    T::Include => IncludeKind::Include,
-                    T::IncludeOnce => IncludeKind::IncludeOnce,
-                    T::Require => IncludeKind::Require,
-                    _ => IncludeKind::RequireOnce,
-                };
-                let e = self.expr_bp(BP_ASSIGN)?;
-                Ok((
-                    self.mk(
-                        ExprKind::Include {
-                            kind,
-                            expr: Box::new(e),
-                        },
-                        start,
-                    ),
-                    false,
-                ))
-            }
-            T::Function | T::Fn => Ok((self.closure(start, Vec::new(), false)?, false)),
-            T::Attribute => {
-                let attrs = self.attributes()?;
-                if !matches!(self.peek_kind(), T::Function | T::Fn | T::Static) {
-                    return Err(self.unexpected(&[T::Function, T::Fn, T::Static, T::Attribute]));
-                }
-                let is_static = self.eat(T::Static);
-                if !matches!(self.peek_kind(), T::Function | T::Fn) {
-                    return Err(self.unexpected(&[T::Function, T::Fn]));
-                }
-                Ok((self.closure(start, attrs, is_static)?, false))
-            }
-            T::Static => {
-                if matches!(self.peek_at(1), T::Function | T::Fn) {
-                    self.bump();
-                    return Ok((self.closure(start, Vec::new(), true)?, false));
-                }
-                self.bump();
-                if !self.at(T::DoubleColon) {
-                    return Err(self.unexpected(&[T::DoubleColon]));
-                }
-                let base = ClassRef::Static(self.tok_span(&t));
-                let e = self.static_member(base, start)?;
-                Ok((self.postfix(e, start)?, false))
-            }
-            T::Match => Ok((self.match_expr()?, false)),
-            _ => self.primary(),
-        }
+        Ok((e, false))
     }
 
-    fn unexpected_at(&mut self, pos: usize) -> super::ParseError {
-        self.pos = pos;
-        self.unexpected(&[])
+    /// `( expr )` and its postfix chain.
+    #[inline(never)]
+    fn paren_expr_primary(&mut self) -> PResult<(Expr<'a>, bool)> {
+        let start = self.pos;
+        self.bump();
+        let mut e = self.expr()?;
+        self.expect(T::RParen, &[])?;
+        // Keep the parentheses in the span.
+        e.span = self.span_from(start);
+        if !self.is_postfix_start() {
+            return Ok((e, true));
+        }
+        Ok((self.postfix(e, start)?, false))
+    }
+
+    #[inline(never)]
+    fn pre_inc_dec(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        let t = self.bump();
+        let (e, paren) = self.expr_bp_p(BP_POW + 1)?;
+        if paren {
+            // `++($a)` (observed on PHP 8.5).
+            return Err(self.unexpected(&[
+                T::ObjectOperator,
+                T::NullsafeObjectOperator,
+                T::LBracket,
+            ]));
+        }
+        if !is_variable(&e) {
+            return Err(self.unexpected(&[]));
+        }
+        let op = if t.kind == T::Inc {
+            IncDec::PreInc
+        } else {
+            IncDec::PreDec
+        };
+        Ok(self.mk(
+            ExprKind::IncDec {
+                op,
+                expr: self.alloc(e),
+            },
+            start,
+        ))
+    }
+
+    /// `print`, `yield from`, `throw`, `include`/`require` and their
+    /// operand.
+    #[inline(never)]
+    fn keyword_operand(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        let t = self.bump();
+        // `throw` takes the lowest precedence (RFC "throw expression").
+        let bp = if t.kind == T::Throw { 0 } else { BP_ASSIGN };
+        let e = {
+            let v = self.expr_bp(bp)?;
+            self.alloc(v)
+        };
+        let kind = match t.kind {
+            T::Print => ExprKind::Print(e),
+            T::YieldFrom => ExprKind::YieldFrom(e),
+            T::Throw => ExprKind::Throw(e),
+            T::Include => ExprKind::Include {
+                kind: IncludeKind::Include,
+                expr: e,
+            },
+            T::IncludeOnce => ExprKind::Include {
+                kind: IncludeKind::IncludeOnce,
+                expr: e,
+            },
+            T::Require => ExprKind::Include {
+                kind: IncludeKind::Require,
+                expr: e,
+            },
+            _ => ExprKind::Include {
+                kind: IncludeKind::RequireOnce,
+                expr: e,
+            },
+        };
+        Ok(self.mk(kind, start))
+    }
+
+    #[inline(never)]
+    fn yield_expr(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        self.bump();
+        if !starts_expr(self.peek_kind()) {
+            return Ok(self.mk(
+                ExprKind::Yield {
+                    key: None,
+                    value: None,
+                },
+                start,
+            ));
+        }
+        let v = self.expr_bp(BP_ASSIGN)?;
+        if self.eat(T::DoubleArrow) {
+            let value = self.expr_bp(BP_ASSIGN)?;
+            return Ok(self.mk(
+                ExprKind::Yield {
+                    key: Some(self.alloc(v)),
+                    value: Some(self.alloc(value)),
+                },
+                start,
+            ));
+        }
+        Ok(self.mk(
+            ExprKind::Yield {
+                key: None,
+                value: Some(self.alloc(v)),
+            },
+            start,
+        ))
+    }
+
+    /// `#[...] function` / `#[...] fn` / `#[...] static fn`.
+    #[inline(never)]
+    fn attributed_closure(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        let attrs = self.attributes()?;
+        if !matches!(self.peek_kind(), T::Function | T::Fn | T::Static) {
+            return Err(self.unexpected(&[T::Function, T::Fn, T::Static, T::Attribute]));
+        }
+        let is_static = self.eat(T::Static);
+        if !matches!(self.peek_kind(), T::Function | T::Fn) {
+            return Err(self.unexpected(&[T::Function, T::Fn]));
+        }
+        self.closure(start, attrs, is_static)
+    }
+
+    /// `static fn`, `static function` or `static::...`.
+    #[inline(never)]
+    fn static_prefix(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        if matches!(self.peek_at(1), T::Function | T::Fn) {
+            self.bump();
+            return self.closure(start, &[], true);
+        }
+        let t = self.bump();
+        if !self.at(T::DoubleColon) {
+            return Err(self.unexpected(&[T::DoubleColon]));
+        }
+        let base = ClassRef::Static(self.tok_span(&t));
+        let e = self.static_member(base, start)?;
+        self.postfix(e, start)
     }
 
     /// Non-canonical cast spellings are deprecated in PHP 8.5 (observed on
@@ -663,123 +751,36 @@ impl<'a> Parser<'a> {
     /// cast instead").
     pub(crate) fn check_cast_spelling(&mut self, t: &Token) {
         let text = self.text(t);
-        let inner: Vec<u8> = text[1..text.len() - 1]
-            .iter()
-            .filter(|c| !matches!(c, b' ' | b'\t'))
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        let canon = match &inner[..] {
-            b"integer" => "int",
-            b"boolean" => "bool",
-            b"double" => "float",
-            b"binary" => "string",
-            _ => return,
+        let inner = text[1..text.len() - 1].trim_ascii();
+        let canon = if inner.eq_ignore_ascii_case(b"integer") {
+            "int"
+        } else if inner.eq_ignore_ascii_case(b"boolean") {
+            "bool"
+        } else if inner.eq_ignore_ascii_case(b"double") {
+            "float"
+        } else if inner.eq_ignore_ascii_case(b"binary") {
+            "string"
+        } else {
+            return;
         };
         let msg = format!(
             "Non-canonical cast ({}) is deprecated, use the ({}) cast instead",
-            String::from_utf8_lossy(&text[1..text.len() - 1]).trim_matches([' ', '\t']),
+            String::from_utf8_lossy(inner),
             canon
         );
         self.notice(NoticeKind::Deprecated, msg, t.line);
     }
 
     /// Primary expressions and their postfix chains.
+    #[inline(never)]
     fn primary(&mut self) -> PResult<(Expr<'a>, bool)> {
         let start = self.pos;
         let t = *self.peek();
         let e = match t.kind {
-            T::Variable => {
-                self.bump();
-                let name = &self.text(&t)[1..];
-                self.mk(ExprKind::Variable(name), start)
-            }
             T::Dollar => self.var_var()?,
-            T::LParen => {
-                self.bump();
-                let inner = self.expr()?;
-                self.expect(T::RParen, &[])?;
-                if !self.is_postfix_start() {
-                    // Keep the parentheses in the span.
-                    let mut e = inner;
-                    e.span = self.span_from(start);
-                    return Ok((e, true));
-                }
-                let mut e = inner;
-                e.span = self.span_from(start);
-                e
-            }
-            T::LBracket => {
-                self.bump();
-                let items = self.array_items(T::RBracket)?;
-                self.mk(ExprKind::Array { items, short: true }, start)
-            }
-            T::Array => {
-                self.bump();
-                self.expect1(T::LParen)?;
-                let items = self.array_items(T::RParen)?;
-                self.mk(
-                    ExprKind::Array {
-                        items,
-                        short: false,
-                    },
-                    start,
-                )
-            }
-            T::List => {
-                self.bump();
-                self.expect1(T::LParen)?;
-                let items = self.array_items(T::RParen)?;
-                let e = self.mk(
-                    ExprKind::List {
-                        items,
-                        short: false,
-                    },
-                    start,
-                );
-                if self.list_ok == 0 && !self.at(T::Eq) {
-                    return Err(self.unexpected(&[T::Eq]));
-                }
-                return Ok((e, false));
-            }
-            T::Isset => {
-                self.bump();
-                self.expect1(T::LParen)?;
-                let mut vars = Vec::new();
-                loop {
-                    vars.push(self.expr()?);
-                    if self.eat(T::Comma) {
-                        if !starts_expr(self.peek_kind()) {
-                            break;
-                        }
-                        continue;
-                    }
-                    break;
-                }
-                self.expect1(T::RParen)?;
-                return Ok((self.mk(ExprKind::Isset(vars), start), false));
-            }
-            T::Empty => {
-                self.bump();
-                self.expect1(T::LParen)?;
-                let e = self.expr()?;
-                self.expect(T::RParen, &[])?;
-                return Ok((self.mk(ExprKind::Empty(Box::new(e)), start), false));
-            }
-            T::Eval => {
-                self.bump();
-                self.expect1(T::LParen)?;
-                let e = self.expr()?;
-                self.expect(T::RParen, &[])?;
-                return Ok((self.mk(ExprKind::Eval(Box::new(e)), start), false));
-            }
-            T::Exit => {
-                self.bump();
-                let args = if self.at(T::LParen) {
-                    Some(self.arguments()?)
-                } else {
-                    None
-                };
-                return Ok((self.mk(ExprKind::Exit(args), start), false));
+            T::LBracket | T::Array | T::List => return self.array_literal(),
+            T::Isset | T::Empty | T::Eval | T::Exit => {
+                return Ok((self.builtin_construct()?, false));
             }
             T::LNumber | T::DNumber => {
                 self.bump();
@@ -794,23 +795,12 @@ impl<'a> Parser<'a> {
                 let kind = self.constant_string(&t);
                 self.mk(kind, start)
             }
-            T::DoubleQuote => {
-                self.bump();
-                let parts = self.interp_parts(T::DoubleQuote, Quote::Double, 0)?;
-                self.expect1(T::DoubleQuote)?;
-                let kind = parts_to_kind(parts, StrKind::DoubleQuoted);
-                self.mk(kind, start)
-            }
-            T::StartHeredoc => {
-                let e = self.heredoc()?;
-                return Ok((e, false));
-            }
-            T::Backtick => {
-                self.bump();
-                let parts = self.interp_parts(T::Backtick, Quote::Backtick, 0)?;
-                self.expect1(T::Backtick)?;
-                let e = self.mk(ExprKind::ShellExec(parts), start);
-                return Ok((e, false));
+            T::DoubleQuote | T::StartHeredoc | T::Backtick => {
+                let e = self.interpolated()?;
+                if t.kind != T::DoubleQuote {
+                    return Ok((e, false));
+                }
+                e
             }
             T::Line
             | T::File
@@ -861,8 +851,115 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(self.unexpected(&[])),
         };
+        if !self.is_postfix_start() {
+            return Ok((e, false));
+        }
         let e = self.postfix(e, start)?;
         Ok((e, false))
+    }
+
+    /// `[...]`, `array(...)`, `list(...)`.
+    #[inline(never)]
+    fn array_literal(&mut self) -> PResult<(Expr<'a>, bool)> {
+        let start = self.pos;
+        let t = self.bump();
+        let close = if t.kind == T::LBracket {
+            T::RBracket
+        } else {
+            self.expect1(T::LParen)?;
+            T::RParen
+        };
+        let items = self.array_items(close)?;
+        if t.kind == T::List {
+            let e = self.mk(
+                ExprKind::List {
+                    items,
+                    short: false,
+                },
+                start,
+            );
+            if self.list_ok == 0 && !self.at(T::Eq) {
+                return Err(self.unexpected(&[T::Eq]));
+            }
+            return Ok((e, false));
+        }
+        let e = self.mk(
+            ExprKind::Array {
+                items,
+                short: t.kind == T::LBracket,
+            },
+            start,
+        );
+        Ok((self.postfix(e, start)?, false))
+    }
+
+    /// `isset(...)`, `empty(...)`, `eval(...)`, `exit` / `die`.
+    #[inline(never)]
+    fn builtin_construct(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        let t = self.bump();
+        match t.kind {
+            T::Exit => {
+                let args = if self.at(T::LParen) {
+                    Some(self.arguments()?)
+                } else {
+                    None
+                };
+                Ok(self.mk(ExprKind::Exit(args), start))
+            }
+            T::Isset => {
+                self.expect1(T::LParen)?;
+                let mut vars = self.bvec();
+                loop {
+                    vars.push(self.expr()?);
+                    if self.eat(T::Comma) {
+                        if !starts_expr(self.peek_kind()) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                self.expect1(T::RParen)?;
+                Ok(self.mk(ExprKind::Isset(vars.into_bump_slice()), start))
+            }
+            _ => {
+                self.expect1(T::LParen)?;
+                let e = {
+                    let v = self.expr()?;
+                    self.alloc(v)
+                };
+                self.expect(T::RParen, &[])?;
+                let kind = if t.kind == T::Empty {
+                    ExprKind::Empty(e)
+                } else {
+                    ExprKind::Eval(e)
+                };
+                Ok(self.mk(kind, start))
+            }
+        }
+    }
+
+    /// `"..."` with interpolation, heredocs, backticks.
+    #[inline(never)]
+    fn interpolated(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        match self.peek_kind() {
+            T::StartHeredoc => self.heredoc(),
+            T::Backtick => {
+                self.bump();
+                let parts = self.interp_parts(T::Backtick, Quote::Backtick, 0)?;
+                self.expect1(T::Backtick)?;
+                Ok(self.mk(ExprKind::ShellExec(parts.into_bump_slice()), start))
+            }
+            _ => {
+                self.bump();
+                let parts = self.interp_parts(T::DoubleQuote, Quote::Double, 0)?;
+                self.expect1(T::DoubleQuote)?;
+                let kind = self.parts_to_kind(parts, StrKind::DoubleQuoted);
+                Ok(self.mk(kind, start))
+            }
+        }
     }
 
     fn is_postfix_start(&self) -> bool {
@@ -892,6 +989,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `$$a`, `${expr}`.
+    #[inline(never)]
     pub(crate) fn var_var(&mut self) -> PResult<Expr<'a>> {
         let start = self.pos;
         self.bump(); // $
@@ -913,7 +1011,7 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(self.unexpected(&[T::Variable, T::LBrace, T::Dollar])),
         };
-        Ok(self.mk(ExprKind::VariableVariable(Box::new(inner)), start))
+        Ok(self.mk(ExprKind::VariableVariable(self.alloc(inner)), start))
     }
 
     /// The postfix chain: `[...]`, `->`, `?->`, `::`, `(...)`.
@@ -925,12 +1023,15 @@ impl<'a> Parser<'a> {
                     let index = if self.at(T::RBracket) {
                         None
                     } else {
-                        Some(Box::new(self.expr()?))
+                        Some({
+                            let v = self.expr()?;
+                            self.alloc(v)
+                        })
                     };
                     self.expect1(T::RBracket)?;
                     e = self.mk(
                         ExprKind::Index {
-                            base: Box::new(e),
+                            base: self.alloc(e),
                             index,
                         },
                         start,
@@ -943,7 +1044,7 @@ impl<'a> Parser<'a> {
                         let args = self.arguments()?;
                         e = self.mk(
                             ExprKind::MethodCall {
-                                obj: Box::new(e),
+                                obj: self.alloc(e),
                                 name,
                                 args,
                                 nullsafe,
@@ -953,7 +1054,7 @@ impl<'a> Parser<'a> {
                     } else {
                         e = self.mk(
                             ExprKind::Prop {
-                                obj: Box::new(e),
+                                obj: self.alloc(e),
                                 name,
                                 nullsafe,
                             },
@@ -964,7 +1065,7 @@ impl<'a> Parser<'a> {
                 T::DoubleColon => {
                     let cls = match e.kind {
                         ExprKind::Const(n) => ClassRef::Name(n),
-                        kind => ClassRef::Expr(Box::new(Expr { kind, span: e.span })),
+                        kind => ClassRef::Expr(self.alloc(Expr { kind, span: e.span })),
                     };
                     e = self.static_member(cls, start)?;
                 }
@@ -974,7 +1075,7 @@ impl<'a> Parser<'a> {
                         ExprKind::Const(name) => self.mk(ExprKind::Call { name, args }, start),
                         kind => self.mk(
                             ExprKind::CallExpr {
-                                callee: Box::new(Expr { kind, span: e.span }),
+                                callee: self.alloc(Expr { kind, span: e.span }),
                                 args,
                             },
                             start,
@@ -999,7 +1100,7 @@ impl<'a> Parser<'a> {
             }
             T::Variable => {
                 self.bump();
-                Ok(MemberName::Expr(Box::new(Expr {
+                Ok(MemberName::Expr(self.alloc(Expr {
                     kind: ExprKind::Variable(&self.text(&t)[1..]),
                     span: self.tok_span(&t),
                 })))
@@ -1008,14 +1109,18 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let e = self.expr()?;
                 self.expect(T::RBrace, &[])?;
-                Ok(MemberName::Expr(Box::new(e)))
+                Ok(MemberName::Expr(self.alloc(e)))
             }
-            T::Dollar => Ok(MemberName::Expr(Box::new(self.var_var()?))),
+            T::Dollar => Ok(MemberName::Expr({
+                let v = self.var_var()?;
+                self.alloc(v)
+            })),
             _ => Err(self.unexpected(&[T::String, T::Variable, T::LBrace, T::Dollar])),
         }
     }
 
     /// `X::...` after the class part; `::` is the current token.
+    #[inline(never)]
     fn static_member(&mut self, class: ClassRef<'a>, start: usize) -> PResult<Expr<'a>> {
         self.expect1(T::DoubleColon)?;
         let t = *self.peek();
@@ -1029,17 +1134,20 @@ impl<'a> Parser<'a> {
                 if self.at(T::LParen) {
                     // `A::$m()`: method named by a variable.
                     let args = self.arguments()?;
-                    let name = MemberName::Expr(Box::new(Expr {
+                    let name = MemberName::Expr(self.alloc(Expr {
                         kind: ExprKind::Variable(ident.name),
                         span: ident.span,
                     }));
-                    return Ok(self.mk(ExprKind::StaticCall { class, name, args }, start));
+                    return Ok(self.mk(
+                        ExprKind::StaticCall(self.alloc(StaticCallNode { class, name, args })),
+                        start,
+                    ));
                 }
                 Ok(self.mk(
-                    ExprKind::StaticProp {
+                    ExprKind::StaticProp(self.alloc(StaticPropNode {
                         class,
                         name: StaticPropName::Ident(ident),
-                    },
+                    })),
                     start,
                 ))
             }
@@ -1050,17 +1158,20 @@ impl<'a> Parser<'a> {
                 };
                 if self.at(T::LParen) {
                     let args = self.arguments()?;
-                    let name = MemberName::Expr(Box::new(Expr {
+                    let name = MemberName::Expr(self.alloc(Expr {
                         kind: ExprKind::VariableVariable(inner),
                         span: vv.span,
                     }));
-                    return Ok(self.mk(ExprKind::StaticCall { class, name, args }, start));
+                    return Ok(self.mk(
+                        ExprKind::StaticCall(self.alloc(StaticCallNode { class, name, args })),
+                        start,
+                    ));
                 }
                 Ok(self.mk(
-                    ExprKind::StaticProp {
+                    ExprKind::StaticProp(self.alloc(StaticPropNode {
                         class,
                         name: StaticPropName::Expr(inner),
-                    },
+                    })),
                     start,
                 ))
             }
@@ -1068,12 +1179,18 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let e = self.expr()?;
                 self.expect(T::RBrace, &[])?;
-                let name = MemberName::Expr(Box::new(e));
+                let name = MemberName::Expr(self.alloc(e));
                 if self.at(T::LParen) {
                     let args = self.arguments()?;
-                    return Ok(self.mk(ExprKind::StaticCall { class, name, args }, start));
+                    return Ok(self.mk(
+                        ExprKind::StaticCall(self.alloc(StaticCallNode { class, name, args })),
+                        start,
+                    ));
                 }
-                Ok(self.mk(ExprKind::ClassConst { class, name }, start))
+                Ok(self.mk(
+                    ExprKind::ClassConst(self.alloc(ClassConstNode { class, name })),
+                    start,
+                ))
             }
             k if k == T::String || k.is_semi_reserved() => {
                 self.bump();
@@ -1081,9 +1198,15 @@ impl<'a> Parser<'a> {
                 let name = MemberName::Ident(ident);
                 if self.at(T::LParen) {
                     let args = self.arguments()?;
-                    return Ok(self.mk(ExprKind::StaticCall { class, name, args }, start));
+                    return Ok(self.mk(
+                        ExprKind::StaticCall(self.alloc(StaticCallNode { class, name, args })),
+                        start,
+                    ));
                 }
-                Ok(self.mk(ExprKind::ClassConst { class, name }, start))
+                Ok(self.mk(
+                    ExprKind::ClassConst(self.alloc(ClassConstNode { class, name })),
+                    start,
+                ))
             }
             _ => Err(self.unexpected(&[])),
         }
@@ -1109,7 +1232,7 @@ impl<'a> Parser<'a> {
             self.bump();
             return Ok(Args::FirstClassCallable);
         }
-        let mut args = Vec::new();
+        let mut args = self.bvec();
         let mut first = true;
         while !self.at(T::RParen) {
             if !first
@@ -1128,7 +1251,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect1(T::RParen)?;
-        Ok(Args::List(args))
+        Ok(Args::List(args.into_bump_slice()))
     }
 
     /// One call argument: `expr`, `...expr` or `name: expr`.
@@ -1197,15 +1320,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Array or list items up to `close` (consumed).
-    pub(crate) fn array_items(&mut self, close: T) -> PResult<Vec<Option<ArrayItem<'a>>>> {
+    pub(crate) fn array_items(&mut self, close: T) -> PResult<&'a [Option<ArrayItem<'a>>]> {
         self.list_ok += 1;
         let r = self.array_items_inner(close);
         self.list_ok -= 1;
         r
     }
 
-    fn array_items_inner(&mut self, close: T) -> PResult<Vec<Option<ArrayItem<'a>>>> {
-        let mut items = Vec::new();
+    fn array_items_inner(&mut self, close: T) -> PResult<&'a [Option<ArrayItem<'a>>]> {
+        let mut items = self.bvec();
         loop {
             if self.at(close) {
                 break;
@@ -1274,7 +1397,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect1(close)?;
-        Ok(items)
+        Ok(items.into_bump_slice())
     }
 
     pub(crate) fn eat_amp(&mut self) -> bool {
@@ -1290,13 +1413,14 @@ impl<'a> Parser<'a> {
     }
 
     /// `new ...`
+    #[inline(never)]
     fn new_expr(&mut self) -> PResult<Expr<'a>> {
         let start = self.pos;
         self.bump(); // new
         let attrs = if self.at(T::Attribute) {
             self.attributes()?
         } else {
-            Vec::new()
+            &[]
         };
         let mut mods = Modifiers::default();
         while matches!(self.peek_kind(), T::Readonly | T::Final | T::Abstract)
@@ -1317,7 +1441,7 @@ impl<'a> Parser<'a> {
             let decl = self.class_body_decl(cstart, ClassKind::Class, None, attrs, mods, doc)?;
             let e = self.mk(
                 ExprKind::New {
-                    class: NewClass::Anonymous(Box::new(decl)),
+                    class: NewClass::Anonymous(self.alloc(decl)),
                     args,
                 },
                 start,
@@ -1365,6 +1489,7 @@ impl<'a> Parser<'a> {
     /// The class part of `new X` or `instanceof X`: a name, `static`, a
     /// variable with property / static property / index accesses, or
     /// `(expr)`.
+    #[inline(never)]
     pub(crate) fn class_name_reference(&mut self, instanceof: bool) -> PResult<ClassRef<'a>> {
         let t = *self.peek();
         match t.kind {
@@ -1388,7 +1513,7 @@ impl<'a> Parser<'a> {
                         },
                         start,
                     )?;
-                    return Ok(ClassRef::Expr(Box::new(e)));
+                    return Ok(ClassRef::Expr(self.alloc(e)));
                 }
                 Ok(ClassRef::Name(name))
             }
@@ -1408,7 +1533,7 @@ impl<'a> Parser<'a> {
                         },
                         start,
                     )?;
-                    return Ok(ClassRef::Expr(Box::new(e)));
+                    return Ok(ClassRef::Expr(self.alloc(e)));
                 }
                 Ok(ClassRef::Static(sp))
             }
@@ -1416,7 +1541,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let e = self.expr()?;
                 self.expect(T::RParen, &[])?;
-                Ok(ClassRef::Expr(Box::new(e)))
+                Ok(ClassRef::Expr(self.alloc(e)))
             }
             T::Variable | T::Dollar => {
                 let start = self.pos;
@@ -1427,7 +1552,7 @@ impl<'a> Parser<'a> {
                     self.var_var()?
                 };
                 let e = self.new_variable_tail(base, start)?;
-                Ok(ClassRef::Expr(Box::new(e)))
+                Ok(ClassRef::Expr(self.alloc(e)))
             }
             _ => Err(self.unexpected(&[])),
         }
@@ -1443,12 +1568,15 @@ impl<'a> Parser<'a> {
                     let index = if self.at(T::RBracket) {
                         None
                     } else {
-                        Some(Box::new(self.expr()?))
+                        Some({
+                            let v = self.expr()?;
+                            self.alloc(v)
+                        })
                     };
                     self.expect1(T::RBracket)?;
                     e = self.mk(
                         ExprKind::Index {
-                            base: Box::new(e),
+                            base: self.alloc(e),
                             index,
                         },
                         start,
@@ -1459,7 +1587,7 @@ impl<'a> Parser<'a> {
                     let name = self.member_name()?;
                     e = self.mk(
                         ExprKind::Prop {
-                            obj: Box::new(e),
+                            obj: self.alloc(e),
                             name,
                             nullsafe,
                         },
@@ -1476,7 +1604,7 @@ impl<'a> Parser<'a> {
                                 ClassRef::Name(n)
                             }
                         }
-                        kind => ClassRef::Expr(Box::new(Expr { kind, span: e.span })),
+                        kind => ClassRef::Expr(self.alloc(Expr { kind, span: e.span })),
                     };
                     let name = if self.at(T::Variable) {
                         let t = self.bump();
@@ -1491,7 +1619,10 @@ impl<'a> Parser<'a> {
                         };
                         StaticPropName::Expr(inner)
                     };
-                    e = self.mk(ExprKind::StaticProp { class, name }, start);
+                    e = self.mk(
+                        ExprKind::StaticProp(self.alloc(StaticPropNode { class, name })),
+                        start,
+                    );
                 }
                 _ => return Ok(e),
             }
@@ -1501,6 +1632,7 @@ impl<'a> Parser<'a> {
     /// `clone $x` or PHP 8.5's `clone($x, [...])` / `clone(...)` (RFC
     /// "Clone with v2"; observed on PHP 8.5: `clone($a)->b` clones `$a`'s
     /// property, `clone($a, [1])->b` is a syntax error).
+    #[inline(never)]
     fn clone_expr(&mut self) -> PResult<(Expr<'a>, bool)> {
         let start = self.pos;
         self.bump();
@@ -1509,7 +1641,7 @@ impl<'a> Parser<'a> {
             return Ok((
                 self.mk(
                     ExprKind::Clone {
-                        expr: Some(Box::new(e)),
+                        expr: Some(self.alloc(e)),
                         args: None,
                     },
                     start,
@@ -1533,7 +1665,7 @@ impl<'a> Parser<'a> {
                 return Ok((
                     self.mk(
                         ExprKind::Clone {
-                            expr: Some(Box::new(operand)),
+                            expr: Some(self.alloc(operand)),
                             args: None,
                         },
                         start,
@@ -1568,7 +1700,7 @@ impl<'a> Parser<'a> {
                 self.mk(
                     ExprKind::Clone {
                         expr: None,
-                        args: Some(Args::List(args)),
+                        args: Some(Args::List(self.arena.alloc_slice_fill_iter(args))),
                     },
                     start,
                 ),
@@ -1589,6 +1721,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `match (x) { ... }`
+    #[inline(never)]
     fn match_expr(&mut self) -> PResult<Expr<'a>> {
         let start = self.pos;
         self.bump();
@@ -1596,7 +1729,7 @@ impl<'a> Parser<'a> {
         let subject = self.expr()?;
         self.expect(T::RParen, &[])?;
         self.expect1(T::LBrace)?;
-        let mut arms = Vec::new();
+        let mut arms = self.bvec();
         while !self.at(T::RBrace) {
             if !starts_expr(self.peek_kind()) && !self.at(T::Default) {
                 return Err(self.unexpected(&[T::RBrace]));
@@ -1607,7 +1740,7 @@ impl<'a> Parser<'a> {
                 self.eat(T::Comma);
                 None
             } else {
-                let mut conds = Vec::new();
+                let mut conds = self.bvec();
                 loop {
                     conds.push(self.expr()?);
                     if self.eat(T::Comma) {
@@ -1623,7 +1756,7 @@ impl<'a> Parser<'a> {
             self.expect1(T::DoubleArrow)?;
             let body = self.expr()?;
             arms.push(MatchArm {
-                conds,
+                conds: conds.map(|c| c.into_bump_slice()),
                 body,
                 span: self.span_from(astart),
             });
@@ -1634,8 +1767,8 @@ impl<'a> Parser<'a> {
         self.expect1(T::RBrace)?;
         Ok(self.mk(
             ExprKind::Match {
-                subject: Box::new(subject),
-                arms,
+                subject: self.alloc(subject),
+                arms: arms.into_bump_slice(),
             },
             start,
         ))
@@ -1643,10 +1776,11 @@ impl<'a> Parser<'a> {
 
     /// `function (...) use (...) {}` or `fn (...) => expr`, at the
     /// `function` / `fn` token.
+    #[inline(never)]
     fn closure(
         &mut self,
         start: usize,
-        attrs: Vec<AttributeGroup<'a>>,
+        attrs: &'a [AttributeGroup<'a>],
         is_static: bool,
     ) -> PResult<Expr<'a>> {
         let doc_comment = self.doc_comment_before(start);
@@ -1665,19 +1799,19 @@ impl<'a> Parser<'a> {
             self.expect1(T::DoubleArrow)?;
             let body = self.expr_bp(0)?;
             return Ok(self.mk(
-                ExprKind::ArrowFn(Box::new(ArrowFn {
+                ExprKind::ArrowFn(self.alloc(ArrowFn {
                     attrs,
                     is_static,
                     by_ref,
                     params,
                     ret,
-                    body: Box::new(body),
+                    body: self.alloc(body),
                     doc_comment,
                 })),
                 start,
             ));
         }
-        let mut uses = Vec::new();
+        let mut uses = self.bvec();
         if self.eat(T::Use) {
             self.expect1(T::LParen)?;
             loop {
@@ -1715,12 +1849,12 @@ impl<'a> Parser<'a> {
         }
         let body = self.block_body()?;
         Ok(self.mk(
-            ExprKind::Closure(Box::new(Closure {
+            ExprKind::Closure(self.alloc(Closure {
                 attrs,
                 is_static,
                 by_ref,
                 params,
-                uses,
+                uses: uses.into_bump_slice(),
                 ret,
                 body,
                 doc_comment,
@@ -1731,6 +1865,16 @@ impl<'a> Parser<'a> {
 
     // ----- strings -----
 
+    /// A decoded string in the arena (borrowed text stays in the source).
+    #[inline]
+    fn intern(&self, c: Cow<'a, [u8]>) -> &'a [u8] {
+        match c {
+            Cow::Borrowed(b) => b,
+            Cow::Owned(v) => self.bytes(&v),
+        }
+    }
+
+    #[inline(never)]
     fn constant_string(&mut self, t: &Token) -> ExprKind<'a> {
         let text = self.text(t);
         let body = if t.flags & TF_BINARY_PREFIX != 0 {
@@ -1744,146 +1888,68 @@ impl<'a> Parser<'a> {
             for w in d.warnings {
                 self.notice(NoticeKind::Warning, w, t.line);
             }
-            ExprKind::String(d.bytes, StrKind::DoubleQuoted)
+            ExprKind::String(self.intern(d.bytes), StrKind::DoubleQuoted)
         } else {
-            ExprKind::String(strings::unescape_single(inner), StrKind::SingleQuoted)
+            ExprKind::String(
+                self.intern(strings::unescape_single(inner)),
+                StrKind::SingleQuoted,
+            )
         }
+    }
+
+    /// A literal part of an interpolated string: heredoc indentation
+    /// removed, then escapes decoded.
+    fn literal_part(&mut self, t: &Token, q: Quote, indent: usize) -> &'a [u8] {
+        let raw = self.text(t);
+        let at_ls = t.start > 0 && matches!(self.src[t.start as usize - 1], b'\n' | b'\r');
+        let text = if indent > 0 {
+            strings::remove_indent(raw, indent, at_ls)
+        } else {
+            Cow::Borrowed(raw)
+        };
+        let decoded: Cow<'a, [u8]> = match text {
+            Cow::Borrowed(b) => {
+                let d = strings::unescape_double(b, q);
+                for w in d.warnings {
+                    self.notice(NoticeKind::Warning, w, t.line);
+                }
+                d.bytes
+            }
+            Cow::Owned(v) => {
+                let d = strings::unescape_double(&v, q);
+                for w in d.warnings {
+                    self.notice(NoticeKind::Warning, w, t.line);
+                }
+                Cow::Owned(d.bytes.into_owned())
+            }
+        };
+        self.intern(decoded)
     }
 
     /// Parts of an interpolated string up to `close` (not consumed).
     /// `indent`: heredoc closing-marker indentation to strip.
-    fn interp_parts(&mut self, close: T, q: Quote, indent: usize) -> PResult<Vec<StrPart<'a>>> {
-        let mut parts = Vec::new();
+    #[inline(never)]
+    fn interp_parts(
+        &mut self,
+        close: T,
+        q: Quote,
+        indent: usize,
+    ) -> PResult<BVec<'a, StrPart<'a>>> {
+        let mut parts = self.bvec();
         loop {
             let t = *self.peek();
             match t.kind {
                 T::EncapsedAndWhitespace => {
                     self.bump();
-                    let raw = self.text(&t);
-                    let text = if indent > 0 {
-                        let at_ls =
-                            t.start > 0 && matches!(self.src[t.start as usize - 1], b'\n' | b'\r');
-                        strings::remove_indent(raw, indent, at_ls)
-                    } else {
-                        Cow::Borrowed(raw)
-                    };
-                    let decoded = match text {
-                        Cow::Borrowed(b) => {
-                            let d = strings::unescape_double(b, q);
-                            for w in d.warnings {
-                                self.notice(NoticeKind::Warning, w, t.line);
-                            }
-                            d.bytes
-                        }
-                        Cow::Owned(v) => {
-                            let d = strings::unescape_double(&v, q);
-                            for w in d.warnings {
-                                self.notice(NoticeKind::Warning, w, t.line);
-                            }
-                            Cow::Owned(d.bytes.into_owned())
-                        }
-                    };
-                    parts.push(StrPart::Lit(decoded));
+                    let s = self.literal_part(&t, q, indent);
+                    parts.push(StrPart::Lit(s));
                 }
                 T::Variable => {
-                    let start = self.pos;
-                    self.bump();
-                    let mut e = self.mk(ExprKind::Variable(&self.text(&t)[1..]), start);
-                    match self.peek_kind() {
-                        T::LBracket => {
-                            self.bump();
-                            let it = *self.peek();
-                            let index = match it.kind {
-                                T::String => {
-                                    self.bump();
-                                    self.mk(
-                                        ExprKind::String(
-                                            Cow::Borrowed(self.text(&it)),
-                                            StrKind::SingleQuoted,
-                                        ),
-                                        start + 2,
-                                    )
-                                }
-                                T::NumString => {
-                                    self.bump();
-                                    let k = num_string_key(self.text(&it), false);
-                                    self.mk(k, start + 2)
-                                }
-                                T::Minus => {
-                                    self.bump();
-                                    let nt = self.expect1(T::NumString)?;
-                                    let k = num_string_key(self.text(&nt), true);
-                                    self.mk(k, start + 2)
-                                }
-                                T::Variable => {
-                                    self.bump();
-                                    self.mk(ExprKind::Variable(&self.text(&it)[1..]), start + 2)
-                                }
-                                _ => {
-                                    return Err(self.unexpected(&[
-                                        T::Minus,
-                                        T::String,
-                                        T::Variable,
-                                        T::NumString,
-                                    ]));
-                                }
-                            };
-                            self.expect1(T::RBracket)?;
-                            e = self.mk(
-                                ExprKind::Index {
-                                    base: Box::new(e),
-                                    index: Some(Box::new(index)),
-                                },
-                                start,
-                            );
-                        }
-                        T::ObjectOperator | T::NullsafeObjectOperator => {
-                            let nullsafe = self.bump().kind == T::NullsafeObjectOperator;
-                            let nt = self.expect1(T::String)?;
-                            let name = MemberName::Ident(Ident {
-                                name: self.text(&nt),
-                                span: self.tok_span(&nt),
-                            });
-                            e = self.mk(
-                                ExprKind::Prop {
-                                    obj: Box::new(e),
-                                    name,
-                                    nullsafe,
-                                },
-                                start,
-                            );
-                        }
-                        _ => {}
-                    }
+                    let e = self.simple_interpolation()?;
                     parts.push(StrPart::Expr(e));
                 }
                 T::DollarOpenCurlyBraces => {
-                    let start = self.pos;
-                    self.bump();
-                    let e = if self.at(T::StringVarname) {
-                        let nt = self.bump();
-                        let var = self.mk(ExprKind::Variable(self.text(&nt)), start);
-                        if self.eat(T::LBracket) {
-                            let idx = self.expr()?;
-                            self.expect(T::RBracket, &[])?;
-                            self.expect1(T::RBrace)?;
-                            self.mk(
-                                ExprKind::Index {
-                                    base: Box::new(var),
-                                    index: Some(Box::new(idx)),
-                                },
-                                start,
-                            )
-                        } else {
-                            self.expect1(T::RBrace)?;
-                            var
-                        }
-                    } else {
-                        let inner = self.expr()?;
-                        self.expect(T::RBrace, &[])?;
-                        self.mk(ExprKind::VariableVariable(Box::new(inner)), start)
-                    };
-                    self.deprecated_dollar_brace(&t);
+                    let e = self.dollar_brace_interpolation()?;
                     parts.push(StrPart::Expr(e));
                 }
                 T::CurlyOpen => {
@@ -1930,12 +1996,118 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `"${var}"` is deprecated (PHP 8.2 RFC "Deprecate ${} string
-    /// interpolation").
-    fn deprecated_dollar_brace(&mut self, t: &Token) {
-        let _ = t;
+    /// `$a`, `$a[...]`, `$a->b` inside a string.
+    fn simple_interpolation(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        let t = self.bump();
+        let e = self.mk(ExprKind::Variable(&self.text(&t)[1..]), start);
+        match self.peek_kind() {
+            T::LBracket => {
+                self.bump();
+                let it = *self.peek();
+                let index = match it.kind {
+                    T::String => {
+                        self.bump();
+                        self.mk(
+                            ExprKind::String(self.text(&it), StrKind::SingleQuoted),
+                            start + 2,
+                        )
+                    }
+                    T::NumString => {
+                        self.bump();
+                        let k = self.num_string_key(self.text(&it), false);
+                        self.mk(k, start + 2)
+                    }
+                    T::Minus => {
+                        self.bump();
+                        let nt = self.expect1(T::NumString)?;
+                        let k = self.num_string_key(self.text(&nt), true);
+                        self.mk(k, start + 2)
+                    }
+                    T::Variable => {
+                        self.bump();
+                        self.mk(ExprKind::Variable(&self.text(&it)[1..]), start + 2)
+                    }
+                    _ => {
+                        return Err(self.unexpected(&[
+                            T::Minus,
+                            T::String,
+                            T::Variable,
+                            T::NumString,
+                        ]));
+                    }
+                };
+                self.expect1(T::RBracket)?;
+                Ok(self.mk(
+                    ExprKind::Index {
+                        base: self.alloc(e),
+                        index: Some(self.alloc(index)),
+                    },
+                    start,
+                ))
+            }
+            T::ObjectOperator | T::NullsafeObjectOperator => {
+                let nullsafe = self.bump().kind == T::NullsafeObjectOperator;
+                let nt = self.expect1(T::String)?;
+                let name = MemberName::Ident(Ident {
+                    name: self.text(&nt),
+                    span: self.tok_span(&nt),
+                });
+                Ok(self.mk(
+                    ExprKind::Prop {
+                        obj: self.alloc(e),
+                        name,
+                        nullsafe,
+                    },
+                    start,
+                ))
+            }
+            _ => Ok(e),
+        }
     }
 
+    /// `${name}`, `${name[expr]}`, `${expr}` inside a string (deprecated
+    /// since PHP 8.2, RFC "Deprecate ${} string interpolation").
+    fn dollar_brace_interpolation(&mut self) -> PResult<Expr<'a>> {
+        let start = self.pos;
+        // Observed on PHP 8.5: the deprecation is reported on the line of
+        // the token before `${`.
+        let line = self.toks[start.saturating_sub(1)].line;
+        self.bump();
+        if self.at(T::StringVarname) {
+            self.notice(
+                NoticeKind::Deprecated,
+                "Using ${var} in strings is deprecated, use {$var} instead",
+                line,
+            );
+            let nt = self.bump();
+            let var = self.mk(ExprKind::Variable(self.text(&nt)), start);
+            if self.eat(T::LBracket) {
+                let idx = self.expr()?;
+                self.expect(T::RBracket, &[])?;
+                self.expect1(T::RBrace)?;
+                return Ok(self.mk(
+                    ExprKind::Index {
+                        base: self.alloc(var),
+                        index: Some(self.alloc(idx)),
+                    },
+                    start,
+                ));
+            }
+            self.expect1(T::RBrace)?;
+            return Ok(var);
+        }
+        self.notice(
+            NoticeKind::Deprecated,
+            "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead",
+            line,
+        );
+        let inner = self.expr()?;
+        self.expect(T::RBrace, &[])?;
+        Ok(self.mk(ExprKind::VariableVariable(self.alloc(inner)), start))
+    }
+
+    #[inline(never)]
     fn heredoc(&mut self) -> PResult<Expr<'a>> {
         let start = self.pos;
         let st = self.bump();
@@ -1981,12 +2153,13 @@ impl<'a> Parser<'a> {
                 ]));
             }
             self.bump();
+            let value = self.intern(value);
             return Ok(self.mk(ExprKind::String(value, StrKind::Nowdoc), start));
         }
         let mut parts = self.interp_parts(T::EndHeredoc, Quote::Heredoc, indent)?;
         self.expect1(T::EndHeredoc)?;
         if let Some(StrPart::Lit(s)) = parts.last_mut() {
-            strings::strip_trailing_newline(s);
+            *s = strip_newline(s);
         }
         if let Some(StrPart::Lit(s)) = parts.last()
             && s.is_empty()
@@ -1994,58 +2167,73 @@ impl<'a> Parser<'a> {
         {
             parts.pop();
         }
-        let kind = parts_to_kind(parts, StrKind::Heredoc);
+        let kind = self.parts_to_kind(parts, StrKind::Heredoc);
         Ok(self.mk(kind, start))
     }
-}
 
-/// A string with only literal parts becomes a plain string.
-fn parts_to_kind(mut parts: Vec<StrPart<'_>>, kind: StrKind) -> ExprKind<'_> {
-    if parts.iter().any(|p| matches!(p, StrPart::Expr(_))) {
-        // Literal parts emptied by heredoc indentation removal.
-        parts.retain(|p| !matches!(p, StrPart::Lit(s) if s.is_empty()));
-    }
-    if parts.iter().all(|p| matches!(p, StrPart::Lit(_))) {
-        if parts.len() == 1 {
-            let StrPart::Lit(s) = parts.pop().unwrap() else {
-                unreachable!()
-            };
-            return ExprKind::String(s, kind);
+    /// A string with only literal parts becomes a plain string.
+    pub(crate) fn parts_to_kind(
+        &self,
+        mut parts: BVec<'a, StrPart<'a>>,
+        kind: StrKind,
+    ) -> ExprKind<'a> {
+        if parts.iter().any(|p| matches!(p, StrPart::Expr(_))) {
+            // Literal parts emptied by heredoc indentation removal.
+            parts.retain(|p| !matches!(p, StrPart::Lit(s) if s.is_empty()));
         }
-        let mut out = Vec::new();
-        for p in parts {
-            if let StrPart::Lit(s) = p {
-                out.extend_from_slice(&s);
+        if parts.iter().all(|p| matches!(p, StrPart::Lit(_))) {
+            if parts.len() == 1 {
+                let StrPart::Lit(s) = parts[0] else {
+                    unreachable!()
+                };
+                return ExprKind::String(s, kind);
+            }
+            let mut out = Vec::new();
+            for p in parts.iter() {
+                if let StrPart::Lit(s) = p {
+                    out.extend_from_slice(s);
+                }
+            }
+            return ExprKind::String(self.bytes(&out), kind);
+        }
+        ExprKind::Interpolated(parts.into_bump_slice(), kind)
+    }
+
+    /// The key of `"$a[12]"` / `"$a[-1]"`: an integer when the text is a
+    /// canonical decimal integer, else a string (observed on PHP 8.5).
+    fn num_string_key(&self, text: &'a [u8], neg: bool) -> ExprKind<'a> {
+        let canonical = !text.is_empty()
+            && text.iter().all(|c| c.is_ascii_digit())
+            && (text.len() == 1 || text[0] != b'0')
+            && !(neg && text == b"0");
+        if canonical && let Ok(s) = std::str::from_utf8(text) {
+            let full = if neg {
+                format!("-{}", s)
+            } else {
+                s.to_string()
+            };
+            if let Ok(v) = full.parse::<i64>() {
+                return ExprKind::Int(v);
             }
         }
-        return ExprKind::String(Cow::Owned(out), kind);
-    }
-    ExprKind::Interpolated(parts, kind)
-}
-
-/// The key of `"$a[12]"` / `"$a[-1]"`: an integer when the text is a
-/// canonical decimal integer, else a string (observed on PHP 8.5).
-fn num_string_key(text: &[u8], neg: bool) -> ExprKind<'_> {
-    let canonical = !text.is_empty()
-        && text.iter().all(|c| c.is_ascii_digit())
-        && (text.len() == 1 || text[0] != b'0')
-        && !(neg && text == b"0");
-    if canonical && let Ok(s) = std::str::from_utf8(text) {
-        let full = if neg {
-            format!("-{}", s)
+        if neg {
+            let mut v = Vec::with_capacity(text.len() + 1);
+            v.push(b'-');
+            v.extend_from_slice(text);
+            ExprKind::String(self.bytes(&v), StrKind::SingleQuoted)
         } else {
-            s.to_string()
-        };
-        if let Ok(v) = full.parse::<i64>() {
-            return ExprKind::Int(v);
+            ExprKind::String(text, StrKind::SingleQuoted)
         }
     }
-    if neg {
-        let mut v = Vec::with_capacity(text.len() + 1);
-        v.push(b'-');
-        v.extend_from_slice(text);
-        ExprKind::String(Cow::Owned(v), StrKind::SingleQuoted)
+}
+
+/// Removes one trailing newline (`\n`, `\r\n` or `\r`).
+fn strip_newline(s: &[u8]) -> &[u8] {
+    if s.ends_with(b"\r\n") {
+        &s[..s.len() - 2]
+    } else if s.ends_with(b"\n") || s.ends_with(b"\r") {
+        &s[..s.len() - 1]
     } else {
-        ExprKind::String(Cow::Borrowed(text), StrKind::SingleQuoted)
+        s
     }
 }

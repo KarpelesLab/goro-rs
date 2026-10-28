@@ -8,8 +8,8 @@ use crate::token::T;
 impl<'a> Parser<'a> {
     /// Statements up to end of input (`top`: file level, where namespace,
     /// use, const and `__halt_compiler` are allowed).
-    pub(crate) fn top_statements(&mut self, top: bool) -> PResult<Vec<Stmt<'a>>> {
-        let mut stmts = Vec::new();
+    pub(crate) fn top_statements(&mut self, top: bool) -> PResult<&'a [Stmt<'a>]> {
+        let mut stmts = self.bvec();
         loop {
             match self.peek_kind() {
                 T::Eof => break,
@@ -26,7 +26,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(stmts)
+        Ok(stmts.into_bump_slice())
     }
 
     /// Whether the current token can start a statement.
@@ -67,8 +67,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Inner statements up to `}` or an alternative-syntax end keyword.
-    pub(crate) fn inner_statements(&mut self, ends: &[T]) -> PResult<Vec<Stmt<'a>>> {
-        let mut stmts = Vec::new();
+    pub(crate) fn inner_statements(&mut self, ends: &[T]) -> PResult<&'a [Stmt<'a>]> {
+        let mut stmts = self.bvec();
         loop {
             let k = self.peek_kind();
             if k == T::Eof || ends.contains(&k) || !self.starts_statement(false) {
@@ -76,11 +76,11 @@ impl<'a> Parser<'a> {
             }
             stmts.push(self.statement(false)?);
         }
-        Ok(stmts)
+        Ok(stmts.into_bump_slice())
     }
 
     /// `{ statements }` as a function body.
-    pub(crate) fn block_body(&mut self) -> PResult<Vec<Stmt<'a>>> {
+    pub(crate) fn block_body(&mut self) -> PResult<&'a [Stmt<'a>]> {
         self.expect1(T::LBrace)?;
         let stmts = self.inner_statements(&[T::RBrace])?;
         // Observed on PHP 8.5: `{ catch }` lists nothing.
@@ -112,7 +112,53 @@ impl<'a> Parser<'a> {
         r
     }
 
+    /// Dispatches the statements on the usual recursion paths to functions
+    /// with small stack frames; the rest go to `statement_misc`.
     fn statement_inner(&mut self, top: bool) -> PResult<Stmt<'a>> {
+        match self.peek_kind() {
+            T::If => self.if_stmt(),
+            T::LBrace => self.block_stmt(),
+            T::Return => self.return_stmt(),
+            T::Foreach => self.foreach_stmt(),
+            T::For => self.for_stmt(),
+            T::Variable => self.expr_stmt(),
+            T::String if self.peek_at(1) != T::Colon => self.expr_stmt(),
+            _ => self.statement_misc(top),
+        }
+    }
+
+    #[inline(never)]
+    fn block_stmt(&mut self) -> PResult<Stmt<'a>> {
+        let start = self.pos;
+        self.bump();
+        let body = self.inner_statements(&[T::RBrace])?;
+        self.expect(T::RBrace, &[])?;
+        Ok(self.stmt(StmtKind::Block(body), start))
+    }
+
+    #[inline(never)]
+    fn return_stmt(&mut self) -> PResult<Stmt<'a>> {
+        let start = self.pos;
+        self.bump();
+        let e = if starts_expr(self.peek_kind()) {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        self.end_stmt(&[T::Semicolon])?;
+        Ok(self.stmt(StmtKind::Return(e), start))
+    }
+
+    #[inline(never)]
+    fn expr_stmt(&mut self) -> PResult<Stmt<'a>> {
+        let start = self.pos;
+        let e = self.expr()?;
+        self.end_stmt(&[])?;
+        Ok(self.stmt(StmtKind::Expr(e), start))
+    }
+
+    #[inline(never)]
+    fn statement_misc(&mut self, top: bool) -> PResult<Stmt<'a>> {
         let start = self.pos;
         let t = *self.peek();
         match t.kind {
@@ -197,16 +243,17 @@ impl<'a> Parser<'a> {
             }
             T::Echo => {
                 self.bump();
-                let mut exprs = vec![self.expr()?];
+                let mut exprs = self.bvec();
+                exprs.push(self.expr()?);
                 while self.eat(T::Comma) {
                     exprs.push(self.expr()?);
                 }
                 self.end_stmt(&[T::Comma, T::Semicolon])?;
-                Ok(self.stmt(StmtKind::Echo(exprs), start))
+                Ok(self.stmt(StmtKind::Echo(exprs.into_bump_slice()), start))
             }
             T::Global => {
                 self.bump();
-                let mut vars = Vec::new();
+                let mut vars = self.bvec();
                 loop {
                     let vstart = self.pos;
                     let v = match self.peek_kind() {
@@ -226,11 +273,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.end_stmt(&[T::Comma, T::Semicolon])?;
-                Ok(self.stmt(StmtKind::Global(vars), start))
+                Ok(self.stmt(StmtKind::Global(vars.into_bump_slice()), start))
             }
             T::Static if self.peek_at(1) == T::Variable => {
                 self.bump();
-                let mut vars = Vec::new();
+                let mut vars = self.bvec();
                 loop {
                     let vstart = self.pos;
                     let vt = self.expect1(T::Variable)?;
@@ -253,12 +300,12 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.end_stmt(&[T::Comma, T::Semicolon])?;
-                Ok(self.stmt(StmtKind::Static(vars), start))
+                Ok(self.stmt(StmtKind::Static(vars.into_bump_slice()), start))
             }
             T::Unset => {
                 self.bump();
                 self.expect1(T::LParen)?;
-                let mut vars = Vec::new();
+                let mut vars = self.bvec();
                 // Observed on PHP 8.5: `unset($a 2)` and `unset(new A)`
                 // expect "->", "?->" or "[".
                 let postfix = [T::ObjectOperator, T::NullsafeObjectOperator, T::LBracket];
@@ -300,7 +347,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect1(T::RParen)?;
                 self.end_stmt(&[T::Semicolon])?;
-                Ok(self.stmt(StmtKind::Unset(vars), start))
+                Ok(self.stmt(StmtKind::Unset(vars.into_bump_slice()), start))
             }
             T::Try => self.try_stmt(),
             T::Goto => {
@@ -324,22 +371,22 @@ impl<'a> Parser<'a> {
                         T::AmpFollowedByVarOrVararg | T::AmpNotFollowedByVarOrVararg
                     ) && matches!(self.peek_at(2), T::String | T::Readonly)) =>
             {
-                let f = self.function_decl(start, Vec::new())?;
-                Ok(self.stmt(StmtKind::Function(Box::new(f)), start))
+                let f = self.function_decl(start, &[])?;
+                Ok(self.stmt(StmtKind::Function(self.alloc(f)), start))
             }
             T::Abstract | T::Final => {
                 let mods = self.class_modifiers()?;
-                let c = self.class_decl(start, Vec::new(), mods)?;
-                Ok(self.stmt(StmtKind::Class(Box::new(c)), start))
+                let c = self.class_decl(start, &[], mods)?;
+                Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Readonly if self.peek_at(1) != T::LParen => {
                 let mods = self.class_modifiers()?;
-                let c = self.class_decl(start, Vec::new(), mods)?;
-                Ok(self.stmt(StmtKind::Class(Box::new(c)), start))
+                let c = self.class_decl(start, &[], mods)?;
+                Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Class | T::Interface | T::Trait | T::Enum => {
-                let c = self.class_decl(start, Vec::new(), Modifiers::default())?;
-                Ok(self.stmt(StmtKind::Class(Box::new(c)), start))
+                let c = self.class_decl(start, &[], Modifiers::default())?;
+                Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Attribute => self.attributed_statement(start, top),
             T::Namespace if top => self.namespace_stmt(),
@@ -347,13 +394,7 @@ impl<'a> Parser<'a> {
             T::Const if top => {
                 self.bump();
                 let items = self.const_items()?;
-                Ok(self.stmt(
-                    StmtKind::Const {
-                        attrs: Vec::new(),
-                        items,
-                    },
-                    start,
-                ))
+                Ok(self.stmt(StmtKind::Const { attrs: &[], items }, start))
             }
             T::HaltCompiler => {
                 self.bump();
@@ -378,7 +419,7 @@ impl<'a> Parser<'a> {
                 let cast = Expr {
                     kind: ExprKind::Cast {
                         kind: CastKind::Void,
-                        expr: Box::new(e),
+                        expr: self.alloc(e),
                     },
                     span,
                 };
@@ -393,8 +434,8 @@ impl<'a> Parser<'a> {
     }
 
     /// `const A = 1, B = 2;` after `const`.
-    fn const_items(&mut self) -> PResult<Vec<ConstItem<'a>>> {
-        let mut items = Vec::new();
+    fn const_items(&mut self) -> PResult<&'a [ConstItem<'a>]> {
+        let mut items = self.bvec();
         loop {
             let istart = self.pos;
             let doc = self.doc_comment_before(istart);
@@ -413,10 +454,11 @@ impl<'a> Parser<'a> {
             }
         }
         self.end_stmt(&[T::Comma, T::Semicolon])?;
-        Ok(items)
+        Ok(items.into_bump_slice())
     }
 
     /// A statement starting with `#[...]`.
+    #[inline(never)]
     fn attributed_statement(&mut self, start: usize, top: bool) -> PResult<Stmt<'a>> {
         let attrs = self.attributes()?;
         match self.peek_kind() {
@@ -428,16 +470,16 @@ impl<'a> Parser<'a> {
                     ) && matches!(self.peek_at(2), T::String | T::Readonly)) =>
             {
                 let f = self.function_decl(start, attrs)?;
-                Ok(self.stmt(StmtKind::Function(Box::new(f)), start))
+                Ok(self.stmt(StmtKind::Function(self.alloc(f)), start))
             }
             T::Abstract | T::Final | T::Readonly => {
                 let mods = self.class_modifiers()?;
                 let c = self.class_decl(start, attrs, mods)?;
-                Ok(self.stmt(StmtKind::Class(Box::new(c)), start))
+                Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Class | T::Interface | T::Trait | T::Enum => {
                 let c = self.class_decl(start, attrs, Modifiers::default())?;
-                Ok(self.stmt(StmtKind::Class(Box::new(c)), start))
+                Ok(self.stmt(StmtKind::Class(self.alloc(c)), start))
             }
             T::Const if top => {
                 self.bump();
@@ -466,21 +508,22 @@ impl<'a> Parser<'a> {
 
     /// The body of a control structure: one statement (a block becomes its
     /// statements).
-    fn body_statement(&mut self) -> PResult<Vec<Stmt<'a>>> {
+    fn body_statement(&mut self) -> PResult<&'a [Stmt<'a>]> {
         if !self.starts_statement(false) {
             return Err(self.unexpected(&[]));
         }
         let s = self.statement(false)?;
-        Ok(vec![s])
+        Ok(std::slice::from_ref(self.alloc(s)))
     }
 
+    #[inline(never)]
     fn if_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
         let cond = self.paren_expr()?;
         if self.eat(T::Colon) {
             let then = self.inner_statements(&[T::Elseif, T::Else, T::Endif])?;
-            let mut elseifs = Vec::new();
+            let mut elseifs = self.bvec();
             let mut else_ = None;
             loop {
                 match self.peek_kind() {
@@ -513,10 +556,10 @@ impl<'a> Parser<'a> {
             }
             self.end_stmt(&[T::Semicolon])?;
             return Ok(self.stmt(
-                StmtKind::If(Box::new(IfStmt {
+                StmtKind::If(self.alloc(IfStmt {
                     cond,
                     then,
-                    elseifs,
+                    elseifs: elseifs.into_bump_slice(),
                     else_,
                     alt_syntax: true,
                 })),
@@ -524,7 +567,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let then = self.body_statement()?;
-        let mut elseifs = Vec::new();
+        let mut elseifs = self.bvec();
         let mut else_ = None;
         loop {
             match self.peek_kind() {
@@ -548,10 +591,10 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.stmt(
-            StmtKind::If(Box::new(IfStmt {
+            StmtKind::If(self.alloc(IfStmt {
                 cond,
                 then,
-                elseifs,
+                elseifs: elseifs.into_bump_slice(),
                 else_,
                 alt_syntax: false,
             })),
@@ -562,10 +605,10 @@ impl<'a> Parser<'a> {
     /// A `for` expression list. `(void) expr` is allowed (PHP 8.5),
     /// except as the last condition (observed on PHP 8.5: `for (;(void)
     /// true;)` expects ",").
-    fn for_exprs(&mut self, end: T, is_cond: bool) -> PResult<Vec<Expr<'a>>> {
-        let mut v = Vec::new();
+    fn for_exprs(&mut self, end: T, is_cond: bool) -> PResult<&'a [Expr<'a>]> {
+        let mut v = self.bvec();
         if self.at(end) {
-            return Ok(v);
+            return Ok(v.into_bump_slice());
         }
         loop {
             if self.at(T::VoidCast) {
@@ -576,7 +619,7 @@ impl<'a> Parser<'a> {
                 v.push(Expr {
                     kind: ExprKind::Cast {
                         kind: CastKind::Void,
-                        expr: Box::new(e),
+                        expr: self.alloc(e),
                     },
                     span,
                 });
@@ -590,9 +633,10 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(v)
+        Ok(v.into_bump_slice())
     }
 
+    #[inline(never)]
     fn for_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
@@ -612,7 +656,7 @@ impl<'a> Parser<'a> {
             (self.body_statement()?, false)
         };
         Ok(self.stmt(
-            StmtKind::For(Box::new(ForStmt {
+            StmtKind::For(self.alloc(ForStmt {
                 init,
                 cond,
                 step,
@@ -631,6 +675,7 @@ impl<'a> Parser<'a> {
         Ok((self.to_assign_target(e?), by_ref))
     }
 
+    #[inline(never)]
     fn foreach_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
@@ -654,7 +699,7 @@ impl<'a> Parser<'a> {
             (self.body_statement()?, false)
         };
         Ok(self.stmt(
-            StmtKind::Foreach(Box::new(ForeachStmt {
+            StmtKind::Foreach(self.alloc(ForeachStmt {
                 expr,
                 key,
                 value,
@@ -666,6 +711,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    #[inline(never)]
     fn switch_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
@@ -679,7 +725,7 @@ impl<'a> Parser<'a> {
         let end = if alt { T::Endswitch } else { T::RBrace };
         // An optional `;` right after the opening (PHP manual: switch).
         self.eat(T::Semicolon);
-        let mut cases = Vec::new();
+        let mut cases = self.bvec();
         loop {
             let cstart = self.pos;
             let cond = match self.peek_kind() {
@@ -718,25 +764,26 @@ impl<'a> Parser<'a> {
             self.end_stmt(&[T::Semicolon])?;
         }
         Ok(self.stmt(
-            StmtKind::Switch(Box::new(SwitchStmt {
+            StmtKind::Switch(self.alloc(SwitchStmt {
                 subject,
-                cases,
+                cases: cases.into_bump_slice(),
                 alt_syntax: alt,
             })),
             start,
         ))
     }
 
+    #[inline(never)]
     fn try_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
         let body = self.block_body()?;
-        let mut catches = Vec::new();
+        let mut catches = self.bvec();
         while self.at(T::Catch) {
             let cstart = self.pos;
             self.bump();
             self.expect1(T::LParen)?;
-            let mut types = Vec::new();
+            let mut types = self.bvec();
             loop {
                 // `static` parses here; the compiler rejects it (test
                 // Zend/tests/catch_static.phpt).
@@ -757,7 +804,7 @@ impl<'a> Parser<'a> {
             self.expect1(T::RParen)?;
             let body = self.block_body()?;
             catches.push(Catch {
-                types,
+                types: types.into_bump_slice(),
                 var,
                 body,
                 span: self.span_from(cstart),
@@ -775,20 +822,21 @@ impl<'a> Parser<'a> {
             self.compile_error("Cannot use try without catch or finally", sp);
         }
         Ok(self.stmt(
-            StmtKind::Try(Box::new(TryStmt {
+            StmtKind::Try(self.alloc(TryStmt {
                 body,
-                catches,
+                catches: catches.into_bump_slice(),
                 finally,
             })),
             start,
         ))
     }
 
+    #[inline(never)]
     fn declare_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
         self.expect1(T::LParen)?;
-        let mut directives = Vec::new();
+        let mut directives = self.bvec();
         loop {
             let nt = self.expect1(T::String)?;
             let name = self.ident_from(&nt)?;
@@ -811,11 +859,15 @@ impl<'a> Parser<'a> {
             DeclareBody::Block(self.body_statement()?)
         };
         Ok(self.stmt(
-            StmtKind::Declare(Box::new(DeclareStmt { directives, body })),
+            StmtKind::Declare(self.alloc(DeclareStmt {
+                directives: directives.into_bump_slice(),
+                body,
+            })),
             start,
         ))
     }
 
+    #[inline(never)]
     fn namespace_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
@@ -850,6 +902,7 @@ impl<'a> Parser<'a> {
 
     /// `use` at top level (PHP manual: "Using namespaces: Aliasing /
     /// Importing"). Expected-token lists observed on PHP 8.5.
+    #[inline(never)]
     fn use_stmt(&mut self) -> PResult<Stmt<'a>> {
         let start = self.pos;
         self.bump();
@@ -881,7 +934,7 @@ impl<'a> Parser<'a> {
             self.bump();
             self.bump();
             let prefix = self.name_from(&first);
-            let mut uses = Vec::new();
+            let mut uses = self.bvec();
             loop {
                 let ustart = self.pos;
                 let ikind = if kind == UseKind::Normal {
@@ -935,9 +988,16 @@ impl<'a> Parser<'a> {
             }
             self.expect1(T::RBrace)?;
             self.end_stmt(&[T::Semicolon])?;
-            return Ok(self.stmt(StmtKind::GroupUse { kind, prefix, uses }, start));
+            return Ok(self.stmt(
+                StmtKind::GroupUse {
+                    kind,
+                    prefix,
+                    uses: uses.into_bump_slice(),
+                },
+                start,
+            ));
         }
-        let mut uses = Vec::new();
+        let mut uses = self.bvec();
         let mut cur = first;
         loop {
             let ustart = self.pos - 1;
@@ -967,6 +1027,12 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.end_stmt(&[T::Comma, T::Semicolon])?;
-        Ok(self.stmt(StmtKind::Use { kind, uses }, start))
+        Ok(self.stmt(
+            StmtKind::Use {
+                kind,
+                uses: uses.into_bump_slice(),
+            },
+            start,
+        ))
     }
 }

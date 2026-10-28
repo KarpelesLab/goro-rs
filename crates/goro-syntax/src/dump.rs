@@ -108,7 +108,7 @@ fn args(a: &Args<'_>) -> String {
         Args::FirstClassCallable => " ...".into(),
         Args::List(v) => {
             let mut s = String::new();
-            for arg in v {
+            for arg in v.iter() {
                 s.push(' ');
                 if arg.unpack {
                     s.push_str("...");
@@ -191,7 +191,7 @@ fn params(v: &[Param<'_>]) -> String {
             let _ = write!(s, "={}", expr(d));
         }
         if !p.hooks.is_empty() {
-            let _ = write!(s, " {{{}}}", hooks(&p.hooks));
+            let _ = write!(s, " {{{}}}", hooks(p.hooks));
         }
         out.push(s);
     }
@@ -286,12 +286,14 @@ pub fn expr(e: &Expr<'_>) -> String {
             expr(obj),
             member(name)
         ),
-        StaticProp { class, name } => match name {
+        StaticProp(StaticPropNode { class, name }) => match name {
             StaticPropName::Ident(i) => format!("(:: {} ${})", class_ref(class), bstr(i.name)),
             StaticPropName::Expr(e) => format!("(:: {} ${{{}}})", class_ref(class), expr(e)),
         },
         Const(n) => name(n),
-        ClassConst { class, name } => format!("(:: {} {})", class_ref(class), member(name)),
+        ClassConst(ClassConstNode { class, name }) => {
+            format!("(:: {} {})", class_ref(class), member(name))
+        }
         Call { name: n, args: a } => format!("(call {}{})", name(n), args(a)),
         CallExpr { callee, args: a } => format!("(call {}{})", expr(callee), args(a)),
         MethodCall {
@@ -308,11 +310,11 @@ pub fn expr(e: &Expr<'_>) -> String {
                 args(a)
             )
         }
-        StaticCall {
+        StaticCall(StaticCallNode {
             class,
             name,
             args: a,
-        } => format!("(::call {} {}{})", class_ref(class), member(name), args(a)),
+        }) => format!("(::call {} {}{})", class_ref(class), member(name), args(a)),
         New { class, args: a } => {
             let c = match class {
                 NewClass::Ref(c) => class_ref(c),
@@ -390,27 +392,27 @@ pub fn expr(e: &Expr<'_>) -> String {
                 "({}function{}{}{}{} {{{}}})",
                 if c.is_static { "static " } else { "" },
                 if c.by_ref { "&" } else { "" },
-                params(&c.params),
+                params(c.params),
                 if uses.is_empty() {
                     std::string::String::new()
                 } else {
                     format!(" use({})", uses.join(", "))
                 },
                 ret(&c.ret),
-                block(&c.body)
+                block(c.body)
             )
         }
         ArrowFn(f) => format!(
             "({}fn{}{}{} => {})",
             if f.is_static { "static " } else { "" },
             if f.by_ref { "&" } else { "" },
-            params(&f.params),
+            params(f.params),
             ret(&f.ret),
-            expr(&f.body)
+            expr(f.body)
         ),
         Match { subject, arms } => {
             let mut s = format!("(match {}", expr(subject));
-            for a in arms {
+            for a in arms.iter() {
                 match &a.conds {
                     None => s.push_str(" [default"),
                     Some(c) => {
@@ -439,7 +441,7 @@ fn attrs(v: &[AttributeGroup<'_>]) -> String {
             .iter()
             .map(|a| {
                 if a.has_args {
-                    format!("{}({})", name(&a.name), args_list(&a.args))
+                    format!("{}({})", name(&a.name), args_list(a.args))
                 } else {
                     name(&a.name)
                 }
@@ -471,7 +473,7 @@ fn args_list(v: &[Arg<'_>]) -> String {
 fn class_body(c: &ClassDecl<'_>) -> String {
     let mut s = String::new();
     if !c.attrs.is_empty() {
-        s.push_str(&attrs(&c.attrs));
+        s.push_str(&attrs(c.attrs));
     }
     if !c.modifiers.is_empty() {
         let _ = write!(s, "{} ", mods(c.modifiers));
@@ -494,7 +496,7 @@ fn class_body(c: &ClassDecl<'_>) -> String {
         );
     }
     s.push_str(" {");
-    for m in &c.members {
+    for m in c.members {
         s.push(' ');
         s.push_str(&class_member(m));
     }
@@ -505,25 +507,25 @@ fn class_body(c: &ClassDecl<'_>) -> String {
 fn class_member(m: &ClassMember<'_>) -> String {
     match m {
         ClassMember::Property(p) => {
-            let mut s = attrs(&p.attrs);
+            let mut s = attrs(p.attrs);
             let _ = write!(s, "(prop {}", mods(p.modifiers));
             if let Some(t) = &p.ty {
                 let _ = write!(s, " {}", ty(t));
             }
-            for it in &p.props {
+            for it in p.props {
                 let _ = write!(s, " ${}", bstr(it.name.name));
                 if let Some(d) = &it.default {
                     let _ = write!(s, "={}", expr(d));
                 }
                 if it.has_hook_list {
-                    let _ = write!(s, " {{{}}}", hooks(&it.hooks));
+                    let _ = write!(s, " {{{}}}", hooks(it.hooks));
                 }
             }
             s.push(')');
             s
         }
         ClassMember::Const(c) => {
-            let mut s = attrs(&c.attrs);
+            let mut s = attrs(c.attrs);
             s.push_str("(const");
             if !c.modifiers.is_empty() {
                 let _ = write!(s, " {}", mods(c.modifiers));
@@ -531,21 +533,21 @@ fn class_member(m: &ClassMember<'_>) -> String {
             if let Some(t) = &c.ty {
                 let _ = write!(s, " {}", ty(t));
             }
-            for it in &c.items {
+            for it in c.items {
                 let _ = write!(s, " {}={}", bstr(it.name.name), expr(&it.value));
             }
             s.push(')');
             s
         }
         ClassMember::Method(f) => {
-            let mut s = attrs(&f.attrs);
+            let mut s = attrs(f.attrs);
             let _ = write!(
                 s,
                 "(method {} {}{}{}{}",
                 mods(f.modifiers),
                 if f.by_ref { "&" } else { "" },
                 bstr(f.name.name),
-                params(&f.params),
+                params(f.params),
                 ret(&f.ret)
             );
             match &f.body {
@@ -561,7 +563,7 @@ fn class_member(m: &ClassMember<'_>) -> String {
                 "(use {}",
                 t.traits.iter().map(name).collect::<Vec<_>>().join(",")
             );
-            for a in &t.adaptations {
+            for a in t.adaptations {
                 match a {
                     TraitAdaptation::Precedence {
                         trait_,
@@ -620,9 +622,9 @@ pub fn stmt(s: &Stmt<'_>) -> String {
         InlineHtml(h) => format!("(html {})", quoted(h)),
         Block(b) => format!("{{{}}}", block(b)),
         If(i) => {
-            let mut out = format!("(if {} {{{}}}", expr(&i.cond), block(&i.then));
-            for e in &i.elseifs {
-                let _ = write!(out, " elseif {} {{{}}}", expr(&e.cond), block(&e.body));
+            let mut out = format!("(if {} {{{}}}", expr(&i.cond), block(i.then));
+            for e in i.elseifs {
+                let _ = write!(out, " elseif {} {{{}}}", expr(&e.cond), block(e.body));
             }
             if let Some(e) = &i.else_ {
                 let _ = write!(out, " else {{{}}}", block(e));
@@ -636,10 +638,10 @@ pub fn stmt(s: &Stmt<'_>) -> String {
             let j = |v: &[crate::ast::Expr<'_>]| v.iter().map(expr).collect::<Vec<_>>().join(",");
             format!(
                 "(for [{}] [{}] [{}] {{{}}})",
-                j(&f.init),
-                j(&f.cond),
-                j(&f.step),
-                block(&f.body)
+                j(f.init),
+                j(f.cond),
+                j(f.step),
+                block(f.body)
             )
         }
         Foreach(f) => {
@@ -653,18 +655,18 @@ pub fn stmt(s: &Stmt<'_>) -> String {
                 k,
                 if f.by_ref { "&" } else { "" },
                 expr(&f.value),
-                block(&f.body)
+                block(f.body)
             )
         }
         Switch(sw) => {
             let mut out = format!("(switch {}", expr(&sw.subject));
-            for c in &sw.cases {
+            for c in sw.cases {
                 match &c.cond {
                     Some(e) => {
-                        let _ = write!(out, " [case {}: {}]", expr(e), block(&c.body));
+                        let _ = write!(out, " [case {}: {}]", expr(e), block(c.body));
                     }
                     None => {
-                        let _ = write!(out, " [default: {}]", block(&c.body));
+                        let _ = write!(out, " [default: {}]", block(c.body));
                     }
                 }
             }
@@ -702,8 +704,8 @@ pub fn stmt(s: &Stmt<'_>) -> String {
             v.iter().map(expr).collect::<Vec<_>>().join(" ")
         ),
         Try(t) => {
-            let mut out = format!("(try {{{}}}", block(&t.body));
-            for c in &t.catches {
+            let mut out = format!("(try {{{}}}", block(t.body));
+            for c in t.catches {
                 let _ = write!(
                     out,
                     " catch({}{}) {{{}}}",
@@ -712,7 +714,7 @@ pub fn stmt(s: &Stmt<'_>) -> String {
                         Some(v) => format!(" ${}", bstr(v.name)),
                         None => String::new(),
                     },
-                    block(&c.body)
+                    block(c.body)
                 );
             }
             if let Some(f) = &t.finally {
@@ -737,12 +739,12 @@ pub fn stmt(s: &Stmt<'_>) -> String {
         }
         Function(f) => format!(
             "{}(function {}{}{}{} {{{}}})",
-            attrs(&f.attrs),
+            attrs(f.attrs),
             if f.by_ref { "&" } else { "" },
             bstr(f.name.name),
-            params(&f.params),
+            params(f.params),
             ret(&f.ret),
-            block(&f.body)
+            block(f.body)
         ),
         Class(c) => format!("({})", class_body(c)),
         Namespace { name: n, body } => {

@@ -33,7 +33,8 @@ fn parse_errors_match_php85() {
     for (case, exp) in cases.lines().zip(expected.lines()) {
         let mut src = b"<?php ".to_vec();
         src.extend(unescape(case));
-        let got = match parse(&src) {
+        let arena = goro_syntax::Arena::new();
+        let got = match parse(&arena, &src) {
             Ok(_) => "OK".to_string(),
             Err(e) => format!(
                 "{}\t{}",

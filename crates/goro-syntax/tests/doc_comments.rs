@@ -47,7 +47,8 @@ class P6 { function __construct(/** promo */ public $x, public $y) {} }
 /** cl8 */ class C8 { public $p; function m() {} }
 if (true) { /** if9 */ } function w9() {}
 ";
-    let p = parse(src).unwrap();
+    let arena = goro_syntax::Arena::new();
+    let p = parse(&arena, src).unwrap();
     let s = |d: Option<&[u8]>| {
         d.map(|b| String::from_utf8_lossy(b).into_owned())
             .unwrap_or_else(|| "false".into())
@@ -55,7 +56,7 @@ if (true) { /** if9 */ } function w9() {}
     let n = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     let mut funcs = Vec::new();
     let mut classes = Vec::new();
-    for st in &p.stmts {
+    for st in p.stmts {
         match &st.kind {
             StmtKind::Function(f) => funcs.push(format!(
                 "{} {}-{} {}",
@@ -72,7 +73,7 @@ if (true) { /** if9 */ } function w9() {}
                     c.span.end_line,
                     s(c.doc_comment)
                 ));
-                for m in &c.members {
+                for m in c.members {
                     match m {
                         ClassMember::Method(f) => {
                             classes.push(format!(
@@ -82,7 +83,7 @@ if (true) { /** if9 */ } function w9() {}
                                 f.span.end_line,
                                 s(f.doc_comment)
                             ));
-                            for prm in &f.params {
+                            for prm in f.params {
                                 classes.push(format!(
                                     "  param {} {}",
                                     n(prm.name.name),
@@ -91,7 +92,7 @@ if (true) { /** if9 */ } function w9() {}
                             }
                         }
                         ClassMember::Property(pd) => {
-                            for it in &pd.props {
+                            for it in pd.props {
                                 classes.push(format!(
                                     "  ${} {}",
                                     n(it.name.name),
@@ -100,7 +101,7 @@ if (true) { /** if9 */ } function w9() {}
                             }
                         }
                         ClassMember::Const(cd) => {
-                            for it in &cd.items {
+                            for it in cd.items {
                                 classes.push(format!(
                                     "  {} {}",
                                     n(it.name.name),

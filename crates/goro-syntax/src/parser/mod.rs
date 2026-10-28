@@ -11,6 +11,40 @@ mod expr;
 mod stmt;
 pub(crate) mod strings;
 
+pub use bumpalo::Bump as Arena;
+/// A list under construction; `into_bump_slice` moves it into the arena at
+/// its exact size (growing a vector inside the arena would leave the old
+/// buffers behind).
+pub(crate) struct BVec<'a, T: Copy> {
+    v: Vec<T>,
+    arena: &'a Arena,
+}
+
+impl<'a, T: Copy> BVec<'a, T> {
+    #[inline]
+    pub(crate) fn into_bump_slice(self) -> &'a [T] {
+        if self.v.is_empty() {
+            return &[];
+        }
+        self.arena.alloc_slice_copy(&self.v)
+    }
+}
+
+impl<T: Copy> std::ops::Deref for BVec<'_, T> {
+    type Target = Vec<T>;
+    #[inline]
+    fn deref(&self) -> &Vec<T> {
+        &self.v
+    }
+}
+
+impl<T: Copy> std::ops::DerefMut for BVec<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        &mut self.v
+    }
+}
+
 use crate::ast::*;
 use crate::lexer::{LexError, Lexer, LexerOptions, count_newlines};
 use crate::token::{T, TF_ERROR, TF_TAG, Token};
@@ -54,6 +88,11 @@ pub struct ParseOptions {
     pub short_open_tag: bool,
     /// Start in PHP code (for `eval()`), not in inline HTML.
     pub in_scripting: bool,
+    /// Stack the parser may use, in bytes, before it reports "memory
+    /// exhausted" as PHP does for very deep nesting. The parser needs
+    /// roughly 1-4 KiB per nesting level; PHP accepts up to about 10000
+    /// levels, so a caller on a large stack can raise this to match.
+    pub stack_limit: usize,
 }
 
 impl Default for ParseOptions {
@@ -61,32 +100,47 @@ impl Default for ParseOptions {
         ParseOptions {
             short_open_tag: true,
             in_scripting: false,
+            stack_limit: DEFAULT_STACK_LIMIT,
         }
     }
 }
 
-/// Parses a PHP file.
-pub fn parse(src: &[u8]) -> PResult<Program<'_>> {
-    parse_with(src, ParseOptions::default())
+/// Safe on a default 8 MiB main-thread stack.
+pub const DEFAULT_STACK_LIMIT: usize = 6 << 20;
+
+/// Parses a PHP file. The AST lives in `arena` and borrows from `src`.
+pub fn parse<'a>(arena: &'a Arena, src: &'a [u8]) -> PResult<Program<'a>> {
+    parse_with(arena, src, ParseOptions::default())
 }
 
 /// Parses code given to `eval()` (starts in PHP mode).
-pub fn parse_eval(src: &[u8]) -> PResult<Program<'_>> {
+pub fn parse_eval<'a>(arena: &'a Arena, src: &'a [u8]) -> PResult<Program<'a>> {
     parse_with(
+        arena,
         src,
         ParseOptions {
             short_open_tag: true,
             in_scripting: true,
+            ..ParseOptions::default()
         },
     )
 }
 
-pub fn parse_with(src: &[u8], opts: ParseOptions) -> PResult<Program<'_>> {
-    let mut p = Parser::new(src, opts);
+pub fn parse_with<'a>(arena: &'a Arena, src: &'a [u8], opts: ParseOptions) -> PResult<Program<'a>> {
+    let mut p = Parser::new(arena, src, opts);
+    p.stack_base = stack_position();
     p.parse_program()
 }
 
+/// An address on the current stack.
+#[inline(always)]
+fn stack_position() -> usize {
+    let marker = 0u8;
+    std::hint::black_box(&marker) as *const u8 as usize
+}
+
 pub(crate) struct Parser<'a> {
+    pub(crate) arena: &'a Arena,
     pub(crate) src: &'a [u8],
     pub(crate) toks: Vec<Token>,
     pub(crate) pos: usize,
@@ -106,6 +160,8 @@ pub(crate) struct Parser<'a> {
     pub(crate) allow_static_type: bool,
     /// Doc comments starting before this offset were taken.
     doc_consumed: u32,
+    stack_base: usize,
+    stack_limit: usize,
 }
 
 /// Maximum nesting of expressions and statements before giving up (PHP
@@ -116,7 +172,7 @@ pub(crate) struct Parser<'a> {
 const MAX_DEPTH: u32 = 10000;
 
 impl<'a> Parser<'a> {
-    pub(crate) fn new(src: &'a [u8], opts: ParseOptions) -> Self {
+    pub(crate) fn new(arena: &'a Arena, src: &'a [u8], opts: ParseOptions) -> Self {
         let lopts = LexerOptions {
             short_open_tag: opts.short_open_tag,
             parse_mode: true,
@@ -170,6 +226,7 @@ impl<'a> Parser<'a> {
             line: eof_line,
         });
         Parser {
+            arena,
             src,
             toks,
             pos: 0,
@@ -183,6 +240,8 @@ impl<'a> Parser<'a> {
             list_ok: 0,
             allow_static_type: false,
             doc_consumed: 0,
+            stack_base: 0,
+            stack_limit: opts.stack_limit,
         }
     }
 
@@ -197,6 +256,26 @@ impl<'a> Parser<'a> {
             compile_errors: std::mem::take(&mut self.compile_errors),
             notices: std::mem::take(&mut self.notices),
         })
+    }
+
+    // ----- arena -----
+
+    #[inline]
+    pub(crate) fn alloc<T>(&self, v: T) -> &'a T {
+        self.arena.alloc(v)
+    }
+
+    #[inline]
+    pub(crate) fn bvec<T: Copy>(&self) -> BVec<'a, T> {
+        BVec {
+            v: Vec::new(),
+            arena: self.arena,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn bytes(&self, v: &[u8]) -> &'a [u8] {
+        self.arena.alloc_slice_copy(v)
     }
 
     // ----- token access -----
@@ -268,7 +347,10 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn enter(&mut self) -> PResult<()> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH {
+        if self.depth > MAX_DEPTH
+            || (self.stack_base != 0
+                && self.stack_base.abs_diff(stack_position()) > self.stack_limit)
+        {
             let t = *self.peek();
             return Err(ParseError {
                 kind: ErrorKind::Parse,

@@ -84,12 +84,28 @@ pub struct Lexer<'a> {
 
 #[inline]
 pub(crate) fn is_label_start(c: u8) -> bool {
-    c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
+    CLASS[c as usize] & 1 != 0
 }
+
+/// Byte classes: 1 = label start, 2 = label character.
+static CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        let c = i as u8;
+        if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 {
+            t[i] = 3;
+        } else if c.is_ascii_digit() {
+            t[i] = 2;
+        }
+        i += 1;
+    }
+    t
+};
 
 #[inline]
 pub(crate) fn is_label_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
+    CLASS[c as usize] & 2 != 0
 }
 
 /// Counts line breaks: `\n`, `\r\n` and a lone `\r` each count once.
@@ -266,9 +282,21 @@ impl<'a> Lexer<'a> {
     #[inline]
     fn tok(&mut self, kind: T, start: usize, flags: u16) -> Token {
         let line = self.line;
-        let text = &self.src[start..self.pos];
-        if text.len() > 1 || (text.len() == 1 && (text[0] == b'\n' || text[0] == b'\r')) {
-            self.line += count_newlines(text);
+        // Only these tokens can contain line breaks.
+        if matches!(
+            kind,
+            T::Whitespace
+                | T::Comment
+                | T::DocComment
+                | T::InlineHtml
+                | T::ConstantEncapsedString
+                | T::EncapsedAndWhitespace
+                | T::StartHeredoc
+                | T::CloseTag
+                | T::OpenTag
+                | T::YieldFrom
+        ) {
+            self.line += count_newlines(&self.src[start..self.pos]);
         }
         Token {
             kind,

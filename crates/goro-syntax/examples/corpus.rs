@@ -281,9 +281,11 @@ fn run() {
         let opts = ParseOptions {
             short_open_tag: short_tags,
             in_scripting: false,
+            ..ParseOptions::default()
         };
         let t0 = Instant::now();
-        let res = parse_with(&src, opts);
+        let arena = goro_syntax::Arena::new();
+        let res = parse_with(&arena, &src, opts);
         parse_time += t0.elapsed();
         let rel = f.strip_prefix(&dir).unwrap_or(f).display().to_string();
         let exp = expected_parse_error(&expect);

@@ -182,12 +182,13 @@ impl<'a> Parser<'a> {
     // ----- attributes -----
 
     /// `#[A, B(1)] #[C]`: one or more attribute groups.
-    pub(crate) fn attributes(&mut self) -> PResult<Vec<AttributeGroup<'a>>> {
-        let mut groups = Vec::new();
+    #[inline(never)]
+    pub(crate) fn attributes(&mut self) -> PResult<&'a [AttributeGroup<'a>]> {
+        let mut groups = self.bvec();
         while self.at(T::Attribute) {
             let start = self.pos;
             self.bump();
-            let mut attrs = Vec::new();
+            let mut attrs = self.bvec();
             loop {
                 let astart = self.pos;
                 let t = *self.peek();
@@ -208,10 +209,10 @@ impl<'a> Parser<'a> {
                 let (args, has_args) = if self.at(T::LParen) {
                     match self.arguments()? {
                         Args::List(v) => (v, true),
-                        Args::FirstClassCallable => (Vec::new(), true),
+                        Args::FirstClassCallable => (&[][..], true),
                     }
                 } else {
-                    (Vec::new(), false)
+                    (&[][..], false)
                 };
                 attrs.push(Attribute {
                     name,
@@ -229,11 +230,11 @@ impl<'a> Parser<'a> {
             }
             self.expect1(T::RBracket)?;
             groups.push(AttributeGroup {
-                attrs,
+                attrs: attrs.into_bump_slice(),
                 span: self.span_from(start),
             });
         }
-        Ok(groups)
+        Ok(groups.into_bump_slice())
     }
 
     // ----- types -----
@@ -269,7 +270,7 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         if self.eat(T::Question) {
             let inner = self.simple_type()?;
-            return Ok(Type::Nullable(Box::new(inner), self.span_from(start)));
+            return Ok(Type::Nullable(self.alloc(inner), self.span_from(start)));
         }
         let first = if self.at(T::LParen) {
             self.dnf_group()?
@@ -286,7 +287,10 @@ impl<'a> Parser<'a> {
                 };
                 types.push(ty);
             }
-            return Ok(Type::Union(types, self.span_from(start)));
+            return Ok(Type::Union(
+                self.arena.alloc_slice_fill_iter(types),
+                self.span_from(start),
+            ));
         }
         if matches!(first, Type::Intersection(..)) {
             // A lone `(A&B)` group is not a type (observed on PHP 8.5:
@@ -298,7 +302,10 @@ impl<'a> Parser<'a> {
             while self.eat(T::AmpNotFollowedByVarOrVararg) {
                 types.push(self.simple_type()?);
             }
-            return Ok(Type::Intersection(types, self.span_from(start)));
+            return Ok(Type::Intersection(
+                self.arena.alloc_slice_fill_iter(types),
+                self.span_from(start),
+            ));
         }
         Ok(first)
     }
@@ -315,7 +322,10 @@ impl<'a> Parser<'a> {
             types.push(self.simple_type()?);
         }
         self.expect1(T::RParen)?;
-        Ok(Type::Intersection(types, self.span_from(start)))
+        Ok(Type::Intersection(
+            self.arena.alloc_slice_fill_iter(types),
+            self.span_from(start),
+        ))
     }
 
     pub(crate) fn return_type(&mut self) -> PResult<Type<'a>> {
@@ -328,9 +338,10 @@ impl<'a> Parser<'a> {
     // ----- parameters -----
 
     /// `( params )`, at `(`.
-    pub(crate) fn parameter_list(&mut self) -> PResult<Vec<Param<'a>>> {
+    #[inline(never)]
+    pub(crate) fn parameter_list(&mut self) -> PResult<&'a [Param<'a>]> {
         self.expect1(T::LParen)?;
-        let mut params = Vec::new();
+        let mut params = self.bvec();
         while !self.at(T::RParen) {
             params.push(self.parameter()?);
             if !self.eat(T::Comma) {
@@ -338,7 +349,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect1(T::RParen)?;
-        Ok(params)
+        Ok(params.into_bump_slice())
     }
 
     fn parameter(&mut self) -> PResult<Param<'a>> {
@@ -346,7 +357,7 @@ impl<'a> Parser<'a> {
         let attrs = if self.at(T::Attribute) {
             self.attributes()?
         } else {
-            Vec::new()
+            &[]
         };
         let mut modifiers = Modifiers::default();
         while let Some(_f) = modifier_flag(self.peek_kind()) {
@@ -378,7 +389,7 @@ impl<'a> Parser<'a> {
         let hooks = if self.at(T::LBrace) {
             self.property_hooks()?
         } else {
-            Vec::new()
+            &[]
         };
         Ok(Param {
             attrs,
@@ -397,10 +408,11 @@ impl<'a> Parser<'a> {
     // ----- functions -----
 
     /// `function [&] name(...) [: T] { ... }` at `function`.
+    #[inline(never)]
     pub(crate) fn function_decl(
         &mut self,
         start: usize,
-        attrs: Vec<AttributeGroup<'a>>,
+        attrs: &'a [AttributeGroup<'a>],
     ) -> PResult<FunctionDecl<'a>> {
         // Reflection's start line is the `function` keyword's (observed on
         // PHP 8.5): the span starts there, after attributes.
@@ -444,10 +456,11 @@ impl<'a> Parser<'a> {
 
     /// A class-like declaration statement, at its keyword (after
     /// attributes and modifiers).
+    #[inline(never)]
     pub(crate) fn class_decl(
         &mut self,
         start: usize,
-        attrs: Vec<AttributeGroup<'a>>,
+        attrs: &'a [AttributeGroup<'a>],
         mods: Modifiers,
     ) -> PResult<ClassDecl<'a>> {
         // The span starts at the keyword (Reflection's start line, observed
@@ -493,26 +506,27 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn name_list(&mut self) -> PResult<Vec<Name<'a>>> {
+    fn name_list(&mut self) -> PResult<&'a [Name<'a>]> {
         let mut v = vec![self.class_name()?];
         while self.eat(T::Comma) {
             v.push(self.class_name()?);
         }
-        Ok(v)
+        Ok(self.arena.alloc_slice_fill_iter(v))
     }
 
     /// Everything after the class name (or after `new class(...)`).
+    #[inline(never)]
     pub(crate) fn class_body_decl(
         &mut self,
         start: usize,
         kind: ClassKind,
         name: Option<Ident<'a>>,
-        attrs: Vec<AttributeGroup<'a>>,
+        attrs: &'a [AttributeGroup<'a>],
         mods: Modifiers,
         doc_comment: Option<&'a [u8]>,
     ) -> PResult<ClassDecl<'a>> {
         let mut extends = None;
-        let mut implements = Vec::new();
+        let mut implements: &'a [Name<'a>] = &[];
         let mut enum_backing = None;
         match kind {
             ClassKind::Class => {
@@ -542,7 +556,7 @@ impl<'a> Parser<'a> {
             return Err(self.unexpected(&[T::LBrace]));
         }
         self.bump();
-        let mut members = Vec::new();
+        let mut members = self.bvec();
         while !self.at(T::RBrace) {
             members.push(self.class_member(kind)?);
         }
@@ -555,12 +569,13 @@ impl<'a> Parser<'a> {
             extends,
             implements,
             enum_backing,
-            members,
+            members: members.into_bump_slice(),
             doc_comment,
             span: self.span_from(start),
         })
     }
 
+    #[inline(never)]
     fn class_member(&mut self, kind: ClassKind) -> PResult<ClassMember<'a>> {
         let start = self.pos;
         if self.at(T::Use) {
@@ -569,7 +584,7 @@ impl<'a> Parser<'a> {
         let attrs = if self.at(T::Attribute) {
             self.attributes()?
         } else {
-            Vec::new()
+            &[]
         };
         if self.at(T::Case) {
             let _ = kind;
@@ -623,7 +638,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                let mut items = Vec::new();
+                let mut items = self.bvec();
                 loop {
                     let istart = self.pos;
                     let doc = self.doc_comment_before(istart);
@@ -651,7 +666,7 @@ impl<'a> Parser<'a> {
                     attrs,
                     modifiers: mods,
                     ty,
-                    items,
+                    items: items.into_bump_slice(),
                     doc_comment,
                     span: self.span_from(start),
                 }))
@@ -705,7 +720,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Some(self.type_decl()?)
                 };
-                let mut props = Vec::new();
+                let mut props = self.bvec();
                 loop {
                     let pstart = self.pos;
                     let doc = self.doc_comment_before(pstart);
@@ -735,7 +750,7 @@ impl<'a> Parser<'a> {
                             attrs,
                             modifiers: mods,
                             ty,
-                            props,
+                            props: props.into_bump_slice(),
                             doc_comment,
                             span: self.span_from(start),
                         }));
@@ -743,7 +758,7 @@ impl<'a> Parser<'a> {
                     props.push(PropertyItem {
                         name,
                         default,
-                        hooks: Vec::new(),
+                        hooks: &[],
                         has_hook_list: false,
                         doc_comment: doc,
                         span: self.span_from(pstart),
@@ -758,7 +773,7 @@ impl<'a> Parser<'a> {
                     attrs,
                     modifiers: mods,
                     ty,
-                    props,
+                    props: props.into_bump_slice(),
                     doc_comment,
                     span: self.span_from(start),
                 }))
@@ -775,15 +790,16 @@ impl<'a> Parser<'a> {
     }
 
     /// `{ get => ...; set { ... } }`
-    fn property_hooks(&mut self) -> PResult<Vec<PropertyHook<'a>>> {
+    #[inline(never)]
+    fn property_hooks(&mut self) -> PResult<&'a [PropertyHook<'a>]> {
         self.expect1(T::LBrace)?;
-        let mut hooks = Vec::new();
+        let mut hooks = self.bvec();
         while !self.at(T::RBrace) {
             let start = self.pos;
             let attrs = if self.at(T::Attribute) {
                 self.attributes()?
             } else {
-                Vec::new()
+                &[]
             };
             let doc_comment = self.doc_comment_before(start);
             let mut modifiers = Modifiers::default();
@@ -812,7 +828,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let e = self.expr()?;
                     self.expect(T::Semicolon, &[])?;
-                    HookBody::Expr(Box::new(e))
+                    HookBody::Expr(self.alloc(e))
                 }
                 T::LBrace => HookBody::Block(self.block_body()?),
                 _ => return Err(self.unexpected(&[T::Semicolon, T::LBrace, T::DoubleArrow])),
@@ -829,15 +845,16 @@ impl<'a> Parser<'a> {
             });
         }
         self.bump();
-        Ok(hooks)
+        Ok(hooks.into_bump_slice())
     }
 
     /// `use A, B { ... }` inside a class.
+    #[inline(never)]
     fn trait_use(&mut self) -> PResult<TraitUse<'a>> {
         let start = self.pos;
         self.bump();
         let traits = self.name_list()?;
-        let mut adaptations = Vec::new();
+        let mut adaptations = self.bvec();
         let mut has_block = false;
         if self.eat(T::LBrace) {
             has_block = true;
@@ -850,7 +867,7 @@ impl<'a> Parser<'a> {
         }
         Ok(TraitUse {
             traits,
-            adaptations,
+            adaptations: adaptations.into_bump_slice(),
             has_block,
             span: self.span_from(start),
         })

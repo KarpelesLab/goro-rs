@@ -6,7 +6,8 @@ use goro_syntax::{dump, parse};
 
 fn d(code: &str) -> String {
     let src = format!("<?php {}", code);
-    match parse(src.as_bytes()) {
+    let arena = goro_syntax::Arena::new();
+    match parse(&arena, src.as_bytes()) {
         Ok(p) => dump::program(&p),
         Err(e) => format!("ERROR {}", e),
     }
@@ -238,7 +239,8 @@ fn declarations() {
 #[test]
 fn spans_and_lines() {
     let src = b"<?php\nfunction f(\n  $a\n) {\n  return 1;\n}\n$x = 1 +\n  2;\n";
-    let p = parse(src).unwrap();
+    let arena = goro_syntax::Arena::new();
+    let p = parse(&arena, src).unwrap();
     let f = &p.stmts[0];
     assert_eq!((f.span.line, f.span.end_line), (2, 6));
     let x = &p.stmts[1];
@@ -251,32 +253,33 @@ fn spans_and_lines() {
 
 #[test]
 fn compile_errors_and_notices() {
-    let p = parse(b"<?php $a = 1 ? 2 : 3 ? 4 : 5;").unwrap();
+    let arena = goro_syntax::Arena::new();
+    let p = parse(&arena, b"<?php $a = 1 ? 2 : 3 ? 4 : 5;").unwrap();
     assert_eq!(
         p.compile_errors[0].message,
         "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`"
     );
-    let p = parse(b"<?php $a = (1 ? 2 : 3) ? 4 : 5; $b = 1 ?: 2 ?: 3;").unwrap();
+    let p = parse(&arena, b"<?php $a = (1 ? 2 : 3) ? 4 : 5; $b = 1 ?: 2 ?: 3;").unwrap();
     assert!(p.compile_errors.is_empty());
-    let p = parse(b"<?php $a = 1 |> fn($x) => $x;").unwrap();
+    let p = parse(&arena, b"<?php $a = 1 |> fn($x) => $x;").unwrap();
     assert_eq!(
         p.compile_errors[0].message,
         "Arrow functions on the right hand side of |> must be parenthesized"
     );
-    let p = parse(b"<?php $a = 1 |> (fn($x) => $x);").unwrap();
+    let p = parse(&arena, b"<?php $a = 1 |> (fn($x) => $x);").unwrap();
     assert!(p.compile_errors.is_empty());
-    let p = parse(b"<?php\n$a = (integer) $b;").unwrap();
+    let p = parse(&arena, b"<?php\n$a = (integer) $b;").unwrap();
     assert_eq!(
         p.notices[0].message,
         "Non-canonical cast (integer) is deprecated, use the (int) cast instead"
     );
     assert_eq!(p.notices[0].line, 2);
-    let e = parse(b"<?php class A { public private $x; }").unwrap_err();
+    let e = parse(&arena, b"<?php class A { public private $x; }").unwrap_err();
     assert_eq!(
         e.to_string(),
         "Fatal error: Multiple access type modifiers are not allowed on line 1"
     );
-    let e = parse(b"<?php abstract final class A {}").unwrap_err();
+    let e = parse(&arena, b"<?php abstract final class A {}").unwrap_err();
     assert_eq!(
         e.message,
         "Cannot use the final modifier on an abstract class"

@@ -12,5 +12,5 @@ pub mod parser;
 pub mod token;
 
 pub use lexer::{LexError, Lexer, LexerOptions, tokenize};
-pub use parser::{ErrorKind, ParseError, ParseOptions, parse, parse_eval, parse_with};
+pub use parser::{Arena, ErrorKind, ParseError, ParseOptions, parse, parse_eval, parse_with};
 pub use token::{T, Token};
