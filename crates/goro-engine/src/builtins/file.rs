@@ -1593,6 +1593,11 @@ pub(crate) fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if let Backing::User { obj } = &s.backing {
             m.insert(Key::from("wrapper_data"), Value::Object(obj.clone()));
         }
+        if let Backing::Native(n) = &s.backing
+            && let Some(w) = n.wrapper_data()
+        {
+            m.insert(Key::from("wrapper_data"), w);
+        }
         let pipe = s.is_pipe();
         // no wrapper: gzopen() streams (test zlib_wrapper_meta_data_basic.phpt)
         let nowrap = pipe || s.wrapper.is_empty();

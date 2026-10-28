@@ -1552,6 +1552,27 @@ fn client_common(
     Ok(sock_stream(sock, addr))
 }
 
+/// Connects a client socket to a transport address (`tcp://host:port`)
+/// for a stream wrapper (http://): the message on failure, as the
+/// wrapper reports it ("Connection refused").
+pub(crate) fn connect_client(addr: &[u8], timeout: Option<Duration>) -> Result<Sock, String> {
+    let t = match parse_target(addr) {
+        Ok(t) => t,
+        Err(AddrError::Transport(tr)) => {
+            return Err(format!(
+                "Unable to find the socket transport \"{tr}\" - did you forget to enable it when you configured PHP?"
+            ));
+        }
+        Err(AddrError::Parse) => {
+            return Err(format!(
+                "Failed to parse address \"{}\"",
+                String::from_utf8_lossy(addr)
+            ));
+        }
+    };
+    open_client(&t, timeout, false).map_err(|(_, m)| m)
+}
+
 fn ctx_value(a: &Args, i: usize) -> Option<Value> {
     let v = a.val(i);
     with_context(&v, |_| ()).map(|_| v)
