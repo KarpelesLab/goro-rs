@@ -11,6 +11,7 @@ mod csr;
 mod pkcs12;
 mod pkcs7;
 mod pkey;
+pub(crate) mod tls;
 mod x509;
 
 use std::rc::Rc;

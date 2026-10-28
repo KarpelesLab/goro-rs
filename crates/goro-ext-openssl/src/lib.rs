@@ -26,6 +26,7 @@ pub mod pkcs12;
 pub mod req;
 pub mod spki;
 pub mod time;
+pub mod tls;
 pub mod v3conf;
 pub mod verify;
 pub mod x509;

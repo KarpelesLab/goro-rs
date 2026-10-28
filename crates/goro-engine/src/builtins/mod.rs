@@ -30,6 +30,7 @@ pub mod pcre;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod sockets;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
@@ -55,6 +56,7 @@ pub fn modules() -> Vec<&'static Module> {
         &info::MODULE,
         &fiber::MODULE,
         &file::MODULE,
+        &sockets::MODULE,
         &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,
