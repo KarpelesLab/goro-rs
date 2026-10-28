@@ -1078,13 +1078,17 @@ impl Vm {
         let key = normalize_const_name(&name);
         let fresh = !self.constants.contains_key(&key);
         self.declare_constant(n, v)?;
-        if fresh {
+        if fresh && !self.code_ref().const_attrs.is_empty() {
+            // The statement's own attributes: by name and line, since a
+            // redefinition with other attributes keeps the first's (test
+            // Zend/tests/attributes/constants/constant_redefined_addition).
+            let line = self.cur_line();
             let attrs = self
                 .code_ref()
                 .const_attrs
                 .iter()
-                .find(|(k, _)| normalize_const_name(k) == key)
-                .map(|(_, a)| a.clone());
+                .find(|(k, l, _)| *l == line && normalize_const_name(k) == key)
+                .map(|(_, _, a)| a.clone());
             if let Some(a) = attrs {
                 self.const_attrs.insert(key, a);
             }

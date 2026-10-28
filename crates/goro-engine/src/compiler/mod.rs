@@ -125,7 +125,7 @@ pub(crate) struct FState<'a> {
     region_ids: u32,
     pub flags: u32,
     pub num_statics: u32,
-    pub const_attrs: Vec<(PhpStr, Rc<[AttrInfo]>)>,
+    pub const_attrs: Vec<(PhpStr, u32, Rc<[AttrInfo]>)>,
     pub discarded_calls: Vec<u32>,
     pub line: u32,
     /// `__FUNCTION__`
@@ -1058,7 +1058,9 @@ impl<'a> Compiler<'a> {
                     let a = self.attributes(attrs)?;
                     self.check_internal_attrs(&a, 64, s.span.line)?;
                     let full = self.qualify(items[0].name.name);
-                    self.f.const_attrs.push((PhpStr::from(full), a));
+                    self.f
+                        .const_attrs
+                        .push((PhpStr::from(full), s.span.line, a));
                 }
                 for c in *items {
                     let full = self.qualify(c.name.name);

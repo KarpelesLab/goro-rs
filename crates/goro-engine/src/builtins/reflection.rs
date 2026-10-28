@@ -704,7 +704,7 @@ pub static MODULE: Module = Module {
         ("reflectionconstant::getfilename", gc_file),
         ("reflectionconstant::getextension", gc_extension),
         ("reflectionconstant::getextensionname", gc_extension_name),
-        ("reflectionconstant::getattributes", empty_array),
+        ("reflectionconstant::getattributes", gc_attrs),
         ("reflectionconstant::__tostring", gc_to_string),
         ("reflectiongenerator::__construct", g_construct),
         ("reflectiongenerator::getexecutingline", g_line),
@@ -5682,9 +5682,30 @@ fn gc_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
     Ok(vm.lookup_constant(&n)?.unwrap_or_default())
 }
-fn gc_deprecated(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn gc_deprecated(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
-    Ok(Value::Bool(super::misc::const_deprecation(&n).is_some()))
+    let user = vm.const_attrs.get(&normalize_const(&n)).is_some_and(|at| {
+        at.iter().any(|x| {
+            x.name
+                .strip_prefix(b"\\")
+                .unwrap_or(&x.name)
+                .eq_ignore_ascii_case(b"Deprecated")
+        })
+    });
+    Ok(Value::Bool(
+        user || super::misc::const_deprecation(&n).is_some(),
+    ))
+}
+/// Attributes of a `const` statement (PHP 8.5, RFC: Attributes on
+/// Constants).
+fn gc_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let n = normalize_const(&gc_name_of(a));
+    let attrs: Vec<AttrInfo> = vm
+        .const_attrs
+        .get(&n)
+        .map(|v| v.to_vec())
+        .unwrap_or_default();
+    attributes_array(vm, a, &attrs, 64, std::ptr::null(), 0)
 }
 fn gc_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = normalize_const(&gc_name_of(a));
