@@ -151,7 +151,7 @@ pub(crate) struct TreeBuilder<'a> {
     /// The token being processed came from the end of the input: PHP
     /// reports no tree errors for it.
     suppress: bool,
-    names: HashMap<Box<str>, Str>,
+    names: HashMap<Box<str>, Str, std::hash::BuildHasherDefault<FxHasher>>,
     ns_html: Option<Str>,
     ns_svg: Str,
     ns_math: Str,
@@ -165,6 +165,24 @@ pub(crate) struct TreeBuilder<'a> {
 
 /// Whitespace for the tree builder. PHP does not count U+000C FORM FEED
 /// (observed on PHP 8.5: a lone form feed ends up in `body`).
+/// A small fast hasher for the name interner (keys are short tag and
+/// attribute names).
+#[derive(Default)]
+pub(crate) struct FxHasher(u64);
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 #[inline]
 fn is_ws_byte(c: u8) -> bool {
     matches!(c, b'\t' | b'\n' | b'\r' | b' ')
@@ -214,7 +232,7 @@ impl<'a> TreeBuilder<'a> {
             errors: Vec::new(),
             span: (0, 0),
             suppress: false,
-            names: HashMap::new(),
+            names: HashMap::default(),
             ns_html,
             ns_svg: Str::from(SVG_NS),
             ns_math: Str::from(MATHML_NS),
@@ -306,7 +324,18 @@ impl<'a> TreeBuilder<'a> {
                         return;
                     }
                 }
-                if self.use_html_rules_for_text() {
+                if self.mode == Mode::InBody
+                    && s.len() == text.len()
+                    && !text.contains('\0')
+                    && self.use_html_rules_for_text()
+                {
+                    // Common case: the whole token goes into the tree.
+                    self.reconstruct_afe();
+                    if !all_ws(&text) {
+                        self.frameset_ok = false;
+                    }
+                    self.insert_text_cow(std::borrow::Cow::Owned(text), first);
+                } else if self.use_html_rules_for_text() {
                     self.text_in_mode(s, first);
                 } else {
                     self.foreign_text(s, first);
@@ -649,6 +678,11 @@ impl<'a> TreeBuilder<'a> {
     }
 
     fn insert_text(&mut self, s: &str, first: usize) {
+        self.insert_text_cow(std::borrow::Cow::Borrowed(s), first);
+    }
+
+    /// Inserts text, moving `s` into a new text node when there is one.
+    fn insert_text_cow(&mut self, s: std::borrow::Cow<'_, str>, first: usize) {
         if s.is_empty() {
             return;
         }
@@ -663,12 +697,12 @@ impl<'a> TreeBuilder<'a> {
         if let Some(p) = prev
             && let NodeData::Text(t) = &mut self.arena.node_mut(p).data
         {
-            t.push_str(s);
+            t.push_str(&s);
             return;
         }
         let line = self.line_at(first);
         let owner = self.owner;
-        let t = self.arena.create(owner, NodeData::Text(s.to_string()));
+        let t = self.arena.create(owner, NodeData::Text(s.into_owned()));
         self.arena.node_mut(t).line = line;
         self.arena.raw_insert_before(parent, t, before);
     }

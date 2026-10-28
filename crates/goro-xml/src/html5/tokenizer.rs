@@ -234,58 +234,45 @@ fn c1_replacement(n: u32) -> Option<u32> {
     })
 }
 
-/// How many leading bytes of `s` are a prefix of some reference name.
-fn prefix_scan_len(s: &[u8]) -> usize {
+/// Scans a named character reference at the start of `s` (after the
+/// `&`): returns how many bytes are a prefix of some reference name, and
+/// the longest reference name found among them (length, replacement).
+/// The sorted table is narrowed one character at a time.
+fn scan_named_ref(s: &[u8]) -> (usize, Option<(usize, &'static str)>) {
+    let (mut lo, mut hi) = (0usize, ENTITIES.len());
+    let mut best = None;
     let mut l = 0;
-    while l < s.len() && l < 40 {
+    while l < s.len() {
         let c = s[l];
         if !(c.is_ascii_alphanumeric() || c == b';') {
             break;
         }
-        let pre = &s[..l + 1];
-        let i = ENTITIES.partition_point(|(k, _)| k.as_bytes() < pre);
-        if i >= ENTITIES.len() || !ENTITIES[i].0.as_bytes().starts_with(pre) {
+        // Entities in [lo, hi) all start with s[..l].
+        let range = &ENTITIES[lo..hi];
+        let nlo = lo
+            + range.partition_point(|(k, _)| {
+                let k = k.as_bytes();
+                k.len() <= l || k[l] < c
+            });
+        let nhi = lo
+            + range.partition_point(|(k, _)| {
+                let k = k.as_bytes();
+                k.len() <= l || k[l] <= c
+            });
+        if nlo >= nhi {
             break;
         }
+        lo = nlo;
+        hi = nhi;
         l += 1;
+        if ENTITIES[lo].0.len() == l {
+            best = Some((l, ENTITIES[lo].1));
+        }
         if c == b';' {
             break;
         }
     }
-    l
-}
-
-/// Looks up the longest named character reference at the start of `s`
-/// (which follows the `&`). Returns the matched length and the replacement.
-pub(crate) fn match_named_ref(s: &[u8]) -> Option<(usize, &'static str)> {
-    let mut n = 0;
-    while n < s.len() && n < 40 && s[n].is_ascii_alphanumeric() {
-        n += 1;
-    }
-    if n == 0 {
-        return None;
-    }
-    let find = |name: &[u8]| -> Option<&'static str> {
-        ENTITIES
-            .binary_search_by(|(k, _)| k.as_bytes().cmp(name))
-            .ok()
-            .map(|i| ENTITIES[i].1)
-    };
-    if s.get(n) == Some(&b';')
-        && n < 40
-        && let Some(v) = find(&s[..n + 1])
-    {
-        return Some((n + 1, v));
-    }
-    // Legacy names without semicolon are at most 6 characters long.
-    let mut l = n.min(6);
-    while l > 0 {
-        if let Some(v) = find(&s[..l]) {
-            return Some((l, v));
-        }
-        l -= 1;
-    }
-    None
+    (l, best)
 }
 
 pub(crate) struct Tokenizer {
@@ -618,8 +605,9 @@ impl Tokenizer {
         // name, and uses the character there for the attribute rule and
         // for the position of the error (observed on PHP 8.5: `&notit;` is
         // reported at the second `t`; `a='&noti'` gives "¬i").
-        let scan_end = self.pos + prefix_scan_len(rest);
-        match match_named_ref(rest) {
+        let (scan, found) = scan_named_ref(rest);
+        let scan_end = self.pos + scan;
+        match found {
             Some((len, value)) => {
                 let last_semicolon = rest[len - 1] == b';';
                 let end = self.pos + len;

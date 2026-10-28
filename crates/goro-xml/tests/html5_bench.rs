@@ -30,6 +30,14 @@ fn bench() {
         std::hint::black_box(r.doc);
     }
     eprintln!("bytes={} parse best_ms={best:.1}", input.len());
+    let text = String::from_utf8(input.clone()).unwrap();
+    let t = Instant::now();
+    let toks = html5::testing::tokenize(&text, "Data state", None);
+    eprintln!(
+        "tokenize_ms={:.1} tokens={}",
+        t.elapsed().as_secs_f64() * 1e3,
+        toks.len()
+    );
     let mut a = Arena::new();
     let r = html5::parse_document(&mut a, &input, &ParseOptions::default());
     let t = Instant::now();
