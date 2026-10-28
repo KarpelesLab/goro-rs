@@ -465,6 +465,7 @@ pub static MODULE: Module = Module {
         ("reflectionfunction::__tostring", f_to_string),
         ("reflectionfunction::isanonymous", f_is_anon),
         ("reflectionfunction::isdisabled", f_is_disabled),
+        ("reflectionattribute::__construct", a_construct),
         ("reflectionfunction::invoke", f_invoke),
         ("reflectionfunction::invokeargs", f_invoke_args),
         ("reflectionfunction::getclosure", f_get_closure),
@@ -931,6 +932,9 @@ macro_rules! need_class {
     };
 }
 
+fn a_construct(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    refl_error(vm, "Cannot directly instantiate ReflectionAttribute")
+}
 fn f_is_disabled(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     vm.deprecated("Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions")?;
     Ok(Value::Bool(false))
@@ -3572,6 +3576,8 @@ fn set_static_checked(
             }
         }
     }
+    // A reference bound to typed properties keeps their types.
+    let v = vm.typed_ref_value(&sp.cell, v)?;
     let old = sp.cell.set(v);
     drop(old);
     Ok(())
