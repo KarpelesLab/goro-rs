@@ -368,6 +368,20 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
             );
         }
     }
+    for k in [
+        &b"mbstring.http_input"[..],
+        b"mbstring.http_output",
+        b"mbstring.internal_encoding",
+    ] {
+        if ini.iter().rev().find(|(n, _)| n.as_slice() == k).is_some_and(|(_, v)| !v.is_empty()) {
+            let _ = vm.raise_at(
+                crate::vm::errors::E_DEPRECATED,
+                &format!("PHP Startup: Use of {} is deprecated", String::from_utf8_lossy(k)),
+                goro_runtime::PhpStr::from("Unknown"),
+                0,
+            );
+        }
+    }
 }
 
 /// ini_set("assert.callback") replaces a callback set by assert_options()

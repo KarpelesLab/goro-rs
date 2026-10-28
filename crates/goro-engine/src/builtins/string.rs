@@ -1557,9 +1557,23 @@ fn localeconv(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 
 // ---------------------------------------------------------------- html
 
+/// The charset used when none is given: internal_encoding, then
+/// default_charset (PHP manual: htmlentities, "encoding";
+/// mbstring.internal_encoding does not count: htmlentities25).
+fn default_html_charset(vm: &Vm) -> PhpStr {
+    for k in [&b"internal_encoding"[..]] {
+        if let Some(v) = vm.get_ini(k)
+            && !v.is_empty()
+        {
+            return v;
+        }
+    }
+    vm.get_ini(b"default_charset").unwrap_or_default()
+}
+
 fn charset_arg(vm: &mut Vm, a: &Args, i: usize) -> R<std_ext::html::Charset> {
     let name = a.opt_str(i);
-    let default = vm.get_ini(b"default_charset").unwrap_or_default();
+    let default = default_html_charset(vm);
     let mut d = Vec::new();
     let cs = std_ext::html::resolve_charset(name.as_ref().map(|n| n.as_bytes()), &default, &mut d);
     diags(vm, a, d)?;
@@ -1614,7 +1628,7 @@ fn get_html_translation_table(vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else {
         PhpStr::from("UTF-8")
     };
-    let default = vm.get_ini(b"default_charset").unwrap_or_default();
+    let default = default_html_charset(vm);
     let mut d = Vec::new();
     let cs = std_ext::html::resolve_charset(Some(&name), &default, &mut d);
     diags(vm, a, d)?;
