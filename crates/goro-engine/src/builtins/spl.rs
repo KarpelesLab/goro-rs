@@ -542,6 +542,7 @@ pub static MODULE: Module = Module {
         ("splobjectstorage", os_hooks),
         ("multipleiterator", os_hooks),
         ("splfileobject", sfo_hooks),
+        ("globiterator", glob_hooks),
         ("recursiveiteratoriterator", rii_hooks),
     ],
     listed: true,
@@ -625,11 +626,19 @@ pub struct AoData {
     /// A sort is running: the data can't change (test
     /// ArrayObject_exchange_array_during_sorting).
     sorting: bool,
+    /// A RecursiveArrayIterator child made from an array element: the
+    /// parent and the element's position. The data is that element, so
+    /// changes reach the parent (tests bug42654, bug42654_2); `storage`
+    /// is the fallback once the element is gone.
+    link: Option<(ObjRef, u32)>,
 }
 
 impl goro_runtime::NativeData for AoData {
     fn trace(&self, visit: &mut dyn FnMut(&Value)) {
         visit(&self.storage);
+        if let Some((p, _)) = &self.link {
+            visit(&Value::Object(p.clone()));
+        }
     }
     fn clear(&mut self) {
         self.storage = Value::Array(PhpArray::new());
@@ -647,6 +656,7 @@ fn ao_hooks() -> NativeHooks {
                     iter_class: PhpStr::from("ArrayIterator"),
                     pos: 0,
                     sorting: false,
+                    link: None,
                 },
             )
         }),
@@ -655,14 +665,15 @@ fn ao_hooks() -> NativeHooks {
             // A cloned ArrayObject wrapping another object gets a copy of
             // its data (tests ArrayObject_clone_other_std_props,
             // arrayObject_clone_basic2).
-            let copy = match with(from, |d: &mut AoData| d.storage.clone()) {
+            let copy = match Some(ao_own_storage(from)) {
                 Some(Value::Object(x)) if !shares && !ObjRef::ptr_eq(&x, from) => {
                     Some(ao_array(vm, from))
                 }
                 _ => None,
             };
+            let own = ao_own_storage(from);
             let d = with(from, |d: &mut AoData| AoData {
-                storage: match (&d.storage, copy) {
+                storage: match (&own, copy) {
                     (_, Some(c)) => Value::Array(c),
                     (Value::Array(_), _) if shares => Value::Object(from.clone()),
                     // An object wrapping itself: the clone wraps the clone
@@ -674,6 +685,7 @@ fn ao_hooks() -> NativeHooks {
                 iter_class: d.iter_class.clone(),
                 pos: d.pos,
                 sorting: false,
+                link: None,
             });
             if let Some(d) = d {
                 set_native(to, d);
@@ -737,6 +749,12 @@ fn ao_owner(o: &ObjRef) -> ObjRef {
 /// The storage array's slot, when the data is an array.
 fn ao_storage_ptr(o: &ObjRef) -> Option<*mut Value> {
     let owner = ao_owner(o);
+    let link = with(&owner, |d: &mut AoData| d.link.clone()).flatten();
+    if let Some((parent, pos)) = link
+        && let Some(p) = ao_elem_ptr(&parent, pos)
+    {
+        return Some(p);
+    }
     with(&owner, |d: &mut AoData| {
         if matches!(d.storage, Value::Array(_)) {
             Some(&mut d.storage as *mut Value)
@@ -745,6 +763,40 @@ fn ao_storage_ptr(o: &ObjRef) -> Option<*mut Value> {
         }
     })
     .flatten()
+}
+
+/// The slot of the array at position `pos` of `parent`'s data (see
+/// [`AoData::link`]).
+fn ao_elem_ptr(parent: &ObjRef, pos: u32) -> Option<*mut Value> {
+    let pp = ao_storage_ptr(parent)?;
+    // SAFETY: storage slots live in the owners' native data, which nothing
+    // replaces while the pointer is used.
+    let Value::Array(a) = (unsafe { &mut *pp }) else {
+        return None;
+    };
+    let v = a.make_mut().value_at_mut(pos)? as *mut Value;
+    match unsafe { &mut *v } {
+        Value::Array(_) => Some(v),
+        Value::Ref(r) => {
+            let mut g = r.borrow_mut();
+            let p = &mut *g as *mut Value;
+            drop(g);
+            matches!(unsafe { &*p }, Value::Array(_)).then_some(p)
+        }
+        _ => None,
+    }
+}
+
+/// The object's own data (an array or an object), following a child's
+/// link.
+fn ao_own_storage(o: &ObjRef) -> Value {
+    let link = with(o, |d: &mut AoData| d.link.clone()).flatten();
+    if let Some((parent, pos)) = link
+        && let Some(p) = ao_elem_ptr(&parent, pos)
+    {
+        return unsafe { (*p).clone() };
+    }
+    with(o, |d: &mut AoData| d.storage.clone()).unwrap_or_default()
 }
 
 /// The wrapped plain object, when the data is an object's properties.
@@ -956,6 +1008,7 @@ fn ao_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let storage = ao_input(vm, a, v, "__construct")?;
     let flags = ao_inherit_flags(a, &storage, flags);
     with(&o, |d: &mut AoData| {
+        d.link = None;
         d.storage = storage;
         d.flags = flags;
         d.iter_class = ic;
@@ -1006,6 +1059,7 @@ fn ai_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let storage = ao_input(vm, a, v, "__construct")?;
     let flags = ao_inherit_flags(a, &storage, a.int_or(1, 0));
     with(&o, |d: &mut AoData| {
+        d.link = None;
         d.storage = storage;
         d.flags = flags;
         d.pos = 0;
@@ -1272,10 +1326,8 @@ fn is_iterator_class(vm: &Vm, a: &Args) -> bool {
 
 fn ao_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let (flags, storage, ic) = with(&o, |d: &mut AoData| {
-        (d.flags, d.storage.clone(), d.iter_class.clone())
-    })
-    .unwrap();
+    let storage = ao_own_storage(&o);
+    let (flags, ic) = with(&o, |d: &mut AoData| (d.flags, d.iter_class.clone())).unwrap();
     // An object wrapping itself is flagged instead of stored (test
     // ArrayObject/bug74669).
     let (flags, storage) = match &storage {
@@ -1327,6 +1379,7 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if flags & AO_IS_SELF != 0 {
         with(&o, |d: &mut AoData| {
             d.flags = flags & !AO_IS_SELF;
+            d.link = None;
             d.storage = Value::Object(o.clone());
         });
         restore_members(vm, &o, &m)?;
@@ -1346,6 +1399,7 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     with(&o, |d: &mut AoData| {
         d.flags = flags;
+        d.link = None;
         d.storage = storage;
     });
     restore_members(vm, &o, &m)?;
@@ -1379,13 +1433,18 @@ fn ao_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn ao_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let (flags, storage) = with(&o, |d: &mut AoData| (d.flags, d.storage.clone())).unwrap();
-    let mut out = format!("x:i:{};", flags).into_bytes();
-    out.extend_from_slice(&vm.serialize_value(&storage)?);
-    out.extend_from_slice(b";m:");
-    let m = Value::Array(members(vm, &o));
-    out.extend_from_slice(&vm.serialize_value(&m)?);
-    Ok(Value::Str(PhpStr::from(out)))
+    let storage = ao_own_storage(&o);
+    let flags = with(&o, |d: &mut AoData| d.flags).unwrap();
+    // One numbering, where the flags are value 1 (test bug45826).
+    vm.with_ser_ctx(|vm| {
+        let mut out = b"x:".to_vec();
+        out.extend_from_slice(&vm.serialize_value(&Value::Int(flags))?);
+        out.extend_from_slice(&vm.serialize_value(&storage)?);
+        out.extend_from_slice(b";m:");
+        let m = Value::Array(members(vm, &o));
+        out.extend_from_slice(&vm.serialize_value(&m)?);
+        Ok(Value::Str(PhpStr::from(out)))
+    })
 }
 
 fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1403,27 +1462,51 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
         )
     };
     let b = s.as_bytes();
-    if !b.starts_with(b"x:i:") {
-        return bad(vm, 0, b.len());
-    }
-    let Some(semi) = b.iter().position(|&c| c == b';') else {
-        return bad(vm, 0, b.len());
+    // `x:` flags storage `;m:` members, read in the value table of the
+    // unserialize() in progress, where the flags take a number (tests
+    // bug70166, bug73029). Error offsets observed on PHP 8.5: a value
+    // that does not parse fails where the parser stopped, one of the
+    // wrong type at its start (storage) or end (flags, members).
+    let parsed = vm.with_unser_ctx(|vm| -> R<Result<(i64, Value, Value), usize>> {
+        if !b.starts_with(b"x:") {
+            return Ok(Err(0));
+        }
+        let mut cur = 2;
+        let flags = match vm.unser_part(&b[cur..], "ArrayObject::unserialize()")? {
+            Ok((Value::Int(f), n)) => {
+                cur += n;
+                f
+            }
+            Ok((_, n)) => return Ok(Err(cur + n)),
+            Err(_) => return Ok(Err(cur)),
+        };
+        let storage = match vm.unser_part(&b[cur..], "ArrayObject::unserialize()")? {
+            Ok((v @ (Value::Array(_) | Value::Object(_)), n)) => {
+                cur += n;
+                v
+            }
+            Ok(_) => return Ok(Err(cur)),
+            Err(off) => return Ok(Err(cur + off)),
+        };
+        if b.get(cur) != Some(&b';') {
+            return Ok(Err(cur));
+        }
+        cur += 1;
+        if !b[cur..].starts_with(b"m:") {
+            return Ok(Err(cur));
+        }
+        cur += 2;
+        let m = match vm.unser_part(&b[cur..], "ArrayObject::unserialize()")? {
+            Ok((v @ Value::Array(_), _)) => v,
+            Ok((_, n)) => return Ok(Err(cur + n)),
+            Err(off) => return Ok(Err(cur + off)),
+        };
+        Ok(Ok((flags, storage, m)))
+    })?;
+    let (flags, storage, m) = match parsed {
+        Ok(x) => x,
+        Err(at) => return bad(vm, at, b.len()),
     };
-    let Ok(flags) = std::str::from_utf8(&b[4..semi])
-        .unwrap_or("x")
-        .parse::<i64>()
-    else {
-        return bad(vm, 0, b.len());
-    };
-    let rest = &b[semi + 1..];
-    let Some(mpos) = rfind(rest, b";m:") else {
-        return bad(vm, semi + 1, b.len());
-    };
-    let storage = vm.unserialize_bytes(&rest[..mpos], &PhpArray::new())?;
-    let m = vm.unserialize_bytes(&rest[mpos + 3..], &PhpArray::new())?;
-    if !matches!(storage, Value::Array(_) | Value::Object(_)) {
-        return bad(vm, semi + 1, b.len());
-    }
     // The deprecation, the members, then the object check (test
     // ArrayObject/bug70155).
     if matches!(storage, Value::Object(_)) {
@@ -1437,18 +1520,10 @@ fn ao_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     with(&o, |d: &mut AoData| {
         d.flags = flags;
+        d.link = None;
         d.storage = storage;
     });
     Ok(Value::Null)
-}
-
-fn rfind(h: &[u8], n: &[u8]) -> Option<usize> {
-    if h.len() < n.len() {
-        return None;
-    }
-    (0..=h.len() - n.len())
-        .rev()
-        .find(|&i| &h[i..i + n.len()] == n)
 }
 
 fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1462,6 +1537,7 @@ fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let it = vm.instantiate(&cls)?;
     with(&it, |d: &mut AoData| {
+        d.link = None;
         d.storage = Value::Object(o.clone());
         d.flags = flags;
         d.pos = 0;
@@ -1475,7 +1551,10 @@ fn ao_exchange(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let old = ao_array(vm, &o);
     let v = a.val(0);
     let storage = ao_input(vm, a, v, "exchangeArray")?;
-    with(&o, |d: &mut AoData| d.storage = storage);
+    with(&o, |d: &mut AoData| {
+        d.link = None;
+        d.storage = storage;
+    });
     Ok(Value::Array(old))
 }
 
@@ -1495,7 +1574,7 @@ fn ao_get_iter_class(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ao_debug_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let mut out = members(vm, &o);
-    let storage = with(&o, |d: &mut AoData| d.storage.clone()).unwrap_or_default();
+    let storage = ao_own_storage(&o);
     if matches!(&storage, Value::Object(x) if ObjRef::ptr_eq(x, &o)) {
         // test ArrayObject/array_022
         return Ok(Value::Array(out));
@@ -1624,6 +1703,47 @@ fn ai_entry(vm: &mut Vm, o: &ObjRef) -> Option<(u32, Value, Value)> {
     }
 }
 
+/// Whether `foreach` by reference can go over `o`: an ArrayIterator
+/// whose current() is the internal one (observed on PHP 8.5: an
+/// overriding current() makes it "An iterator cannot be used with foreach
+/// by reference").
+pub(crate) fn ai_iterates_by_ref(vm: &mut Vm, o: &ObjRef) -> bool {
+    let cls = vm.class_of(o);
+    is_ao(o)
+        && is_subclass_named(&cls, b"arrayiterator")
+        && cls
+            .find_method(b"current")
+            .is_some_and(|f| f.code().is_none())
+}
+
+/// The current element of an ArrayIterator, by reference into its storage
+/// (a property of a wrapped object, by name).
+pub(crate) fn ai_current_ref(vm: &mut Vm, o: &ObjRef) -> R<Option<Value>> {
+    let Some((p, k, _)) = ai_entry(vm, o) else {
+        return Ok(None);
+    };
+    if let Some(ptr) = ao_storage_ptr(o) {
+        // SAFETY: the storage slot lives in the owner's native data, which
+        // nothing replaces while this runs.
+        if let Value::Array(a) = unsafe { &mut *ptr }
+            && let Some(v) = a.make_mut().value_at_mut(p)
+        {
+            return Ok(Some(Value::Ref(v.make_ref())));
+        }
+        return Ok(None);
+    }
+    let Some(w) = ao_wrapped(o) else {
+        return Ok(None);
+    };
+    let name = match k {
+        Value::Str(s) => s,
+        Value::Int(i) => PhpStr::from(i.to_string()),
+        _ => return Ok(None),
+    };
+    let r = vm.prop_action(&w, &name, 0, crate::bytecode::PathAction::MakeRef, None)?;
+    Ok(Some(r))
+}
+
 fn ai_rewind(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     ai_set_pos(a.this_obj(), 0);
     Ok(Value::Null)
@@ -1682,8 +1802,8 @@ fn rai_has_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let flags = ao_flags(&o);
-    let cur = ai_entry(vm, &o).map(|e| e.2);
-    let Some(cur) = cur else {
+    let entry = ai_entry(vm, &o);
+    let Some((pos, _, cur)) = entry else {
         return Ok(Value::Null);
     };
     match &cur {
@@ -1721,10 +1841,17 @@ fn rai_get_children(vm: &mut Vm, a: &mut Args) -> R<Value> {
             // ArrayObject/bug38618).
             vm.deprecated("ArrayIterator::__construct(): Using an object as a backing array for ArrayIterator is deprecated, as it allows violating class constraints and invariants")?;
         }
+        let is_arr = matches!(cur, Value::Array(_));
         with(&child, |d: &mut AoData| {
+            d.link = None;
             d.storage = cur;
             d.flags = flags;
             d.pos = 0;
+            // An array element is shared with the parent (tests
+            // bug42654, bug42654_2).
+            if is_arr {
+                d.link = Some((o.clone(), pos));
+            }
         });
     }
     Ok(Value::Object(child))
@@ -1851,6 +1978,10 @@ fn fa_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn fa_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let data = a.array(0);
+    // A no-op on a non-empty array (test SplFixedArray_serialize).
+    if with(&o, |d: &mut FaData| !d.items.is_empty()).unwrap_or(false) {
+        return Ok(Value::Null);
+    }
     let mut items = Vec::new();
     for (k, v) in data.iter() {
         match k {
@@ -2556,15 +2687,18 @@ fn dll_prev(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn dll_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let flags = dll(a, |d| d.flags);
-    let mut out = format!("i:{};", flags).into_bytes();
-    // The live list: serializing an element may change it (test gh16589).
-    let mut i = 0;
-    while let Some(v) = dll(a, |d| d.items.get(i).cloned()) {
-        i += 1;
-        out.push(b':');
-        out.extend_from_slice(&vm.serialize_value(&v)?);
-    }
-    Ok(Value::Str(PhpStr::from(out)))
+    vm.with_ser_ctx(|vm| {
+        let mut out = vm.serialize_value(&Value::Int(flags))?;
+        // The live list: serializing an element may change it (test
+        // gh16589).
+        let mut i = 0;
+        while let Some(v) = dll(a, |d| d.items.get(i).cloned()) {
+            i += 1;
+            out.push(b':');
+            out.extend_from_slice(&vm.serialize_value(&v)?);
+        }
+        Ok(Value::Str(PhpStr::from(out)))
+    })
 }
 fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.str(0);
@@ -2572,63 +2706,40 @@ fn dll_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if b.is_empty() {
         return Ok(Value::Null);
     }
-    let fail = |vm: &mut Vm| -> R<Value> {
-        vm.throw(
-            "UnexpectedValueException",
-            &format!("Error at offset 0 of {} bytes", b.len()),
-        )
-    };
-    if !b.starts_with(b"i:") {
-        return fail(vm);
-    }
-    let Some(semi) = b.iter().position(|&c| c == b';') else {
-        return fail(vm);
-    };
-    let Ok(flags) = std::str::from_utf8(&b[2..semi])
-        .unwrap_or("x")
-        .parse::<i64>()
-    else {
-        return fail(vm);
-    };
-    let mut items = VecDeque::new();
-    // Elements follow, each prefixed with ':' and serialized.
-    let rest = &b[semi + 1..];
-    let mut chunks: Vec<&[u8]> = Vec::new();
-    let mut start = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == b':' && start.is_none() {
-            start = Some(i + 1);
-            i += 1;
-            continue;
-        }
-        i += 1;
-    }
-    if let Some(st) = start {
-        // Split greedily by trying successive prefixes.
-        let mut cur = st;
-        while cur <= rest.len() {
-            let mut end = cur + 1;
-            let mut found = None;
-            while end <= rest.len() {
-                if (end == rest.len() || rest[end] == b':')
-                    && let Some(v) = vm.unserialize_quiet(&rest[cur..end])
-                {
-                    found = Some((end, v));
-                    break;
-                }
-                end += 1;
+    // The flags, then `:` and a value for each element, read in the value
+    // table of the unserialize() in progress (test bug70169; error offsets
+    // observed on PHP 8.5).
+    let parsed = vm.with_unser_ctx(|vm| -> R<Result<(i64, VecDeque<Value>), usize>> {
+        let (flags, mut cur) = match vm.unser_part(b, "SplDoublyLinkedList::unserialize()")? {
+            Ok((Value::Int(f), n)) => (f, n),
+            Ok((_, n)) => return Ok(Err(n)),
+            Err(_) => return Ok(Err(0)),
+        };
+        let mut items = VecDeque::new();
+        while cur < b.len() {
+            if b[cur] != b':' {
+                return Ok(Err(cur));
             }
-            match found {
-                Some((e, v)) => {
+            cur += 1;
+            match vm.unser_part(&b[cur..], "SplDoublyLinkedList::unserialize()")? {
+                Ok((v, n)) => {
                     items.push_back(v);
-                    cur = e + 1;
+                    cur += n;
                 }
-                None => return fail(vm),
+                Err(off) => return Ok(Err(cur + off)),
             }
         }
-    }
-    let _ = chunks.drain(..);
+        Ok(Ok((flags, items)))
+    })?;
+    let (flags, items) = match parsed {
+        Ok(x) => x,
+        Err(at) => {
+            return vm.throw(
+                "UnexpectedValueException",
+                &format!("Error at offset {} of {} bytes", at, b.len()),
+            );
+        }
+    };
     dll(a, |d| {
         d.flags = flags;
         d.items = items;
@@ -3583,19 +3694,22 @@ fn os_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn os_serialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.this_obj().clone();
     let entries = os(&s, |d| d.live_entries());
-    let mut out = format!("x:i:{};", entries.len()).into_bytes();
-    for (i, (o, inf)) in entries.into_iter().enumerate() {
-        if i > 0 {
-            out.push(b';');
+    vm.with_ser_ctx(|vm| {
+        let mut out = b"x:".to_vec();
+        out.extend_from_slice(&vm.serialize_value(&Value::Int(entries.len() as i64))?);
+        for (i, (o, inf)) in entries.into_iter().enumerate() {
+            if i > 0 {
+                out.push(b';');
+            }
+            out.extend_from_slice(&vm.serialize_value(&Value::Object(o))?);
+            out.push(b',');
+            out.extend_from_slice(&vm.serialize_value(&inf)?);
         }
-        out.extend_from_slice(&vm.serialize_value(&Value::Object(o))?);
-        out.push(b',');
-        out.extend_from_slice(&vm.serialize_value(&inf)?);
-    }
-    out.extend_from_slice(b";m:");
-    let m = Value::Array(members(vm, &s));
-    out.extend_from_slice(&vm.serialize_value(&m)?);
-    Ok(Value::Str(PhpStr::from(out)))
+        out.extend_from_slice(b";m:");
+        let m = Value::Array(members(vm, &s));
+        out.extend_from_slice(&vm.serialize_value(&m)?);
+        Ok(Value::Str(PhpStr::from(out)))
+    })
 }
 fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.this_obj().clone();
@@ -3604,56 +3718,71 @@ fn os_unserialize_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if b.is_empty() {
         return Ok(Value::Null);
     }
-    let fail = |vm: &mut Vm, at: usize| -> R<Value> {
-        vm.throw(
-            "UnexpectedValueException",
-            &format!("Error at offset {} of {} bytes", at, b.len()),
-        )
-    };
-    if !b.starts_with(b"x:i:") {
-        return fail(vm, 0);
-    }
-    let Some(semi) = b.iter().position(|&c| c == b';') else {
-        return fail(vm, 0);
-    };
-    let Ok(n) = std::str::from_utf8(&b[4..semi])
-        .unwrap_or("x")
-        .parse::<i64>()
-    else {
-        return fail(vm, 0);
-    };
-    let mut cur = semi + 1;
-    for i in 0..n {
-        // [';'] object ',' info
-        if i > 0 {
+    // `x:` count, then each element as object [`,` info] `;`, then `m:`
+    // members, read in the value table of the unserialize() in progress.
+    // Error offsets observed on PHP 8.5 (test
+    // SplObjectStorage_unserialize_bad): an object that is not one, or
+    // comes from `R:`, fails at its start.
+    let parsed = vm.with_unser_ctx(|vm| -> R<Result<Value, usize>> {
+        if !b.starts_with(b"x:") {
+            return Ok(Err(0));
+        }
+        let mut cur = 2;
+        let n = match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
+            Ok((Value::Int(n), len)) if n >= 0 => {
+                cur += len;
+                n
+            }
+            // A negative count fails before its `;`.
+            Ok((Value::Int(_), len)) => return Ok(Err(cur + len - 1)),
+            Ok((_, len)) => return Ok(Err(cur + len)),
+            Err(_) => return Ok(Err(cur)),
+        };
+        for _ in 0..n {
+            let obj = match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
+                Ok((Value::Object(o), len)) if b[cur] != b'R' => {
+                    cur += len;
+                    o
+                }
+                Ok(_) => return Ok(Err(cur)),
+                Err(off) => return Ok(Err(cur + off)),
+            };
+            let mut inf = Value::Null;
+            if b.get(cur) == Some(&b',') {
+                cur += 1;
+                match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
+                    Ok((v, len)) => {
+                        cur += len;
+                        inf = v;
+                    }
+                    Err(off) => return Ok(Err(cur + off)),
+                }
+            }
             if b.get(cur) != Some(&b';') {
-                return fail(vm, cur);
+                return Ok(Err(cur));
             }
             cur += 1;
+            os_put(vm, &s, obj, inf)?;
         }
-        let Some((obj, next)) = vm.unserialize_prefix(&b[cur..]) else {
-            return fail(vm, cur);
-        };
-        cur += next;
-        if b.get(cur) != Some(&b',') {
-            return fail(vm, cur);
+        if !b[cur..].starts_with(b"m:") {
+            return Ok(Err(cur));
         }
-        cur += 1;
-        let Some((inf, next)) = vm.unserialize_prefix(&b[cur..]) else {
-            return fail(vm, cur);
-        };
-        cur += next;
-        let Value::Object(o) = obj else {
-            return fail(vm, cur);
-        };
-        os_put(vm, &s, o, inf)?;
-    }
-    if !b[cur..].starts_with(b";m:") {
-        return fail(vm, cur);
-    }
-    let m = vm.unserialize_bytes(&b[cur + 3..], &PhpArray::new())?;
-    if let Value::Array(m) = m {
-        restore_members(vm, &s, &m)?;
+        cur += 2;
+        match vm.unser_part(&b[cur..], "SplObjectStorage::unserialize()")? {
+            Ok((v @ Value::Array(_), _)) => Ok(Ok(v)),
+            Ok((_, len)) => Ok(Err(cur + len)),
+            Err(off) => Ok(Err(cur + off)),
+        }
+    })?;
+    match parsed {
+        Ok(Value::Array(m)) => restore_members(vm, &s, &m)?,
+        Ok(_) => {}
+        Err(at) => {
+            return vm.throw(
+                "UnexpectedValueException",
+                &format!("Error at offset {} of {} bytes", at, b.len()),
+            );
+        }
     }
     Ok(Value::Null)
 }
@@ -3682,9 +3811,66 @@ fn sfo_hooks() -> NativeHooks {
             let cls = vm.class_of(o);
             cls.flags
                 .set(cls.flags.get() | crate::class::cflags::NOT_CLONEABLE);
+            mark_check_init(&cls);
         }),
         ..Default::default()
     }
+}
+
+fn glob_hooks() -> NativeHooks {
+    NativeHooks {
+        create: Some(|vm, o| mark_check_init(&vm.class_of(o))),
+        ..Default::default()
+    }
+}
+
+/// A user subclass of SplFileObject, GlobIterator or
+/// RecursiveIteratorIterator checks, before each of its own methods, that
+/// the parent constructor ran (observed on PHP 8.5; tests gh8318,
+/// bug41828).
+fn mark_check_init(cls: &Class) {
+    if !cls.has_flag(crate::class::cflags::INTERNAL) {
+        cls.flags
+            .set(cls.flags.get() | crate::class::cflags::CHECK_INIT);
+    }
+}
+
+/// See [`mark_check_init`]: `f` is about to run on `o`.
+pub(crate) fn check_init(vm: &mut Vm, o: &ObjRef, f: &crate::func::Func) -> R<()> {
+    // Only methods the user wrote (the internal ones check for
+    // themselves), and not the constructor.
+    let scope = f.scope.get();
+    if scope.is_null()
+        || unsafe { &*scope }.has_flag(crate::class::cflags::INTERNAL)
+        || f.name.eq_ignore_ascii_case(b"__construct")
+    {
+        return Ok(());
+    }
+    let cls = vm.class_of(o);
+    if is_subclass_named(&cls, b"recursiveiteratoriterator") {
+        if vm.get_prop_raw(o, b"__its").is_null() {
+            return vm.throw(
+                "Error",
+                &format!(
+                    "The {} instance wasn't initialized properly",
+                    cls.name.dname()
+                ),
+            );
+        }
+        return Ok(());
+    }
+    let prop: &[u8] = if is_subclass_named(&cls, b"splfileobject") {
+        b"__fp"
+    } else {
+        b"__dir"
+    };
+    if vm.get_prop_raw(o, prop).is_null() {
+        return vm.throw(
+            "Error",
+            "The parent constructor was not called: the object is in an invalid state",
+        );
+    }
+    Ok(())
 }
 
 /// RecursiveIteratorIterator (spl_iterators.php): foreach over one whose
@@ -3692,6 +3878,7 @@ fn sfo_hooks() -> NativeHooks {
 /// RecursiveIteratorIterator_not_initialized, bug54281).
 fn rii_hooks() -> NativeHooks {
     NativeHooks {
+        create: Some(|vm, o| mark_check_init(&vm.class_of(o))),
         get_iterator: Some(|vm, o, _| {
             if vm.get_prop_raw(o, b"__its").is_null() {
                 return vm.throw("Error", "Object is not initialized");

@@ -36,6 +36,10 @@ pub mod cflags {
     pub const NO_DYNAMIC: u32 = 512;
     pub const NOT_SERIALIZABLE: u32 = 1024;
     pub const NOT_CLONEABLE: u32 = 2048;
+    /// A user subclass of an internal class whose user methods may only
+    /// run once the parent constructor did (see
+    /// `builtins::spl::check_init`).
+    pub const CHECK_INIT: u32 = 1 << 30;
 }
 
 /// Member flags (methods, properties, constants).

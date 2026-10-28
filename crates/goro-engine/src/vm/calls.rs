@@ -1136,7 +1136,11 @@ impl Vm {
         };
         let cls = self.class_of(&o);
         let cb = self.resolve_method(&o, &cls, &n, true)?;
-        if is_const(name) && cb.magic_name.is_none() && cb.closure.is_none() {
+        let check_init = cls.has_flag(crate::class::cflags::CHECK_INIT);
+        if check_init {
+            crate::builtins::spl::check_init(self, &o, &cb.func)?;
+        }
+        if is_const(name) && cb.magic_name.is_none() && cb.closure.is_none() && !check_init {
             self.code_ref().caches[cache as usize].set(Cache {
                 key: cls_ptr as usize,
                 a: Rc::as_ptr(&cb.func) as usize,
