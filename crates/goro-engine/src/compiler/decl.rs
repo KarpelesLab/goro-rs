@@ -313,6 +313,7 @@ impl<'a> Compiler<'a> {
                 if is_generator {
                     self.check_generator_return(&th, t.span().line)?;
                 }
+                self.f.ret_allows_null = th.allows_null();
                 if th.mask & (tmask::VOID | tmask::NEVER) != 0 && spec.by_ref {
                     // allowed for void? PHP: by-ref void is allowed with
                     // deprecation in 8.1 ("Returning by reference from a void

@@ -1143,6 +1143,24 @@ impl Vm {
                 self.readonly_rmw_check(o, name)?;
                 let old = self.read_prop(o, name, false, None)?;
                 let new = self.incdec_value(op, &old)?;
+                // An int property overflowing (tests Zend/tests/
+                // type_declarations/typed_properties_019, 038, 075, 097).
+                if let (Value::Int(_), Value::Float(_)) = (&old, &new)
+                    && let Some(p) = self.typed_prop_info(o, name)
+                    && let Some(t) = &p.ty
+                    && t.mask & tmask::INT != 0
+                    && t.mask & (tmask::FLOAT | tmask::MIXED) == 0
+                {
+                    let inc = op.is_inc();
+                    return self.type_error(&format!(
+                        "Cannot {} property {}::${} of type {} past its {} value",
+                        if inc { "increment" } else { "decrement" },
+                        Self::prop_class_name(&p),
+                        name.to_string_lossy(),
+                        t.display(),
+                        if inc { "maximal" } else { "minimal" }
+                    ));
+                }
                 self.write_prop(o, name, new.clone(), None)?;
                 Ok(if op.is_post() { old } else { new })
             }
