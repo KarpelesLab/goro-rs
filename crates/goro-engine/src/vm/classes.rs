@@ -42,10 +42,13 @@ impl Vm {
             return Ok(None);
         }
         self.autoloading.push(lname.clone());
-        let loaders = self.autoloaders.clone();
+        // The live list: an autoloader may register or remove others
+        // (test ext/spl/tests/bug71202).
         let mut result = Ok(None);
-        for l in loaders {
-            if let Err(e) = self.call_value(&l, vec![Value::Str(PhpStr::new(name))]) {
+        let mut i = 0;
+        while let Some(l) = self.autoloaders.get(i).cloned() {
+            i += 1;
+            if let Err(e) = self.call_callee(l, vec![Value::Str(PhpStr::new(name))]) {
                 result = Err(e);
                 break;
             }
@@ -389,6 +392,19 @@ impl Vm {
                     ));
                 }
             }
+            // Abstract property hooks count as abstract methods (RFC:
+            // Property hooks).
+            for p in cls.props.borrow().iter() {
+                for h in [&p.get, &p.set].into_iter().flatten() {
+                    if h.flags & mflags::ABSTRACT != 0 {
+                        missing.push(format!(
+                            "{}::{}",
+                            h.scope().map(|c| c.name.dname()).unwrap_or_default(),
+                            h.name.dname()
+                        ));
+                    }
+                }
+            }
             if !missing.is_empty() {
                 let n = missing.len();
                 let what = if decl.kind == ClassKind::Enum {
@@ -523,6 +539,18 @@ impl Vm {
                     set_const(cls, c.clone());
                 }
             }
+            // Interface properties (hooks abstract until implemented).
+            for ip in i.props.borrow().iter() {
+                if !cls.prop_map.borrow().contains_key(&ip.name) {
+                    let slot = cls.num_slots.get();
+                    cls.num_slots.set(slot + 1);
+                    let mut np = (**ip).clone();
+                    np.slot = slot;
+                    let idx = cls.props.borrow().len() as u32;
+                    cls.props.borrow_mut().push(Rc::new(np));
+                    cls.prop_map.borrow_mut().insert(ip.name.clone(), vec![idx]);
+                }
+            }
             // Interface methods (abstract until implemented).
             let ims: Vec<(PhpStr, Rc<Func>)> = i
                 .method_order
@@ -542,16 +570,29 @@ impl Vm {
     fn add_prop(&mut self, cls: &Rc<Class>, decl: &ClassDecl, p: &PropDecl) -> R<()> {
         let cp = Rc::as_ptr(cls);
         let cname = cls.name.dname();
-        let get = p.get.as_ref().map(|c| {
-            let f = Rc::new(Func::user(c.clone(), mflags::PUBLIC));
+        // Hooks are methods: abstract (`get;`) and final ones are marked.
+        let hook_func = |c: &Rc<crate::bytecode::FuncCode>, abs: u32, fin: u32| {
+            let mut fl = mflags::PUBLIC;
+            if p.hook_flags & abs != 0 {
+                fl |= mflags::ABSTRACT;
+            }
+            if p.hook_flags & fin != 0 {
+                fl |= mflags::FINAL;
+            }
+            let f = Rc::new(Func::user(c.clone(), fl));
             f.scope.set(cp);
             f
-        });
-        let set = p.set.as_ref().map(|c| {
-            let f = Rc::new(Func::user(c.clone(), mflags::PUBLIC));
-            f.scope.set(cp);
-            f
-        });
+        };
+        // A body-less hook outside an abstract property (checked when the
+        // class is declared: test Zend/tests/property_hooks/ast_printing).
+        if p.hook_flags & 3 != 0
+            && p.flags & mflags::ABSTRACT == 0
+            && decl.kind != ClassKind::Interface
+        {
+            return self.link_err(decl, "Non-abstract property hook must have a body");
+        }
+        let get = p.get.as_ref().map(|c| hook_func(c, 1, 4));
+        let set = p.set.as_ref().map(|c| hook_func(c, 2, 8));
         if p.flags & mflags::STATIC != 0 {
             // Redeclaration of a parent static property gets its own cell.
             if let Some(prev) = cls.find_static(&p.name) {
@@ -671,7 +712,8 @@ impl Vm {
                         ),
                     );
                 }
-                if prev.flags & mflags::READONLY != p.flags & mflags::READONLY {
+                let prev_hooked = prev.get.is_some() || prev.set.is_some();
+                if prev.flags & mflags::READONLY != p.flags & mflags::READONLY && !prev_hooked {
                     let pcn = unsafe { (*prev.class).name.dname() };
                     let (a, b) = if prev.flags & mflags::READONLY != 0 {
                         ("readonly", "non-readonly")
@@ -747,13 +789,47 @@ impl Vm {
                     }
                     _ => {}
                 }
+                self.prop_set_vis_check(decl, &cname, &prev, p)?;
+                for (mine, theirs, what) in [(&p.get, &prev.get, "get"), (&p.set, &prev.set, "set")]
+                {
+                    if mine.is_some()
+                        && let Some(t) = theirs
+                        && t.flags & mflags::FINAL != 0
+                    {
+                        let pcn = unsafe { (*prev.class).name.dname() };
+                        return self.link_err(
+                            decl,
+                            &format!(
+                                "Cannot override final property hook {}::${}::{}()",
+                                pcn,
+                                p.name.dname(),
+                                what
+                            ),
+                        );
+                    }
+                }
                 let mut ni = info(prev.slot);
+                // A property backed in the parent stays backed.
+                if prev.flags & mflags::VIRTUAL == 0 {
+                    ni.flags &= !mflags::VIRTUAL;
+                }
+                let backed = ni.flags & mflags::VIRTUAL == 0;
                 if p.get.is_none() && ni.get.is_none() {
-                    ni.get = prev.get.clone();
+                    // A plain (backed) property implements an abstract get.
+                    ni.get = prev
+                        .get
+                        .clone()
+                        .filter(|g| !(backed && g.flags & mflags::ABSTRACT != 0));
                 }
                 if p.set.is_none() && ni.set.is_none() {
-                    ni.set = prev.set.clone();
+                    // ... and an abstract set, unless it is readonly.
+                    ni.set = prev.set.clone().filter(|s| {
+                        !(backed
+                            && s.flags & mflags::ABSTRACT != 0
+                            && ni.flags & mflags::READONLY == 0)
+                    });
                 }
+                self.prop_backing_checks(decl, &cname, &ni, p)?;
                 cls.props.borrow_mut()[idxs[0] as usize] = Rc::new(ni);
                 return Ok(());
             }
@@ -778,8 +854,103 @@ impl Vm {
         let slot = cls.num_slots.get();
         cls.num_slots.set(slot + 1);
         let idx = cls.props.borrow().len() as u32;
-        cls.props.borrow_mut().push(Rc::new(info(slot)));
+        let ni = info(slot);
+        self.prop_backing_checks(decl, &cname, &ni, p)?;
+        cls.props.borrow_mut().push(Rc::new(ni));
         cls.prop_map.borrow_mut().insert(p.name.clone(), vec![idx]);
+        Ok(())
+    }
+
+    /// Rules on a property once it is known to be virtual or backed
+    /// (tests Zend/tests/property_hooks/default_on_virtual*,
+    /// get_by_ref_backed).
+    fn prop_backing_checks(
+        &mut self,
+        decl: &ClassDecl,
+        cname: &str,
+        ni: &PropInfo,
+        p: &PropDecl,
+    ) -> R<()> {
+        if ni.flags & mflags::VIRTUAL != 0 {
+            if p.default.is_some() {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Cannot specify default value for virtual hooked property {}::${}",
+                        cname,
+                        p.name.dname()
+                    ),
+                );
+            }
+        } else if let Some(g) = &ni.get
+            && ni.set.is_some()
+            && g.code()
+                .is_some_and(|c| c.flags & crate::bytecode::fflags::BY_REF != 0)
+        {
+            return self.link_err(
+                decl,
+                &format!(
+                    "Get hook of backed property {}::{} with set hook may not return by reference",
+                    cname,
+                    p.name.dname()
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// A redeclared property can't restrict its set visibility (RFC:
+    /// Asymmetric Visibility v2; readonly is implicitly protected(set)).
+    fn prop_set_vis_check(
+        &mut self,
+        decl: &ClassDecl,
+        cname: &str,
+        prev: &PropInfo,
+        p: &PropDecl,
+    ) -> R<()> {
+        // A virtual parent property with no set hook asks for no writes.
+        if prev.flags & mflags::VIRTUAL != 0 && prev.set.is_none() {
+            return Ok(());
+        }
+        let rank = |f: u32| -> (u8, bool) {
+            if f & mflags::PRIVATE_SET != 0 {
+                (2, true)
+            } else if f & mflags::PROTECTED_SET != 0 {
+                (1, true)
+            } else if f & mflags::PUBLIC_SET != 0 {
+                (0, true)
+            } else if f & mflags::READONLY != 0 && f & mflags::PUBLIC != 0 {
+                (1, true)
+            } else if f & mflags::PRIVATE != 0 {
+                (2, false)
+            } else if f & mflags::PROTECTED != 0 {
+                (1, false)
+            } else {
+                (0, false)
+            }
+        };
+        let (pr, pexplicit) = rank(prev.flags);
+        let (nr, _) = rank(p.flags);
+        if nr > pr {
+            let pcn = unsafe { (*prev.class).name.dname() };
+            let msg = if pexplicit {
+                format!(
+                    "Set access level of {}::${} must be {}(set) (as in class {}) or weaker",
+                    cname,
+                    p.name.dname(),
+                    ["public", "protected", "private"][pr as usize],
+                    pcn
+                )
+            } else {
+                format!(
+                    "Set access level of {}::${} must be omitted (as in class {})",
+                    cname,
+                    p.name.dname(),
+                    pcn
+                )
+            };
+            return self.link_err(decl, &msg);
+        }
         Ok(())
     }
 
@@ -1123,11 +1294,75 @@ impl Vm {
             }
         }
         // Properties and constants of traits.
+        let mut from_trait: HashMap<PhpStr, PhpStr> = HashMap::new();
         for t in &traits {
             let tprops: Vec<Rc<PropInfo>> = t.props.borrow().clone();
             for p in tprops {
+                let rebind = |f: &Option<Rc<Func>>| {
+                    f.as_ref().map(|f| {
+                        let n = Rc::new(Func::user(f.code().unwrap().clone(), f.flags));
+                        n.scope.set(cp);
+                        n
+                    })
+                };
+                let existing = cls.prop_map.borrow().get(&p.name).map(|v| v[0]);
+                if let Some(i0) = existing
+                    && !std::ptr::eq(cls.props.borrow()[i0 as usize].class, cp)
+                {
+                    // Overrides an inherited (parent or interface) property
+                    // as a declaration of the class would.
+                    let prev = cls.props.borrow()[i0 as usize].clone();
+                    let mut flags = p.flags;
+                    if prev.flags & mflags::VIRTUAL == 0 {
+                        flags &= !mflags::VIRTUAL;
+                    }
+                    let backed = flags & mflags::VIRTUAL == 0;
+                    let get = rebind(&p.get).or_else(|| {
+                        prev.get
+                            .clone()
+                            .filter(|g| !(backed && g.flags & mflags::ABSTRACT != 0))
+                    });
+                    let set = rebind(&p.set).or_else(|| {
+                        prev.set.clone().filter(|x| {
+                            !(backed
+                                && x.flags & mflags::ABSTRACT != 0
+                                && flags & mflags::READONLY == 0)
+                        })
+                    });
+                    cls.props.borrow_mut()[i0 as usize] = Rc::new(PropInfo {
+                        name: p.name.clone(),
+                        slot: prev.slot,
+                        flags,
+                        ty: p.ty.clone(),
+                        class: cp,
+                        get,
+                        set,
+                        doc: p.doc.clone(),
+                        attrs: p.attrs.clone(),
+                        default: p.default.clone(),
+                    });
+                    from_trait.insert(p.name.clone(), t.name.clone());
+                    continue;
+                }
                 if let Some(idxs) = cls.prop_map.borrow().get(&p.name) {
                     let prev = cls.props.borrow()[idxs[0] as usize].clone();
+                    let first = from_trait
+                        .get(&p.name)
+                        .map(|n| n.dname())
+                        .unwrap_or_else(|| unsafe { (*prev.class).name.dname() });
+                    if prev.get.is_some()
+                        || prev.set.is_some()
+                        || p.get.is_some()
+                        || p.set.is_some()
+                    {
+                        return self.link_err(decl, &format!(
+                            "{} and {} define the same hooked property (${}) in the composition of {}. Conflict resolution between hooked properties is currently not supported. Class was composed",
+                            first,
+                            t.name.dname(),
+                            p.name.dname(),
+                            cname
+                        ));
+                    }
                     let same_default = match (&prev.default, &p.default) {
                         (Some(ConstExpr::Value(a)), Some(ConstExpr::Value(b))) => {
                             goro_runtime::compare::strict_eq(a, b)
@@ -1141,10 +1376,9 @@ impl Vm {
                         || prev.ty.as_ref().map(|t| t.display())
                             != p.ty.as_ref().map(|t| t.display())
                     {
-                        let pcn = unsafe { (*prev.class).name.dname() };
                         return self.link_err(decl, &format!(
                             "{} and {} define the same property (${}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                            pcn,
+                            first,
                             t.name.dname(),
                             p.name.dname(),
                             cname
@@ -1155,13 +1389,7 @@ impl Vm {
                 let slot = cls.num_slots.get();
                 cls.num_slots.set(slot + 1);
                 let idx = cls.props.borrow().len() as u32;
-                let rebind = |f: &Option<Rc<Func>>| {
-                    f.as_ref().map(|f| {
-                        let n = Rc::new(Func::user(f.code().unwrap().clone(), f.flags));
-                        n.scope.set(cp);
-                        n
-                    })
-                };
+                from_trait.insert(p.name.clone(), t.name.clone());
                 cls.props.borrow_mut().push(Rc::new(PropInfo {
                     name: p.name.clone(),
                     slot,
@@ -1436,7 +1664,10 @@ impl Vm {
         m.set = get(b"__set");
         m.isset = get(b"__isset");
         m.unset = get(b"__unset");
-        m.call = get(b"__call");
+        // Internal classes written in PHP may take unknown method calls
+        // through a hidden `__h_call` (SPL's iterators forward them to
+        // the inner iterator; test RecursiveDirectoryIterator_getSubPath_basic).
+        m.call = get(b"__call").or_else(|| get(b"__h_call"));
         m.call_static = get(b"__callstatic");
         m.to_string = get(b"__tostring");
         m.invoke = get(b"__invoke");

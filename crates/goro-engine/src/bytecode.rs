@@ -589,6 +589,11 @@ pub enum Op {
         nargs: u32,
         cache: u32,
     },
+    /// `parent::$prop::get()` / `parent::$prop::set()` in a property hook.
+    InitParentHook {
+        name: Reg,
+        set: bool,
+    },
     Send {
         src: Reg,
         arg: u32,
@@ -1093,7 +1098,7 @@ pub struct FuncCode {
     /// statement (not by a `(void)` cast), sorted.
     pub discarded_calls: Vec<u32>,
     /// Attributes of `const` statements in this code, by constant name.
-    pub const_attrs: Vec<(PhpStr, Rc<[AttrInfo]>)>,
+    pub const_attrs: Vec<(PhpStr, u32, Rc<[AttrInfo]>)>,
     /// Inline caches (instruction-local, by index).
     pub caches: Box<[Cell<Cache>]>,
     /// Lazily computed name → slot map for dynamic variable access.

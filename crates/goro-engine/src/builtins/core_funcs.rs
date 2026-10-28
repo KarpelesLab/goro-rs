@@ -155,22 +155,6 @@ pub static MODULE: Module = Module {
             get_declared_interfaces,
         ),
         ("function get_declared_traits(): array", get_declared_traits),
-        (
-            "function spl_autoload_register(?callable $callback = null, bool $throw = true, bool $prepend = false): bool",
-            spl_autoload_register,
-        ),
-        (
-            "function spl_autoload_unregister(callable $callback): bool",
-            spl_autoload_unregister,
-        ),
-        (
-            "function spl_autoload_functions(): array",
-            spl_autoload_functions,
-        ),
-        (
-            "function spl_autoload_call(string $class): void",
-            spl_autoload_call,
-        ),
         ("function spl_object_id(object $object): int", spl_object_id),
         (
             "function spl_object_hash(object $object): string",
@@ -1145,7 +1129,12 @@ fn property_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(true));
     }
     if let Value::Object(o) = &v {
-        return Ok(Value::Bool(o.obj().props.borrow().get_str(&p).is_some()));
+        if o.obj().props.borrow().get_str(&p).is_some() {
+            return Ok(Value::Bool(true));
+        }
+        // ArrayObject::ARRAY_AS_PROPS: the elements are properties (test
+        // ext/spl/tests/bug53515).
+        return Ok(Value::Bool(crate::builtins::spl::ao_has_prop(vm, o, &p)));
     }
     Ok(Value::Bool(false))
 }
@@ -1170,7 +1159,7 @@ fn get_mangled_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
-    Ok(Value::Array(vm.object_props_cast(&o)))
+    Ok(Value::Array(vm.object_props_mangled(&o)))
 }
 
 fn get_class_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1283,7 +1272,7 @@ fn class_list_arg(vm: &mut Vm, a: &mut Args, fname: &str) -> R<Option<Rc<Class>>
         other => vm.type_error(&format!(
             "{}(): Argument #1 ($object_or_class) must be of type object|string, {} given",
             fname,
-            other.tname()
+            Vm::type_name_given(other)
         )),
     }
 }
@@ -1376,50 +1365,6 @@ fn get_declared_traits(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Array(declared(vm, |c| c.is_trait())))
 }
 
-fn spl_autoload_register(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.val(0);
-    if f.is_null() {
-        return Ok(Value::Bool(true));
-    }
-    if !vm.is_callable_value(&f, false) {
-        return vm.type_error("spl_autoload_register(): Argument #1 ($callback) must be a valid callback or null, no array or string given");
-    }
-    let prepend = a.bool_or(2, false);
-    // The same callable is registered once.
-    let exists = vm
-        .autoloaders
-        .iter()
-        .any(|x| goro_runtime::compare::strict_eq(x, &f));
-    if !exists {
-        if prepend {
-            vm.autoloaders.insert(0, f);
-        } else {
-            vm.autoloaders.push(f);
-        }
-    }
-    Ok(Value::Bool(true))
-}
-
-fn spl_autoload_unregister(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.val(0);
-    let before = vm.autoloaders.len();
-    vm.autoloaders
-        .retain(|x| !goro_runtime::compare::strict_eq(x, &f));
-    Ok(Value::Bool(vm.autoloaders.len() != before))
-}
-
-fn spl_autoload_functions(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::from_values(
-        vm.autoloaders.iter().cloned(),
-    )))
-}
-
-fn spl_autoload_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let n = a.str(0);
-    vm.find_class(&n, true)?;
-    Ok(Value::Null)
-}
-
 fn spl_object_id(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(a.obj(0).map(|o| o.handle() as i64).unwrap_or(0)))
 }
@@ -1447,9 +1392,15 @@ fn iterator_to_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let key = match &k {
                 Value::Int(i) => Key::Int(*i),
                 Value::Str(s) => Key::from_php_str(s),
-                Value::Null => Key::Str(PhpStr::empty()),
+                // As array keys (test ext/spl/tests/iterator_to_array_nonscalar_keys).
+                Value::Null => {
+                    vm.deprecated(
+                        "Using null as an array offset is deprecated, use an empty string instead",
+                    )?;
+                    Key::Str(PhpStr::empty())
+                }
                 Value::Bool(b) => Key::Int(*b as i64),
-                Value::Float(f) => Key::Int(*f as i64),
+                Value::Float(_) => vm.to_key(&k, "array")?,
                 _ => {
                     return vm.type_error("Cannot access offset of type array on array");
                 }

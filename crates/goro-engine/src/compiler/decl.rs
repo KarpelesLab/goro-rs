@@ -1323,6 +1323,21 @@ impl<'a> Compiler<'a> {
                         flags |= mflags::ABSTRACT;
                     }
                     flags |= set_vis_flags(p.modifiers.0);
+                    let hooked = p.props.iter().any(|it| it.has_hook_list);
+                    self.prop_modifier_checks(
+                        &cn,
+                        p.props[0].name.name,
+                        flags,
+                        hooked,
+                        is_interface,
+                        p.ty.is_some(),
+                        p.span.line,
+                    )?;
+                    for it in p.props.iter() {
+                        if it.has_hook_list && it.hooks.is_empty() {
+                            return self.err("Property hook list must not be empty", it.span.line);
+                        }
+                    }
                     let ty = match &p.ty {
                         Some(t) => {
                             let th = self.type_hint(t, false)?;
@@ -1407,8 +1422,15 @@ impl<'a> Compiler<'a> {
                             None => None,
                         };
                         let pname = PhpStr::intern(it.name.name);
-                        let (get, set, hook_flags) =
-                            self.hooks(it.hooks, &pname, ty.as_ref(), &cn, flags)?;
+                        let (get, set, hook_flags) = self.hooks(
+                            it.hooks,
+                            &pname,
+                            ty.as_ref(),
+                            &cn,
+                            flags,
+                            is_interface,
+                            it.span.line,
+                        )?;
                         let mut f = flags;
                         if default.is_some() || (ty.is_none() && flags & mflags::STATIC == 0) {
                             f |= mflags::HAS_DEFAULT;
@@ -1418,6 +1440,19 @@ impl<'a> Compiler<'a> {
                             if !hooks_use_backing(it.hooks, it.name.name) {
                                 f |= mflags::VIRTUAL;
                             }
+                        }
+                        self.virtual_asym_check(
+                            &cn,
+                            &pname,
+                            f,
+                            get.is_some(),
+                            set.is_some(),
+                            it.span.line,
+                        )?;
+                        if f & mflags::PRIVATE_SET != 0 {
+                            // private(set) is implicitly final (RFC:
+                            // Asymmetric Visibility v2).
+                            f |= mflags::FINAL;
                         }
                         if self.file.is_empty() && pname.starts_with(b"__") {
                             f |= mflags::HIDDEN;
@@ -1618,6 +1653,21 @@ impl<'a> Compiler<'a> {
                                 pf |= mflags::READONLY;
                             }
                             pf |= set_vis_flags(p.modifiers.0);
+                            if p.modifiers.has(Modifiers::FINAL) {
+                                pf |= mflags::FINAL;
+                            }
+                            self.prop_modifier_checks(
+                                &cn,
+                                p.name.name,
+                                pf,
+                                !p.hooks.is_empty(),
+                                false,
+                                p.ty.is_some(),
+                                p.span.line,
+                            )?;
+                            if pf & mflags::PRIVATE_SET != 0 {
+                                pf |= mflags::FINAL;
+                            }
                             let ty = match &p.ty {
                                 Some(t) => {
                                     pf |= mflags::TYPED;
@@ -1657,8 +1707,15 @@ impl<'a> Compiler<'a> {
                                 );
                             }
                             let pname = PhpStr::intern(p.name.name);
-                            let (get, set, hook_flags) =
-                                self.hooks(p.hooks, &pname, ty.as_ref(), &cn, pf)?;
+                            let (get, set, hook_flags) = self.hooks(
+                                p.hooks,
+                                &pname,
+                                ty.as_ref(),
+                                &cn,
+                                pf,
+                                false,
+                                p.span.line,
+                            )?;
                             let attrs = self.attributes(p.attrs)?;
                             props.push(PropDecl {
                                 name: pname,
@@ -1761,7 +1818,7 @@ impl<'a> Compiler<'a> {
         Ok((consts, props, methods, traits))
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn hooks(
         &mut self,
         hooks: &'a [PropertyHook<'a>],
@@ -1769,6 +1826,8 @@ impl<'a> Compiler<'a> {
         ty: Option<&TypeHint>,
         cn: &str,
         pflags: u32,
+        iface: bool,
+        line: u32,
     ) -> CResult<(Option<Rc<FuncCode>>, Option<Rc<FuncCode>>, u32)> {
         let mut get = None;
         let mut set = None;
@@ -1801,6 +1860,84 @@ impl<'a> Compiler<'a> {
             }
             if pflags & mflags::READONLY != 0 {
                 return self.err("Hooked properties cannot be readonly", h.span.line);
+            }
+            // Modifier and signature rules (tests Zend/tests/property_hooks/
+            // invalid_*, interface_*, set_*, no_get_parameters).
+            let abstract_hook = matches!(h.body, HookBody::Abstract);
+            let abstract_prop = iface || pflags & mflags::ABSTRACT != 0;
+            if !abstract_hook && iface {
+                return self.err("Abstract property hook cannot have body", h.span.line);
+            }
+            let hfinal = h.modifiers.has(Modifiers::FINAL);
+            if pflags & mflags::PRIVATE != 0 && hfinal {
+                return self.err(
+                    "Property hook cannot be both final and private",
+                    h.span.line,
+                );
+            }
+            if abstract_hook && hfinal && abstract_prop {
+                return self.err(
+                    "Property hook cannot be both abstract and final",
+                    h.span.line,
+                );
+            }
+            if pflags & mflags::PRIVATE != 0 {
+                if abstract_hook {
+                    return self.err(
+                        "Property hook cannot be both abstract and private",
+                        h.span.line,
+                    );
+                }
+                if hfinal {
+                    return self.err(
+                        "Property hook cannot be both final and private",
+                        h.span.line,
+                    );
+                }
+            }
+            if is_get && h.params.is_some() {
+                return self.err(
+                    format!(
+                        "get hook of property {}::${} must not have a parameter list",
+                        cn,
+                        pname.to_string_lossy()
+                    ),
+                    h.span.line,
+                );
+            }
+            if !is_get && let Some(ps) = h.params {
+                if ps.len() != 1 {
+                    return self.err(
+                        format!(
+                            "set hook of property {}::${} must accept exactly one parameters",
+                            cn,
+                            pname.to_string_lossy()
+                        ),
+                        h.span.line,
+                    );
+                }
+                let p = &ps[0];
+                let what = if p.default.is_some() {
+                    Some("have a default value")
+                } else if p.by_ref {
+                    Some("be pass-by-reference")
+                } else if p.variadic {
+                    Some("be variadic")
+                } else {
+                    None
+                };
+                if let Some(w) = what {
+                    return self.err(
+                        format!(
+                            "Parameter ${} of set hook {}::${} must not {}",
+                            String::from_utf8_lossy(p.name.name),
+                            cn,
+                            pname.to_string_lossy(),
+                            w
+                        ),
+                        p.span.line,
+                    );
+                }
             }
             let full = format!(
                 "{}::${}::{}",
@@ -1866,7 +2003,110 @@ impl<'a> Compiler<'a> {
                 set = Some(Rc::new(code));
             }
         }
+        if pflags & mflags::ABSTRACT != 0 && hflags & 3 == 0 {
+            return self.err(
+                format!(
+                    "Abstract property {}::${} must specify at least one abstract hook",
+                    cn,
+                    pname.to_string_lossy()
+                ),
+                line,
+            );
+        }
         Ok((get, set, hflags))
+    }
+
+    /// Rules on a property's modifiers (tests Zend/tests/property_hooks/
+    /// interface_*, abstract_prop_without_hooks, final_private_prop;
+    /// Zend/tests/asymmetric_visibility/*).
+    #[allow(clippy::too_many_arguments)]
+    fn prop_modifier_checks(
+        &self,
+        cn: &str,
+        name: &[u8],
+        flags: u32,
+        hooked: bool,
+        iface: bool,
+        typed: bool,
+        line: u32,
+    ) -> CResult<()> {
+        if iface {
+            if flags & mflags::ABSTRACT != 0 {
+                return self.err("Property in interface cannot be explicitly abstract. All interface members are implicitly abstract", line);
+            }
+            if flags & mflags::FINAL != 0 {
+                return self.err("Property in interface cannot be final", line);
+            }
+            if flags & (mflags::PROTECTED | mflags::PRIVATE) != 0 {
+                return self.err("Property in interface cannot be protected or private", line);
+            }
+        }
+        if flags & mflags::ABSTRACT != 0 && !hooked {
+            return self.err("Only hooked properties may be declared abstract", line);
+        }
+        if flags & mflags::ABSTRACT != 0 && flags & mflags::FINAL != 0 {
+            return self.err(
+                "Cannot use the final modifier on an abstract property",
+                line,
+            );
+        }
+        if flags & mflags::FINAL != 0 && flags & mflags::PRIVATE != 0 {
+            return self.err("Property cannot be both final and private", line);
+        }
+        if flags & mflags::SET_VISIBILITY != 0 {
+            if !typed {
+                return self.err(
+                    format!(
+                        "Property with asymmetric visibility {}::${} must have type",
+                        cn,
+                        String::from_utf8_lossy(name)
+                    ),
+                    line,
+                );
+            }
+            let get_rank = vis_rank3(flags & mflags::VISIBILITY);
+            let set_rank = if flags & mflags::PRIVATE_SET != 0 {
+                2
+            } else if flags & mflags::PROTECTED_SET != 0 {
+                1
+            } else {
+                0
+            };
+            if set_rank < get_rank {
+                return self.err(
+                    format!(
+                        "Visibility of property {}::${} must not be weaker than set visibility",
+                        cn,
+                        String::from_utf8_lossy(name)
+                    ),
+                    line,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn virtual_asym_check(
+        &self,
+        cn: &str,
+        name: &PhpStr,
+        flags: u32,
+        get: bool,
+        set: bool,
+        line: u32,
+    ) -> CResult<()> {
+        if flags & mflags::VIRTUAL != 0 && flags & mflags::SET_VISIBILITY != 0 && get != set {
+            return self.err(
+                format!(
+                    "{} virtual property {}::${} must not specify asymmetric visibility",
+                    if get { "Read-only" } else { "Write-only" },
+                    cn,
+                    name.to_string_lossy()
+                ),
+                line,
+            );
+        }
+        Ok(())
     }
 
     /// A `set` hook without a parameter list gets `$value` of the
@@ -2094,6 +2334,17 @@ fn is_reserved_type_name(l: &[u8]) -> bool {
 
 /// Whether a hook body refers to `$this->name` (making the property
 /// backed). PHP: a property is virtual when no hook uses the backing value.
+/// 0 public, 1 protected, 2 private.
+fn vis_rank3(v: u32) -> u8 {
+    if v & mflags::PRIVATE != 0 {
+        2
+    } else if v & mflags::PROTECTED != 0 {
+        1
+    } else {
+        0
+    }
+}
+
 fn hooks_use_backing(hooks: &[PropertyHook<'_>], name: &[u8]) -> bool {
     fn expr_uses(e: &Expr<'_>, name: &[u8]) -> bool {
         let mut found = false;
@@ -2268,7 +2519,27 @@ fn walk_expr<'a>(e: &'a Expr<'a>, f: &mut dyn FnMut(&'a Expr<'a>)) {
         ExprKind::Match { subject, arms } => {
             walk_expr(subject, f);
             for a in *arms {
+                for c in a.conds.iter().flat_map(|c| c.iter()) {
+                    walk_expr(c, f);
+                }
                 walk_expr(&a.body, f);
+            }
+        }
+        ExprKind::Instanceof { expr, .. }
+        | ExprKind::Eval(expr)
+        | ExprKind::Include { expr, .. }
+        | ExprKind::YieldFrom(expr)
+        | ExprKind::Clone {
+            expr: Some(expr), ..
+        } => walk_expr(expr, f),
+        ExprKind::Yield { key, value } => {
+            for x in [key, value].into_iter().flatten() {
+                walk_expr(x, f);
+            }
+        }
+        ExprKind::Exit(Some(args)) => {
+            for a in args.as_slice() {
+                walk_expr(&a.value, f);
             }
         }
         _ => {}

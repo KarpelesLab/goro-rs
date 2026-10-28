@@ -26,7 +26,8 @@ class RegexIterator extends FilterIterator {
     }
     public function accept(): bool {
         $this->__h_chk();
-        if (!$this->__valid || is_array($this->__cur)) {
+        /* An array is only refused as the subject (test bug68128-USE_KEY). */
+        if (!$this->__valid || (!($this->__rflags & 1) && is_array($this->__cur))) {
             return false;
         }
         $subject = ($this->__rflags & 1) ? (string) $this->__key : (string) $this->__cur;
@@ -55,8 +56,10 @@ class RegexIterator extends FilterIterator {
                 }
                 break;
             default:
-                $res = preg_replace($this->__rx, (string) $this->replacement, $subject);
-                $r = $res !== null;
+                /* Only subjects that match are kept (test bug50579). */
+                $n = 0;
+                $res = preg_replace($this->__rx, (string) $this->replacement, $subject, -1, $n);
+                $r = $res !== null && $n > 0;
                 if ($r) {
                     if ($this->__rflags & 1) {
                         $this->__key = $res;

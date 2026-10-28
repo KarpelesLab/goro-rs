@@ -438,7 +438,9 @@ pub struct Vm {
     pub out: output::Output,
     pub err: ErrorState,
     pub core: CoreClasses,
-    pub autoloaders: Vec<Value>,
+    /// Registered autoloaders, resolved when they were registered (SPL:
+    /// spl_autoload_register(); the called scope is the registration's).
+    pub autoloaders: Vec<calls::Callee>,
     /// Exceptions whose string form says "and defined in" (see
     /// `mark_defined_in`).
     pub defined_in_errors: Vec<goro_runtime::WeakObj>,

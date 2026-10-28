@@ -368,7 +368,11 @@ impl Vm {
             }
             Value::Object(o) => {
                 let cls = self.class_of(o);
-                if let Some(h) = cls.native.count {
+                // A user count() overrides the hook (test
+                // ext/spl/tests/dllist_008).
+                if let Some(h) = cls.native.count
+                    && cls.find_method(b"count").is_none_or(|f| f.is_native())
+                {
                     return h(self, o);
                 }
                 if self

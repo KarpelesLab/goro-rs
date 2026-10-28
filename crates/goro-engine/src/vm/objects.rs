@@ -263,7 +263,7 @@ impl Vm {
                     && !self.in_hook(o, &p)
                 {
                     let h = h.clone();
-                    return self.call_hook(o, &p, h, Vec::new());
+                    return self.call_hook(o, &p, h, Vec::new()).map(|v| v.into_deref());
                 }
                 if p.flags & mflags::VIRTUAL != 0 && p.get.is_none() {
                     return self.throw(
@@ -283,6 +283,10 @@ impl Vm {
                         && !self.guarded(o, name, 0)
                     {
                         return self.magic_get(o, &cls, name);
+                    }
+                    // `??`, `??=`: an uninitialized typed property is unset.
+                    if p.ty.is_some() && quiet {
+                        return Ok(Value::Null);
                     }
                     if p.ty.is_some() {
                         return self.throw(
@@ -382,6 +386,52 @@ impl Vm {
         r
     }
 
+    /// A hooked property fetched for writing (`$o->p[] = 1`, `&$o->p`,
+    /// `$o->p->x = 1`): the reference a `&get` hook returns, an object the
+    /// property holds, or "Indirect modification of C::$p is not allowed"
+    /// (RFC: Property hooks; tests Zend/tests/property_hooks/
+    /// indirect_modification, get_by_ref*). `None`: not hooked here.
+    pub(crate) fn hooked_fetch_w(
+        &mut self,
+        o: &ObjRef,
+        name: &PhpStr,
+        objects_ok: bool,
+    ) -> R<Option<Value>> {
+        let cls = self.class_of(o);
+        let scope = self.scope_ptr();
+        let PropLookup::Found(p) = self.lookup_prop(&cls, name, scope) else {
+            return Ok(None);
+        };
+        if (p.get.is_none() && p.set.is_none()) || self.in_hook(o, &p) {
+            return Ok(None);
+        }
+        if let Some(g) = &p.get
+            && g.code()
+                .is_some_and(|c| c.flags & crate::bytecode::fflags::BY_REF != 0)
+        {
+            let g = g.clone();
+            let v = self.call_hook(o, &p, g, Vec::new())?;
+            return Ok(Some(match v {
+                Value::Ref(r) => Value::Ref(r),
+                other => Value::Ref(PhpRef::new(other)),
+            }));
+        }
+        if objects_ok {
+            let v = self.read_prop(o, name, false, None)?;
+            if let Value::Object(_) = v {
+                return Ok(Some(v));
+            }
+        }
+        self.throw(
+            "Error",
+            &format!(
+                "Indirect modification of {}::${} is not allowed",
+                cls.name.dname(),
+                name.to_string_lossy()
+            ),
+        )
+    }
+
     fn in_hook(&self, o: &ObjRef, p: &PropInfo) -> bool {
         self.hook_guards
             .iter()
@@ -396,7 +446,16 @@ impl Vm {
         args: Vec<Value>,
     ) -> R<Value> {
         self.hook_guards.push((o.handle(), p.name.clone()));
-        let r = self.call_func_this(&h, Some(o.clone()), args);
+        // Raw: a `&get` hook's reference is kept for write fetches.
+        let c = super::calls::Callee {
+            static_class: self.class_ptr_of(o),
+            scope: h.scope.get(),
+            func: h,
+            this: Some(o.clone()),
+            closure: None,
+            magic_name: None,
+        };
+        let r = self.call_callee_raw(c, args);
         self.hook_guards.pop();
         r
     }
@@ -439,7 +498,16 @@ impl Vm {
                 {
                     let h = h.clone();
                     let v = self.call_hook(o, &p, h, Vec::new())?;
-                    Some(v)
+                    Some(v.into_deref())
+                } else if p.flags & mflags::VIRTUAL != 0 && !self.in_hook(o, &p) {
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Property {}::${} is write-only",
+                            cls.name.dname(),
+                            name.to_string_lossy()
+                        ),
+                    );
                 } else {
                     let v = o.obj().slots.borrow()[p.slot as usize].clone();
                     if self.is_uninit(&v) {
@@ -724,10 +792,20 @@ impl Vm {
                     );
                 }
                 self.check_set_visibility(&p, scope, o, name)?;
-                let cur_uninit = {
+                let (cur_uninit, was_unset) = {
                     let slots = o.obj().slots.borrow();
-                    self.is_uninit(&slots[p.slot as usize])
+                    let s = &slots[p.slot as usize];
+                    (self.is_uninit(s), self.is_unset_mark(s))
                 };
+                // An unset declared property takes __set like a missing one
+                // (observed on PHP 8.5; test
+                // ext/spl/tests/ArrayObject/arrayObject_setFlags_basic1).
+                if was_unset
+                    && let Some(f) = cls.magic.borrow().set.clone()
+                    && !self.guarded(o, name, 1)
+                {
+                    return self.magic_set(o, f, name, v);
+                }
                 if p.flags & mflags::READONLY != 0 {
                     if !cur_uninit && !self.readonly_clone_ok(o, &p) {
                         return self.throw(
@@ -1018,6 +1096,11 @@ impl Vm {
                 self.write_prop(o, name, new.clone(), None)?;
                 Ok(if op.is_post() { old } else { new })
             }
+            PathAction::MakeRef | PathAction::FetchW
+                if let Some(v) = self.hooked_fetch_w(o, name, false)? =>
+            {
+                Ok(v)
+            }
             PathAction::MakeRef | PathAction::FetchW => match self.prop_ptr(o, name, false)? {
                 Some(p) => {
                     let r = unsafe { (*p).make_ref() };
@@ -1042,6 +1125,25 @@ impl Vm {
                     Value::Ref(r) => r,
                     other => PhpRef::new(other),
                 };
+                // A hooked property: its write fetch (a `&get` call or the
+                // indirect-modification error) comes first (observed on
+                // PHP 8.5; test Zend/tests/property_hooks/bug007).
+                match self.hooked_fetch_w(o, name, false) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => {
+                        return self
+                            .throw("Error", "Cannot assign by reference to overloaded object");
+                    }
+                    Err(super::Unwind::Throw(prev)) => {
+                        let r: R<Value> =
+                            self.throw("Error", "Cannot assign by reference to overloaded object");
+                        if let Err(super::Unwind::Throw(ex)) = &r {
+                            self.chain_previous(ex, prev);
+                        }
+                        return r;
+                    }
+                    Err(e) => return Err(e),
+                }
                 match self.prop_ptr(o, name, false)? {
                     Some(p) => {
                         // Binding a typed property: the referenced value
@@ -1264,6 +1366,9 @@ impl Vm {
                 }
             }
         }
+        if let Some(v) = self.hooked_fetch_w(o, name, true)? {
+            return Ok(Some(super::dims::Place::Temp(Box::new(v))));
+        }
         match self.prop_ptr(o, name, false)? {
             Some(p) => Ok(Some(super::dims::Place::Ptr(p))),
             None => {
@@ -1314,6 +1419,18 @@ impl Vm {
                             ),
                         );
                     }
+                }
+                // An unset declared property takes __unset like a missing
+                // one (observed on PHP 8.5; test ext/spl/tests/bug45622).
+                if self.is_unset_mark(&o.obj().slots.borrow()[p.slot as usize])
+                    && let Some(f) = cls.magic.borrow().unset.clone()
+                    && !self.guarded(o, name, 3)
+                {
+                    self.prop_guards.push((o.handle(), name.clone(), 3));
+                    let r =
+                        self.call_func_this(&f, Some(o.clone()), vec![Value::Str(name.clone())]);
+                    self.prop_guards.pop();
+                    return r.map(|_| ());
                 }
                 let mark = self.unset_value();
                 let mut slots = o.obj().slots.borrow_mut();
@@ -2328,6 +2445,20 @@ impl Vm {
     /// numeric keys in object/array casts).
     pub fn object_props_cast(&mut self, o: &ObjRef) -> PhpArray {
         let a = self.object_props_array(o, true);
+        Self::int_keys(a)
+    }
+
+    /// get_mangled_object_vars(): the declared and dynamic properties
+    /// only, whatever the class's property-table hooks give (observed on
+    /// PHP 8.5: ArrayObject, SplFixedArray, DateTime give `[]`; test
+    /// ext/spl/tests/SplFixedArray_get_properties_for).
+    pub fn object_props_mangled(&mut self, o: &ObjRef) -> PhpArray {
+        let o = &self.lazy_target(o);
+        let a = self.plain_props_array(o, true);
+        Self::int_keys(a)
+    }
+
+    fn int_keys(a: PhpArray) -> PhpArray {
         if !a.iter().any(|(k, _)| matches!(k, goro_runtime::KeyRef::Str(s) if matches!(Key::from_php_str(s), Key::Int(_)))) {
             return a;
         }
@@ -2345,19 +2476,46 @@ impl Vm {
     /// Properties visible from the current scope (get_object_vars,
     /// foreach): (name, value) pairs.
     pub fn visible_props(&mut self, o: &ObjRef) -> Vec<(Value, Value)> {
+        let scope = self.scope_ptr();
+        self.visible_props_from(o, scope)
+    }
+
+    /// Properties visible from `scope` (null: public ones, as
+    /// json_encode() sees them whatever the calling scope; observed on
+    /// PHP 8.5).
+    pub fn visible_props_from(&mut self, o: &ObjRef, scope: *const Class) -> Vec<(Value, Value)> {
         let o = &self.realize_deferred(o);
         let cls = self.class_of(o);
-        let scope = self.scope_ptr();
         let mut out = Vec::new();
         let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();
         for p in &props {
-            let v = o.obj().slots.borrow()[p.slot as usize].clone();
-            if self.is_uninit(&v) || p.flags & (mflags::VIRTUAL | mflags::HIDDEN) != 0 {
+            if p.flags & mflags::HIDDEN != 0 {
                 continue;
             }
             match self.lookup_prop(&cls, &p.name, scope) {
                 PropLookup::Found(f) if Rc::ptr_eq(&f, p) => {}
                 _ => continue,
+            }
+            // Through the get hook (RFC: Property hooks; test
+            // Zend/tests/property_hooks/dump).
+            if let Some(g) = &p.get
+                && !self.in_hook(o, p)
+            {
+                if self.err.deferred.is_some() {
+                    break;
+                }
+                match self.call_hook(o, p, g.clone(), Vec::new()) {
+                    Ok(v) => out.push((Value::Str(p.name.clone()), v.into_deref())),
+                    Err(e) => {
+                        self.err.deferred = Some(e);
+                        break;
+                    }
+                }
+                continue;
+            }
+            let v = o.obj().slots.borrow()[p.slot as usize].clone();
+            if self.is_uninit(&v) || p.flags & mflags::VIRTUAL != 0 {
+                continue;
             }
             let v = match v {
                 Value::Ref(r) if r.refcount() == 1 => r.get(),
@@ -2371,6 +2529,99 @@ impl Vm {
                 KeyRef::Str(s) => Value::Str(s.clone()),
             };
             out.push((key, v.clone()));
+        }
+        out
+    }
+
+    /// Names of the properties foreach visits from the current scope,
+    /// without reading them (hooks run as the loop reaches them).
+    pub fn visible_prop_names(&mut self, o: &ObjRef) -> Vec<Value> {
+        let o = &self.realize_deferred(o);
+        let cls = self.class_of(o);
+        let scope = self.scope_ptr();
+        let mut out = Vec::new();
+        let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();
+        for p in &props {
+            if p.flags & mflags::HIDDEN != 0 {
+                continue;
+            }
+            match self.lookup_prop(&cls, &p.name, scope) {
+                PropLookup::Found(f) if Rc::ptr_eq(&f, p) => {}
+                _ => continue,
+            }
+            if p.get.is_none() || self.in_hook(o, p) {
+                let v = &o.obj().slots.borrow()[p.slot as usize];
+                if self.is_uninit(v) || p.flags & mflags::VIRTUAL != 0 {
+                    continue;
+                }
+            }
+            out.push(Value::Str(p.name.clone()));
+        }
+        for (k, _) in o.obj().props.borrow().iter() {
+            out.push(match k {
+                KeyRef::Int(i) => Value::Int(i),
+                KeyRef::Str(s) => Value::Str(s.clone()),
+            });
+        }
+        out
+    }
+
+    /// Whether the class has a property with hooks.
+    pub(crate) fn has_hooked_props(cls: &Class) -> bool {
+        cls.props
+            .borrow()
+            .iter()
+            .any(|p| p.get.is_some() || p.set.is_some())
+    }
+
+    /// The property table with mangled names, values read through get
+    /// hooks from any scope (var_export(); test Zend/tests/property_hooks/
+    /// dump).
+    pub fn hooked_props_mangled(&mut self, o: &ObjRef) -> PhpArray {
+        let cls = self.class_of(o);
+        let mut out = PhpArray::new();
+        let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();
+        for p in &props {
+            if p.flags & mflags::HIDDEN != 0 {
+                continue;
+            }
+            let key = if p.flags & mflags::PUBLIC != 0 {
+                p.name.clone()
+            } else if p.flags & mflags::PROTECTED != 0 {
+                let mut k = b"\0*\0".to_vec();
+                k.extend_from_slice(&p.name);
+                PhpStr::from(k)
+            } else {
+                let mut k = vec![0u8];
+                k.extend_from_slice(unsafe { &(*p.class).name });
+                k.push(0);
+                k.extend_from_slice(&p.name);
+                PhpStr::from(k)
+            };
+            let v = if let Some(g) = &p.get
+                && !self.in_hook(o, p)
+            {
+                if self.err.deferred.is_some() {
+                    break;
+                }
+                match self.call_hook(o, p, g.clone(), Vec::new()) {
+                    Ok(v) => v.into_deref(),
+                    Err(e) => {
+                        self.err.deferred = Some(e);
+                        break;
+                    }
+                }
+            } else {
+                let v = o.obj().slots.borrow()[p.slot as usize].clone();
+                if self.is_uninit(&v) || p.flags & mflags::VIRTUAL != 0 {
+                    continue;
+                }
+                v.into_deref()
+            };
+            out.insert(Key::from_php_str(&key), v);
+        }
+        for (k, v) in o.obj().props.borrow().iter() {
+            out.insert(k.to_owned(), v.clone());
         }
         out
     }

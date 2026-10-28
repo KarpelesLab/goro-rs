@@ -12,15 +12,39 @@ class IteratorIterator implements OuterIterator {
     protected $__valid = false;
     protected $__key = null;
     protected $__cur = null;
+    /* A second constructor call is refused, naming the internal class
+     * (observed on PHP 8.5; test iterator_031). */
+    protected function __h_once() {
+        $c = static::class;
+        while (!(new ReflectionClass($c))->isInternal()) {
+            $c = get_parent_class($c);
+        }
+        throw new BadMethodCallException("$c::getIterator() must be called exactly once per instance");
+    }
     public function __construct(Traversable $iterator, ?string $class = null) {
+        if ($this->__it !== null) {
+            $this->__h_once();
+        }
         while ($iterator instanceof IteratorAggregate) {
+            $agg = $iterator;
             $iterator = $iterator->getIterator();
+            if (!$iterator instanceof Traversable) {
+                // observed on PHP 8.5
+                throw new LogicException(get_class($agg) . '::getIterator() must return an object that implements Traversable');
+            }
         }
         $this->__it = $iterator;
     }
+    /* Unknown methods are the inner iterator's (observed on PHP 8.5). */
+    protected function __h_call($name, $args) {
+        if ($this->__it === null || !is_callable([$this->__it, $name])) {
+            throw new Error('Call to undefined method ' . static::class . '::' . $name . '()');
+        }
+        return $this->__it->$name(...$args);
+    }
     protected function __h_chk() {
         if ($this->__it === null) {
-            throw new LogicException("The object is in an invalid state as the parent constructor was not called");
+            throw new Error("The object is in an invalid state as the parent constructor was not called");
         }
     }
     protected function __h_fetch() {
@@ -60,7 +84,8 @@ class CallbackFilterIterator extends FilterIterator {
     }
     public function accept(): bool {
         $this->__h_chk();
-        return (bool) ($this->__cb)($this->__cur, $this->__key, $this->__it);
+        /* Values, not references, as from internal code (test bug72051). */
+        return (bool) call_user_func($this->__cb, $this->__cur, $this->__key, $this->__it);
     }
 }
 
@@ -74,6 +99,7 @@ abstract class RecursiveFilterIterator extends FilterIterator implements Recursi
 }
 
 class ParentIterator extends RecursiveFilterIterator {
+    public function __construct(RecursiveIterator $iterator) { parent::__construct($iterator); }
     public function accept(): bool { $this->__h_chk(); return $this->__it->hasChildren(); }
 }
 
@@ -123,7 +149,14 @@ class LimitIterator extends IteratorIterator {
                 $this->__it->next();
                 $this->__pos++;
             }
-            $this->__h_fetch();
+            /* valid() is asked again before the fetch (test iterator_039). */
+            if ($this->__it->valid()) {
+                $this->__h_fetch();
+            } else {
+                $this->__valid = false;
+                $this->__cur = null;
+                $this->__key = null;
+            }
         }
         return $this->__pos;
     }
@@ -241,22 +274,28 @@ class CachingIterator extends IteratorIterator implements ArrayAccess, Countable
             throw new BadMethodCallException(static::class . ' does not use a full cache (see CachingIterator::__construct)');
         }
     }
-    public function offsetGet($key): mixed {
+    /* Keys are strings (PHP manual: CachingIterator::offsetGet); a
+     * missing one is named in quotes (test iterator_044). */
+    public function offsetGet(string $key): mixed {
         $this->__h_chk();
         $this->__h_full();
+        if (!array_key_exists($key, $this->__cache)) {
+            trigger_error("Undefined array key \"$key\"", E_USER_WARNING);
+            return null;
+        }
         return $this->__cache[$key];
     }
-    public function offsetSet($key, mixed $value): void {
+    public function offsetSet(string $key, mixed $value): void {
         $this->__h_chk();
         $this->__h_full();
         $this->__cache[$key] = $value;
     }
-    public function offsetUnset($key): void {
+    public function offsetUnset(string $key): void {
         $this->__h_chk();
         $this->__h_full();
         unset($this->__cache[$key]);
     }
-    public function offsetExists($key): bool {
+    public function offsetExists(string $key): bool {
         $this->__h_chk();
         $this->__h_full();
         return isset($this->__cache[$key]);
@@ -289,8 +328,17 @@ class NoRewindIterator extends IteratorIterator {
     public function rewind(): void { $this->__h_chk(); }
     public function valid(): bool { $this->__h_chk(); return $this->__it->valid(); }
     public function key(): mixed { $this->__h_chk(); return $this->__it->key(); }
-    public function current(): mixed { $this->__h_chk(); return $this->__it->current(); }
-    public function next(): void { $this->__h_chk(); $this->__it->next(); }
+    /* The inner current() is asked once per element (test iterator_007). */
+    protected $__cv = false;
+    public function current(): mixed {
+        $this->__h_chk();
+        if (!$this->__cv) {
+            $this->__cur = $this->__it->current();
+            $this->__cv = true;
+        }
+        return $this->__cur;
+    }
+    public function next(): void { $this->__h_chk(); $this->__cv = false; $this->__it->next(); }
 }
 
 class InfiniteIterator extends IteratorIterator {
@@ -307,10 +355,15 @@ class InfiniteIterator extends IteratorIterator {
 
 class AppendIterator extends IteratorIterator {
     protected $__its = null;
-    public function __construct() { $this->__its = new ArrayIterator(); }
+    public function __construct() {
+        if ($this->__its !== null) {
+            $this->__h_once();
+        }
+        $this->__its = new ArrayIterator();
+    }
     protected function __h_chk() {
         if ($this->__its === null) {
-            throw new LogicException("The object is in an invalid state as the parent constructor was not called");
+            throw new Error("The object is in an invalid state as the parent constructor was not called");
         }
     }
     protected function __h_nextit() {
@@ -320,7 +373,16 @@ class AppendIterator extends IteratorIterator {
         $this->__key = null;
         if ($this->__its->valid()) {
             $this->__it = $this->__its->current();
-            $this->__it->rewind();
+            try {
+                $this->__it->rewind();
+            } catch (Exception $e) {
+                /* A finished generator is traversed internally (test
+                 * bug72684). */
+                if ($this->__it instanceof Generator && !$this->__it->valid()) {
+                    throw new Exception('Cannot traverse an already closed generator');
+                }
+                throw $e;
+            }
             return true;
         }
         return false;
@@ -361,7 +423,14 @@ class AppendIterator extends IteratorIterator {
         }
     }
     public function valid(): bool { $this->__h_chk(); return $this->__valid; }
-    public function current(): mixed { $this->__h_chk(); return $this->__cur; }
+    /* The current element is the inner iterator's (test bug74519). */
+    public function current(): mixed {
+        $this->__h_chk();
+        if ($this->__valid && $this->__it !== null && $this->__it->valid()) {
+            return $this->__it->current();
+        }
+        return $this->__cur;
+    }
     public function next(): void {
         $this->__h_chk();
         if ($this->__it !== null) {
@@ -387,7 +456,12 @@ class RecursiveIteratorIterator implements OuterIterator {
     protected $__initer = false;
     public function __construct(Traversable $iterator, int $mode = RecursiveIteratorIterator::LEAVES_ONLY, int $flags = 0) {
         if ($iterator instanceof IteratorAggregate) {
+            $agg = $iterator;
             $iterator = $iterator->getIterator();
+            if (!$iterator instanceof Traversable) {
+                // test RecursiveIteratorIterator_invalid_aggregate
+                throw new LogicException(get_class($agg) . '::getIterator() must return an object that implements Traversable');
+            }
         }
         if (!$iterator instanceof RecursiveIterator) {
             throw new InvalidArgumentException("An instance of RecursiveIterator or IteratorAggregate creating it is required");
@@ -399,8 +473,20 @@ class RecursiveIteratorIterator implements OuterIterator {
     }
     protected function __h_chk() {
         if ($this->__its === null) {
-            throw new LogicException("The object is in an invalid state as the parent constructor was not called");
+            throw new Error("The " . static::class . " instance wasn't initialized properly");
         }
+    }
+    /* The user hooks; CATCH_GET_CHILD drops their exceptions (tests
+     * recursiveIteratorIterator_*_error). */
+    protected function __h_hook($m) {
+        if ($this->__flags & 16) {
+            try {
+                $this->$m();
+            } catch (Throwable $e) {
+            }
+            return;
+        }
+        $this->$m();
     }
     protected function __h_fwd() {
         while (true) {
@@ -438,13 +524,19 @@ class RecursiveIteratorIterator implements OuterIterator {
                         $this->__st[$l] = $this->__mode == 1 ? 2 : 3;
                         continue;
                     }
+                    if ($has && $this->__mode == 0) {
+                        /* Below the maximum depth, LEAVES_ONLY skips what is
+                         * not a leaf (test iterator_028). */
+                        $this->__st[$l] = 0;
+                        continue;
+                    }
                     $this->__st[$l] = 0;
-                    $this->nextElement();
+                    $this->__h_hook('nextElement');
                     return;
                 }
                 if ($st == 2) {
                     if ($this->__mode == 1 || $this->__mode == 2) {
-                        $this->nextElement();
+                        $this->__h_hook('nextElement');
                     }
                     $this->__st[$l] = $this->__mode == 1 ? 3 : 0;
                     return;
@@ -467,12 +559,12 @@ class RecursiveIteratorIterator implements OuterIterator {
                     $this->__its[] = $c;
                     $this->__st[] = 4;
                     $c->rewind();
-                    $this->beginChildren();
+                    $this->__h_hook('beginChildren');
                     continue;
                 }
             }
             if ($l > 0) {
-                $this->endChildren();
+                $this->__h_hook('endChildren');
                 array_pop($this->__its);
                 array_pop($this->__st);
             } else {
@@ -523,6 +615,15 @@ class RecursiveIteratorIterator implements OuterIterator {
         return $this->__its[$level];
     }
     public function getInnerIterator(): RecursiveIterator { $this->__h_chk(); return $this->__its[count($this->__its) - 1]; }
+    /* Unknown methods are those of the current sub-iterator (observed on
+     * PHP 8.5; test RecursiveDirectoryIterator_getSubPath_basic). */
+    protected function __h_call($name, $args) {
+        $it = $this->__its === null ? null : $this->__its[count($this->__its) - 1];
+        if ($it === null || !is_callable([$it, $name])) {
+            throw new Error('Call to undefined method ' . static::class . '::' . $name . '()');
+        }
+        return $it->$name(...$args);
+    }
     public function beginIteration(): void {}
     public function endIteration(): void {}
     public function callHasChildren(): bool {

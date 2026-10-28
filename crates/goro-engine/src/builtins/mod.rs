@@ -31,6 +31,7 @@ pub mod reflection;
 pub mod serialize;
 pub mod sodium;
 pub mod spl;
+pub mod spl_autoload;
 pub mod streams;
 pub mod string;
 pub mod strmisc;

@@ -375,6 +375,28 @@ impl Vm {
         Ok(())
     }
 
+    /// Runs a file once, found through include_path, without diagnostics
+    /// when it is missing (PHP manual: spl_autoload()). Whether the file
+    /// exists.
+    pub fn include_once_quiet(&mut self, path: &[u8]) -> R<bool> {
+        use std::os::unix::ffi::OsStrExt;
+        let Some(resolved) = self.resolve_include(path) else {
+            return Ok(false);
+        };
+        let canon = std::fs::canonicalize(&resolved).unwrap_or(resolved.clone());
+        let key = PhpStr::new(canon.as_os_str().as_bytes());
+        if self.included_set.contains(&key) {
+            return Ok(true);
+        }
+        let Ok(src) = std::fs::read(&resolved) else {
+            return Ok(false);
+        };
+        self.included_set.insert(key.clone());
+        self.included.push(key.clone());
+        self.run_attached(&src, &key, false, "include_once")?;
+        Ok(true)
+    }
+
     /// Compiles and runs code in the current scope (include, eval).
     fn run_attached(&mut self, src: &[u8], file: &[u8], eval: bool, what: &str) -> R<Value> {
         let unit = match self.compile_source(src, file, eval) {
@@ -888,7 +910,9 @@ impl Vm {
     pub(crate) fn unset_var_var(&mut self, n: &Value) -> R<()> {
         let name = self.to_php_str(n)?;
         let f = self.frame();
-        if f.flags & frame_flags::GLOBAL != 0 {
+        if f.flags & frame_flags::GLOBAL != 0
+            || (crate::compiler::is_superglobal_name(&name) && name.as_bytes() != b"GLOBALS")
+        {
             self.unset_owner_var(usize::MAX, &name);
             return Ok(());
         }
@@ -1078,13 +1102,17 @@ impl Vm {
         let key = normalize_const_name(&name);
         let fresh = !self.constants.contains_key(&key);
         self.declare_constant(n, v)?;
-        if fresh {
+        if fresh && !self.code_ref().const_attrs.is_empty() {
+            // The statement's own attributes: by name and line, since a
+            // redefinition with other attributes keeps the first's (test
+            // Zend/tests/attributes/constants/constant_redefined_addition).
+            let line = self.cur_line();
             let attrs = self
                 .code_ref()
                 .const_attrs
                 .iter()
-                .find(|(k, _)| normalize_const_name(k) == key)
-                .map(|(_, a)| a.clone());
+                .find(|(k, l, _)| *l == line && normalize_const_name(k) == key)
+                .map(|(_, _, a)| a.clone());
             if let Some(a) = attrs {
                 self.const_attrs.insert(key, a);
             }

@@ -449,7 +449,9 @@ impl Vm {
                     }
                     out.extend_from_slice(b" => ");
                     let x = x.deref();
-                    if matches!(x, Value::Array(_) | Value::Object(_)) {
+                    // A circular value is exported inline as NULL (test
+                    // ext/spl/tests/gh8044).
+                    if matches!(x, Value::Array(_) | Value::Object(_)) && !self.export_cycle(&x) {
                         out.push(b'\n');
                         out.extend_from_slice(format!("{}  ", pad).as_bytes());
                     }
@@ -487,7 +489,15 @@ impl Vm {
                     out.extend_from_slice(cls.name.dname().as_bytes());
                     out.extend_from_slice(b"::__set_state(array(\n");
                 }
-                let props = self.object_props_array(o, true);
+                let props = if cls.native.props_for.is_none()
+                    && cls.native.debug_props.is_none()
+                    && Self::has_hooked_props(&cls)
+                {
+                    self.hooked_props_mangled(o)
+                } else {
+                    self.object_props_array(o, true)
+                };
+                self.check_deferred()?;
                 self.dump_stack.push(id);
                 for (k, x) in props.iter() {
                     out.extend_from_slice(format!("{}   ", pad).as_bytes());
@@ -504,7 +514,9 @@ impl Vm {
                     }
                     out.extend_from_slice(b" => ");
                     let x = x.deref();
-                    if matches!(x, Value::Array(_) | Value::Object(_)) {
+                    // A circular value is exported inline as NULL (test
+                    // ext/spl/tests/gh8044).
+                    if matches!(x, Value::Array(_) | Value::Object(_)) && !self.export_cycle(&x) {
                         out.push(b'\n');
                         out.extend_from_slice(format!("{}  ", pad).as_bytes());
                     }
@@ -534,6 +546,16 @@ impl Vm {
     }
 
     // ------------------------------------------------------------ debug_zval_dump
+
+    /// Whether var_export() is already inside `v` (a circular value).
+    fn export_cycle(&self, v: &Value) -> bool {
+        let id = match v {
+            Value::Array(a) => a.data() as *const _ as usize,
+            Value::Object(o) => o.handle() as usize | (1 << 62),
+            _ => return false,
+        };
+        self.dump_stack.contains(&id)
+    }
 
     fn zval_dump_into(
         &mut self,
@@ -606,6 +628,12 @@ impl Vm {
             }
             Value::Object(o) => {
                 let cls = self.class_of(o);
+                // Objects already being dumped (test ext/spl/tests/gh8044).
+                let id = o.handle() as usize | (1 << 62);
+                if self.dump_stack.contains(&id) {
+                    out.extend_from_slice(format!("{}*RECURSION*\n", pad).as_bytes());
+                    return Ok(());
+                }
                 let entries = self.debug_entries(o)?;
                 let lazy = if self.is_lazy_uninit(o) {
                     if crate::vm::lazy::with_lazy(o, |d| d.proxy).unwrap_or(false) {
@@ -627,26 +655,32 @@ impl Vm {
                     )
                     .as_bytes(),
                 );
-                for (label, ty, val) in entries {
-                    out.extend_from_slice(format!("{}  [", pad).as_bytes());
-                    out.extend_from_slice(&label);
-                    out.extend_from_slice(b"]=>\n");
-                    match val {
-                        Some(Value::Ref(r)) => {
-                            out.extend_from_slice(
-                                format!("{}  reference refcount({}) {{\n", pad, r.refcount())
-                                    .as_bytes(),
-                            );
-                            let inner = r.get();
-                            self.zval_dump_into(out, &inner, indent + 4, None, false)?;
-                            out.extend_from_slice(format!("{}  }}\n", pad).as_bytes());
+                self.dump_stack.push(id);
+                let r = (|| {
+                    for (label, ty, val) in entries {
+                        out.extend_from_slice(format!("{}  [", pad).as_bytes());
+                        out.extend_from_slice(&label);
+                        out.extend_from_slice(b"]=>\n");
+                        match val {
+                            Some(Value::Ref(r)) => {
+                                out.extend_from_slice(
+                                    format!("{}  reference refcount({}) {{\n", pad, r.refcount())
+                                        .as_bytes(),
+                                );
+                                let inner = r.get();
+                                self.zval_dump_into(out, &inner, indent + 4, None, false)?;
+                                out.extend_from_slice(format!("{}  }}\n", pad).as_bytes());
+                            }
+                            Some(v) => self.zval_dump_into(out, &v, indent + 2, None, false)?,
+                            None => out.extend_from_slice(
+                                format!("{}  uninitialized({})\n", pad, ty).as_bytes(),
+                            ),
                         }
-                        Some(v) => self.zval_dump_into(out, &v, indent + 2, None, false)?,
-                        None => out.extend_from_slice(
-                            format!("{}  uninitialized({})\n", pad, ty).as_bytes(),
-                        ),
                     }
-                }
+                    Ok(())
+                })();
+                self.dump_stack.pop();
+                r?;
                 out.extend_from_slice(format!("{}}}\n", pad).as_bytes());
             }
             Value::Ref(r) => {

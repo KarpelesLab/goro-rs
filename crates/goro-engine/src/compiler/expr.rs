@@ -571,6 +571,9 @@ impl<'a> Compiler<'a> {
                 });
                 c.finish_call(args, hint, line)
             }),
+            ExprKind::StaticCall(sc) if parent_hook_call(sc, e.span.start).is_some() => {
+                self.parent_hook_call(sc, hint, line)
+            }
             ExprKind::StaticCall(sc) => self.chain_root(e, |c| {
                 let class = c.class_spec(&sc.class)?;
                 let n = c.member_name(&sc.name)?;
@@ -963,6 +966,18 @@ impl<'a> Compiler<'a> {
         let line = e.span.line;
         match op {
             BinaryOp::BoolAnd | BinaryOp::BoolOr => {
+                // A literal left operand deciding the result: the right one
+                // is not compiled (observed on PHP 8.5: compile errors in it
+                // are not raised; test Zend/tests/property_hooks/
+                // ast_printing).
+                if let Some(t) = literal_truth(left)
+                    && t == (op == BinaryOp::BoolOr)
+                {
+                    let d = self.tmp();
+                    let c = self.add_const(Value::Bool(t));
+                    self.emit(Op::Copy { dst: d, src: c });
+                    return Ok(d);
+                }
                 let d = self.tmp();
                 let a = self.expr(left)?;
                 self.free(a);
@@ -1629,6 +1644,75 @@ impl<'a> Compiler<'a> {
     }
 
     /// Sends the arguments of the pending call and calls it.
+    /// `parent::$prop::get()` / `parent::$prop::set($v)`: the parent's hook,
+    /// or its plain property access (RFC: Property hooks, "Parent property
+    /// access"; tests Zend/tests/property_hooks/parent_*).
+    fn parent_hook_call(
+        &mut self,
+        sc: &'a goro_syntax::ast::StaticCallNode<'a>,
+        hint: Reg,
+        line: u32,
+    ) -> CResult<Reg> {
+        let (prop, set) = parent_hook_call(sc, 0).unwrap();
+        let shown = match &prop {
+            goro_syntax::ast::StaticPropName::Ident(i) => {
+                String::from_utf8_lossy(i.name).into_owned()
+            }
+            goro_syntax::ast::StaticPropName::Expr(x) => match &x.kind {
+                ExprKind::Int(i) => i.to_string(),
+                ExprKind::String(s, _) => String::from_utf8_lossy(s).into_owned(),
+                _ => String::new(),
+            },
+        };
+        let what = if set { "set" } else { "get" };
+        if self.class.is_none() {
+            return self.err("Cannot use \"parent\" when no class scope is active", line);
+        }
+        let Some(cur) = self.f.prop_name.clone() else {
+            return self.err(
+                format!(
+                    "Must not use parent::${}::{}() outside a property hook",
+                    shown, what
+                ),
+                line,
+            );
+        };
+        let same =
+            matches!(&prop, goro_syntax::ast::StaticPropName::Ident(i) if i.name == cur.as_bytes());
+        if !same {
+            return self.err(
+                format!(
+                    "Must not use parent::${}::{}() in a different property (${})",
+                    shown,
+                    what,
+                    cur.to_string_lossy()
+                ),
+                line,
+            );
+        }
+        let cur_kind = if self.f.func_name.as_bytes().ends_with(b"::set") {
+            "set"
+        } else {
+            "get"
+        };
+        if cur_kind != what {
+            return self.err(
+                format!(
+                    "Must not use parent::${}::{}() in a different property hook ({})",
+                    shown, what, cur_kind
+                ),
+                line,
+            );
+        }
+        if let Args::FirstClassCallable = sc.args {
+            return self.err("Cannot create Closure for parent property hook call", line);
+        }
+        let name = self.str_const(cur.as_bytes());
+        self.f.line = line;
+        self.emit(Op::InitParentHook { name, set });
+        self.finish_call(&sc.args, hint, line)
+    }
+
     fn finish_call(&mut self, args: &'a Args<'a>, hint: Reg, line: u32) -> CResult<Reg> {
         self.f.call_depth += 1;
         if let Args::FirstClassCallable = args {
@@ -2707,6 +2791,12 @@ impl<'a> Compiler<'a> {
                 self.emit_path(p, PathAction::IncDec(k), res);
                 Ok(res)
             }
+            ExprKind::Call { .. } | ExprKind::CallExpr { .. } => {
+                self.err("Can't use function return value in write context", line)
+            }
+            ExprKind::MethodCall { .. } | ExprKind::StaticCall(_) => {
+                self.err("Can't use method return value in write context", line)
+            }
             _ => self.err(
                 "Cannot increment/decrement the result of an expression",
                 line,
@@ -2721,6 +2811,18 @@ impl<'a> Compiler<'a> {
             ExprKind::Variable(n) => {
                 if *n == b"this" {
                     return self.err("Cannot unset $this", line);
+                }
+                if *n == b"GLOBALS" {
+                    return self.err(
+                        "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                        line,
+                    );
+                }
+                if is_superglobal(n) {
+                    // The global itself goes (test Zend/tests/globals_001).
+                    let name = self.str_const(n);
+                    self.emit(Op::UnsetVarVar { name });
+                    return Ok(());
                 }
                 let var = self.cv(n);
                 self.emit(Op::UnsetVar { var });
@@ -2743,6 +2845,65 @@ impl<'a> Compiler<'a> {
             _ => self.err("Cannot use unset() on the result of an expression", line),
         }
     }
+}
+
+/// The truth value of a literal (`false`, `0`, `"x"`, `null`...), not of
+/// other constants.
+fn literal_truth(e: &Expr<'_>) -> Option<bool> {
+    match &e.kind {
+        ExprKind::Int(i) => Some(*i != 0),
+        ExprKind::Float(f) => Some(*f != 0.0),
+        ExprKind::String(s, _) => Some(!(s.is_empty() || *s == b"0")),
+        ExprKind::Const(n)
+            if n.kind == NameKind::Unqualified || n.kind == NameKind::FullyQualified =>
+        {
+            if n.name.eq_ignore_ascii_case(b"true") {
+                Some(true)
+            } else if n.name.eq_ignore_ascii_case(b"false") || n.name.eq_ignore_ascii_case(b"null")
+            {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `parent::$prop::get(...)` / `parent::$prop::set(...)`: the property
+/// name and whether it is `set`.
+fn parent_hook_call<'a>(
+    sc: &goro_syntax::ast::StaticCallNode<'a>,
+    start: u32,
+) -> Option<(goro_syntax::ast::StaticPropName<'a>, bool)> {
+    let ClassRef::Expr(x) = &sc.class else {
+        return None;
+    };
+    let ExprKind::StaticProp(sp) = &x.kind else {
+        return None;
+    };
+    let ClassRef::Name(n) = &sp.class else {
+        return None;
+    };
+    if n.kind != NameKind::Unqualified || !n.name.eq_ignore_ascii_case(b"parent") {
+        return None;
+    }
+    // `(parent::$prop)::get()` calls a static method of the class named
+    // by the static property (test Zend/tests/property_hooks/parent_syntax).
+    if start != 0 && start != n.span.start {
+        return None;
+    }
+    let MemberName::Ident(m) = &sc.name else {
+        return None;
+    };
+    let set = if m.name.eq_ignore_ascii_case(b"set") {
+        true
+    } else if m.name.eq_ignore_ascii_case(b"get") {
+        false
+    } else {
+        return None;
+    };
+    Some((sp.name, set))
 }
 
 /// Whether a value expression is produced by one instruction that may
