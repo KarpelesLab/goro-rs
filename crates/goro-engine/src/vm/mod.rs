@@ -492,7 +492,12 @@ impl Vm {
     /// Inside internal (stub) code: the innermost frame running user code,
     /// whose current instruction is the call into the internal code.
     fn user_frame(&self) -> Option<&Frame> {
-        self.ex.frames.iter().rev().skip(1).find(|f| !f.code().file.is_empty())
+        self.ex
+            .frames
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|f| !f.code().file.is_empty())
     }
 
     pub fn cur_file(&self) -> PhpStr {

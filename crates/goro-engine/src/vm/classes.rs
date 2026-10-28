@@ -400,7 +400,12 @@ impl Vm {
             }
             let methods = cls.methods.borrow();
             let old = cls.method_order.borrow().clone();
-            let is_iface = |n: &PhpStr| methods.get(n).and_then(|f| f.scope()).is_some_and(|c| c.is_interface());
+            let is_iface = |n: &PhpStr| {
+                methods
+                    .get(n)
+                    .and_then(|f| f.scope())
+                    .is_some_and(|c| c.is_interface())
+            };
             for n in old.iter().filter(|n| !is_iface(n)) {
                 if !order.contains(n) {
                     order.push(n.clone());

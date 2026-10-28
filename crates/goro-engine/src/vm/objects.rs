@@ -1932,7 +1932,8 @@ impl Vm {
     pub fn object_props_array(&mut self, o: &ObjRef, mangle: bool) -> PhpArray {
         let o = &self.lazy_target(o);
         let cls = self.class_of(o);
-        if mangle && let Some(h) = cls.native.props_for
+        if mangle
+            && let Some(h) = cls.native.props_for
             && let Some(a) = h(self, o)
         {
             return a;

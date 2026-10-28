@@ -30,6 +30,10 @@ pub static MODULE: Module = Module {
             "function assert_options(int $option, mixed $value = UNKNOWN): mixed",
             assert_options,
         ),
+        (
+            "function version_compare(string $version1, string $version2, ?string $operator = null): int|bool",
+            version_compare,
+        ),
     ],
     constants: &[
         ("ASSERT_ACTIVE", ConstVal::Int(1)),
@@ -364,4 +368,127 @@ fn assert_options(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     Ok(old)
+}
+
+// ---------------------------------------------------------------- version_compare
+
+/// Canonical form (PHP manual: version_compare): '-', '_' and '+' become
+/// '.', and a '.' separates digits from other characters.
+fn canon_version(v: &[u8]) -> Vec<Vec<u8>> {
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let flush = |cur: &mut Vec<u8>, parts: &mut Vec<Vec<u8>>| {
+        if !cur.is_empty() {
+            parts.push(std::mem::take(cur));
+        }
+    };
+    for &c in v {
+        if matches!(c, b'.' | b'-' | b'_' | b'+') {
+            flush(&mut cur, &mut parts);
+            continue;
+        }
+        if let Some(&last) = cur.last()
+            && last.is_ascii_digit() != c.is_ascii_digit()
+        {
+            flush(&mut cur, &mut parts);
+        }
+        cur.push(c);
+    }
+    flush(&mut cur, &mut parts);
+    parts
+}
+
+/// The order of special forms: anything else < dev < alpha = a < beta = b
+/// < RC = rc < # (numbers) < pl = p.
+fn special_rank(p: &[u8]) -> i32 {
+    let l = p.to_ascii_lowercase();
+    let l = l.as_slice();
+    if l.starts_with(b"dev") {
+        0
+    } else if l.starts_with(b"a") {
+        1
+    } else if l.starts_with(b"b") {
+        2
+    } else if l.starts_with(b"rc") {
+        3
+    } else if l == b"#" {
+        4
+    } else if l.starts_with(b"p") {
+        5
+    } else {
+        -1
+    }
+}
+
+fn cmp_part(a: &[u8], b: &[u8]) -> i32 {
+    let ad = a[0].is_ascii_digit();
+    let bd = b[0].is_ascii_digit();
+    match (ad, bd) {
+        (true, true) => {
+            let x: u128 = std::str::from_utf8(a)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let y: u128 = std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            (x > y) as i32 - (x < y) as i32
+        }
+        (false, false) => {
+            let (x, y) = (special_rank(a), special_rank(b));
+            (x > y) as i32 - (x < y) as i32
+        }
+        (true, false) => {
+            let y = special_rank(b);
+            (4 > y) as i32 - (4 < y) as i32
+        }
+        (false, true) => {
+            let x = special_rank(a);
+            (x > 4) as i32 - (x < 4) as i32
+        }
+    }
+}
+
+pub(crate) fn compare_versions(a: &[u8], b: &[u8]) -> i32 {
+    let pa = canon_version(a);
+    let pb = canon_version(b);
+    let n = pa.len().max(pb.len());
+    for i in 0..n {
+        let c = match (pa.get(i), pb.get(i)) {
+            (Some(x), Some(y)) => cmp_part(x, y),
+            // A longer version: a number makes it newer, a special form is
+            // compared with "#".
+            (Some(x), None) => cmp_part(x, b"#"),
+            (None, Some(y)) => cmp_part(b"#", y),
+            (None, None) => 0,
+        };
+        if c != 0 {
+            return c;
+        }
+    }
+    0
+}
+
+fn version_compare(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let c = compare_versions(a.bytes(0), a.bytes(1));
+    let Some(op) = a.opt_str(2) else {
+        return Ok(Value::Int(c as i64));
+    };
+    let r = match op.as_bytes() {
+        b"<" | b"lt" => c < 0,
+        b"<=" | b"le" => c <= 0,
+        b">" | b"gt" => c > 0,
+        b">=" | b"ge" => c >= 0,
+        b"==" | b"=" | b"eq" => c == 0,
+        b"!=" | b"<>" | b"ne" => c != 0,
+        _ => {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                "Argument #3 ($operator) must be a valid comparison operator",
+            );
+        }
+    };
+    Ok(Value::Bool(r))
 }
