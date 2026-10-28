@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 
 /// Capacity of the queue: older entries are dropped (observed on PHP 8.5:
-/// at most 16 messages are kept).
-const CAP: usize = 16;
+/// at most 15 messages are kept: 16 failures leave the last 15).
+const CAP: usize = 15;
 
 thread_local! {
     static QUEUE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
