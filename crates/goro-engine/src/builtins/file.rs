@@ -250,8 +250,14 @@ pub static MODULE: Module = Module {
             "function fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false",
             fputcsv,
         ),
-        ("function fprintf($stream, string $format, mixed ...$values): int", fprintf),
-        ("function vfprintf($stream, string $format, array $values): int", vfprintf),
+        (
+            "function fprintf($stream, string $format, mixed ...$values): int",
+            fprintf,
+        ),
+        (
+            "function vfprintf($stream, string $format, array $values): int",
+            vfprintf,
+        ),
         (
             "function fscanf($stream, string $format, mixed &...$vars): array|int|false|null",
             fscanf,
@@ -2496,14 +2502,26 @@ fn write_formatted(vm: &mut Vm, a: &mut Args, out: Vec<u8>) -> R<Value> {
 fn fprintf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let fmt = a.str(1);
     let vals: Vec<Value> = a.vals[2..].to_vec();
-    let out = super::string::format_values(vm, a, &fmt, &vals, goro_ext_standard::printf::ArgsKind::Variadic)?;
+    let out = super::string::format_values(
+        vm,
+        a,
+        &fmt,
+        &vals,
+        goro_ext_standard::printf::ArgsKind::Variadic,
+    )?;
     write_formatted(vm, a, out)
 }
 
 fn vfprintf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let fmt = a.str(1);
     let vals: Vec<Value> = a.array(2).iter().map(|(_, v)| v.deref()).collect();
-    let out = super::string::format_values(vm, a, &fmt, &vals, goro_ext_standard::printf::ArgsKind::Array)?;
+    let out = super::string::format_values(
+        vm,
+        a,
+        &fmt,
+        &vals,
+        goro_ext_standard::printf::ArgsKind::Array,
+    )?;
     write_formatted(vm, a, out)
 }
 

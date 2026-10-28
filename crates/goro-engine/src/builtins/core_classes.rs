@@ -713,7 +713,9 @@ fn gen_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !pending {
         return Ok(Value::Null);
     }
-    let cls = vm.find_class(b"GeneratorExit_", false)?.expect("GeneratorExit_");
+    let cls = vm
+        .find_class(b"GeneratorExit_", false)?
+        .expect("GeneratorExit_");
     let marker = vm.instantiate_raw(&cls)?;
     vm.with_gen(&g, |d| d.delegate = None);
     match vm.gen_resume(&g, None, Some(marker.clone())) {

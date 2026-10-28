@@ -842,7 +842,8 @@ impl Vm {
         let wakeups = std::mem::take(&mut u.wakeups);
         let v = r.ok()?;
         for (o, d) in unserializes {
-            self.call_method(&o, b"__unserialize", vec![Value::Array(d)]).ok()?;
+            self.call_method(&o, b"__unserialize", vec![Value::Array(d)])
+                .ok()?;
         }
         for o in wakeups {
             self.call_method(&o, b"__wakeup", Vec::new()).ok()?;

@@ -5,7 +5,9 @@ use std::rc::Rc;
 
 use goro_runtime::{Key, ObjRef, PhpArray, PhpStr, Value};
 
-use crate::bytecode::{AttrInfo, ConstExpr, FuncCode, ParamDefault, ParamInfo, TypeHint, fflags, tmask};
+use crate::bytecode::{
+    AttrInfo, ConstExpr, FuncCode, ParamDefault, ParamInfo, TypeHint, fflags, tmask,
+};
 use crate::class::{Class, ClassKind, ConstState, DisplayName, TypeName, cflags, lower, mflags};
 use crate::func::{Args, Func, FuncKind};
 use crate::registry::{ConstVal, Module};
@@ -407,19 +409,40 @@ pub static MODULE: Module = Module {
         ("reflectionfunctionabstract::isgenerator", fa_is_generator),
         ("reflectionfunctionabstract::isvariadic", fa_is_variadic),
         ("reflectionfunctionabstract::isstatic", fa_is_static),
-        ("reflectionfunctionabstract::getclosurethis", fa_closure_this),
-        ("reflectionfunctionabstract::getclosurescopeclass", fa_closure_scope),
-        ("reflectionfunctionabstract::getclosurecalledclass", fa_closure_called),
-        ("reflectionfunctionabstract::getclosureusedvariables", fa_closure_used),
+        (
+            "reflectionfunctionabstract::getclosurethis",
+            fa_closure_this,
+        ),
+        (
+            "reflectionfunctionabstract::getclosurescopeclass",
+            fa_closure_scope,
+        ),
+        (
+            "reflectionfunctionabstract::getclosurecalledclass",
+            fa_closure_called,
+        ),
+        (
+            "reflectionfunctionabstract::getclosureusedvariables",
+            fa_closure_used,
+        ),
         ("reflectionfunctionabstract::getdoccomment", fa_doc),
         ("reflectionfunctionabstract::getendline", fa_end_line),
         ("reflectionfunctionabstract::getextension", fa_extension),
-        ("reflectionfunctionabstract::getextensionname", fa_extension_name),
+        (
+            "reflectionfunctionabstract::getextensionname",
+            fa_extension_name,
+        ),
         ("reflectionfunctionabstract::getfilename", fa_file),
         ("reflectionfunctionabstract::getname", fa_name),
         ("reflectionfunctionabstract::getnamespacename", fa_ns),
-        ("reflectionfunctionabstract::getnumberofparameters", fa_nparams),
-        ("reflectionfunctionabstract::getnumberofrequiredparameters", fa_nreq),
+        (
+            "reflectionfunctionabstract::getnumberofparameters",
+            fa_nparams,
+        ),
+        (
+            "reflectionfunctionabstract::getnumberofrequiredparameters",
+            fa_nreq,
+        ),
         ("reflectionfunctionabstract::getparameters", fa_params),
         ("reflectionfunctionabstract::getshortname", fa_short),
         ("reflectionfunctionabstract::getstartline", fa_start_line),
@@ -427,8 +450,14 @@ pub static MODULE: Module = Module {
         ("reflectionfunctionabstract::returnsreference", fa_by_ref),
         ("reflectionfunctionabstract::hasreturntype", fa_has_ret),
         ("reflectionfunctionabstract::getreturntype", fa_ret),
-        ("reflectionfunctionabstract::hastentativereturntype", ret_false),
-        ("reflectionfunctionabstract::gettentativereturntype", ret_null),
+        (
+            "reflectionfunctionabstract::hastentativereturntype",
+            ret_false,
+        ),
+        (
+            "reflectionfunctionabstract::gettentativereturntype",
+            ret_null,
+        ),
         ("reflectionfunctionabstract::getattributes", fa_attrs),
         ("reflectionfunction::__construct", f_construct),
         ("reflectionfunction::__tostring", f_to_string),
@@ -495,7 +524,10 @@ pub static MODULE: Module = Module {
         ("reflectionclass::getmodifiers", c_modifiers),
         ("reflectionclass::isinstance", c_is_instance),
         ("reflectionclass::newinstance", c_new),
-        ("reflectionclass::newinstancewithoutconstructor", c_new_no_ctor),
+        (
+            "reflectionclass::newinstancewithoutconstructor",
+            c_new_no_ctor,
+        ),
         ("reflectionclass::newinstanceargs", c_new_args),
         ("reflectionclass::getparentclass", c_parent),
         ("reflectionclass::issubclassof", c_is_subclass),
@@ -595,10 +627,19 @@ pub static MODULE: Module = Module {
         ("reflectionparameter::allowsnull", par_allows_null),
         ("reflectionparameter::getposition", par_position),
         ("reflectionparameter::isoptional", par_optional),
-        ("reflectionparameter::isdefaultvalueavailable", par_has_default),
+        (
+            "reflectionparameter::isdefaultvalueavailable",
+            par_has_default,
+        ),
         ("reflectionparameter::getdefaultvalue", par_default),
-        ("reflectionparameter::isdefaultvalueconstant", par_default_is_const),
-        ("reflectionparameter::getdefaultvalueconstantname", par_default_const_name),
+        (
+            "reflectionparameter::isdefaultvalueconstant",
+            par_default_is_const,
+        ),
+        (
+            "reflectionparameter::getdefaultvalueconstantname",
+            par_default_const_name,
+        ),
         ("reflectionparameter::isvariadic", par_variadic),
         ("reflectionparameter::ispromoted", par_promoted),
         ("reflectionparameter::getattributes", par_attrs),
@@ -676,13 +717,39 @@ pub enum Refl {
     Class(Rc<Class>),
     /// ReflectionObject: the class and the object (dynamic properties).
     Object(Rc<Class>, ObjRef),
-    Func { func: Rc<Func>, closure: Option<ObjRef> },
-    Method { func: Rc<Func>, cls: Rc<Class> },
-    Param { func: Rc<Func>, closure: Option<ObjRef>, idx: usize },
-    Prop { cls: Rc<Class>, name: PhpStr, dynamic: bool },
-    Const { cls: Rc<Class>, name: PhpStr },
-    Type { ty: TypeHint, single: Option<(PhpStr, bool)>, scope: *const Class },
-    Attr { info: AttrInfo, target: i64, scope: *const Class, repeated: bool },
+    Func {
+        func: Rc<Func>,
+        closure: Option<ObjRef>,
+    },
+    Method {
+        func: Rc<Func>,
+        cls: Rc<Class>,
+    },
+    Param {
+        func: Rc<Func>,
+        closure: Option<ObjRef>,
+        idx: usize,
+    },
+    Prop {
+        cls: Rc<Class>,
+        name: PhpStr,
+        dynamic: bool,
+    },
+    Const {
+        cls: Rc<Class>,
+        name: PhpStr,
+    },
+    Type {
+        ty: TypeHint,
+        single: Option<(PhpStr, bool)>,
+        scope: *const Class,
+    },
+    Attr {
+        info: AttrInfo,
+        target: i64,
+        scope: *const Class,
+        repeated: bool,
+    },
     Generator(ObjRef),
     Reference(usize),
     Extension(PhpStr),
@@ -694,7 +761,12 @@ pub struct ReflData(pub Refl);
 impl goro_runtime::NativeData for ReflData {
     fn trace(&self, visit: &mut dyn FnMut(&Value)) {
         match &self.0 {
-            Refl::Func { closure: Some(c), .. } | Refl::Param { closure: Some(c), .. } => visit(&Value::Object(c.clone())),
+            Refl::Func {
+                closure: Some(c), ..
+            }
+            | Refl::Param {
+                closure: Some(c), ..
+            } => visit(&Value::Object(c.clone())),
             Refl::Generator(g) | Refl::Object(_, g) => visit(&Value::Object(g.clone())),
             _ => {}
         }
@@ -722,7 +794,9 @@ fn refl_error<T>(vm: &mut Vm, msg: &str) -> R<T> {
 
 /// A new Reflection object of `class` reflecting `r`.
 fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
-    let cls = vm.find_class(class.as_bytes(), false)?.expect("reflection class");
+    let cls = vm
+        .find_class(class.as_bytes(), false)?
+        .expect("reflection class");
     let o = vm.instantiate_raw(&cls)?;
     match &r {
         Refl::Class(c) => vm.set_prop_raw(&o, b"name", Value::Str(c.name.clone())),
@@ -737,12 +811,21 @@ fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
         }
         Refl::Prop { cls, name, dynamic } => {
             vm.set_prop_raw(&o, b"name", Value::Str(name.clone()));
-            let decl = if *dynamic { cls.name.clone() } else { prop_decl_class(cls, name).map(|c| unsafe { (*c).name.clone() }).unwrap_or(cls.name.clone()) };
+            let decl = if *dynamic {
+                cls.name.clone()
+            } else {
+                prop_decl_class(cls, name)
+                    .map(|c| unsafe { (*c).name.clone() })
+                    .unwrap_or(cls.name.clone())
+            };
             vm.set_prop_raw(&o, b"class", Value::Str(decl));
         }
         Refl::Const { cls, name } => {
             vm.set_prop_raw(&o, b"name", Value::Str(name.clone()));
-            let decl = cls.find_const(name).map(|c| unsafe { (*c.class).name.clone() }).unwrap_or(cls.name.clone());
+            let decl = cls
+                .find_const(name)
+                .map(|c| unsafe { (*c.class).name.clone() })
+                .unwrap_or(cls.name.clone());
             vm.set_prop_raw(&o, b"class", Value::Str(decl));
         }
         Refl::Param { func, idx, .. } => {
@@ -751,7 +834,9 @@ fn new_refl(vm: &mut Vm, class: &str, r: Refl) -> R<ObjRef> {
                 vm.set_prop_raw(&o, b"name", Value::Str(p.name.clone()));
             }
         }
-        Refl::Extension(n) | Refl::GlobalConst(n) => vm.set_prop_raw(&o, b"name", Value::Str(n.clone())),
+        Refl::Extension(n) | Refl::GlobalConst(n) => {
+            vm.set_prop_raw(&o, b"name", Value::Str(n.clone()))
+        }
         _ => {}
     }
     set_data(&o, r);
@@ -779,13 +864,19 @@ fn class_arg(vm: &mut Vm, v: &Value) -> R<Rc<Class>> {
         Value::Object(o) => Ok(vm.class_of(o)),
         Value::Str(s) => match vm.find_class(s, true)? {
             Some(c) => Ok(c),
-            None => refl_error(vm, &format!("Class \"{}\" does not exist", s.to_string_lossy())),
+            None => refl_error(
+                vm,
+                &format!("Class \"{}\" does not exist", s.to_string_lossy()),
+            ),
         },
         other => {
             let s = vm.to_php_str(other)?;
             match vm.find_class(&s, true)? {
                 Some(c) => Ok(c),
-                None => refl_error(vm, &format!("Class \"{}\" does not exist", s.to_string_lossy())),
+                None => refl_error(
+                    vm,
+                    &format!("Class \"{}\" does not exist", s.to_string_lossy()),
+                ),
             }
         }
     }
@@ -802,7 +893,12 @@ macro_rules! need_class {
     ($vm:expr, $a:expr) => {
         match this_class($a) {
             Some(c) => c,
-            None => return refl_error($vm, "Internal error: Failed to retrieve the reflection object"),
+            None => {
+                return refl_error(
+                    $vm,
+                    "Internal error: Failed to retrieve the reflection object",
+                )
+            }
         }
     };
 }
@@ -873,7 +969,12 @@ macro_rules! need_func {
     ($vm:expr, $a:expr) => {
         match this_func($a) {
             Some(f) => f,
-            None => return refl_error($vm, "Internal error: Failed to retrieve the reflection object"),
+            None => {
+                return refl_error(
+                    $vm,
+                    "Internal error: Failed to retrieve the reflection object",
+                )
+            }
         }
     };
 }
@@ -900,10 +1001,22 @@ fn f_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             match vm.functions.get(&lower(name)).cloned() {
                 Some(f) => {
                     vm.set_prop_raw(&o, b"name", Value::Str(f.name.clone()));
-                    set_data(&o, Refl::Func { func: f, closure: None });
+                    set_data(
+                        &o,
+                        Refl::Func {
+                            func: f,
+                            closure: None,
+                        },
+                    );
                 }
                 None => {
-                    return refl_error(vm, &format!("Function {}() does not exist", String::from_utf8_lossy(name)));
+                    return refl_error(
+                        vm,
+                        &format!(
+                            "Function {}() does not exist",
+                            String::from_utf8_lossy(name)
+                        ),
+                    );
                 }
             }
         }
@@ -921,19 +1034,27 @@ fn fa_in_namespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn fa_is_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _) = need_func!(vm, a);
-    Ok(Value::Bool(c.is_some() && code_of(&f).is_some_and(|c| c.flags & fflags::CLOSURE != 0)))
+    Ok(Value::Bool(
+        c.is_some() && code_of(&f).is_some_and(|c| c.flags & fflags::CLOSURE != 0),
+    ))
 }
 fn fa_is_deprecated(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(Value::Bool(code_of(&f).is_some_and(|c| c.flags & fflags::DEPRECATED != 0)))
+    Ok(Value::Bool(
+        code_of(&f).is_some_and(|c| c.flags & fflags::DEPRECATED != 0),
+    ))
 }
 fn fa_is_internal(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(Value::Bool(f.is_native() || f.scope().is_some_and(|c| c.has_flag(cflags::INTERNAL))))
+    Ok(Value::Bool(
+        f.is_native() || f.scope().is_some_and(|c| c.has_flag(cflags::INTERNAL)),
+    ))
 }
 fn fa_is_user(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(Value::Bool(!(f.is_native() || f.scope().is_some_and(|c| c.has_flag(cflags::INTERNAL)))))
+    Ok(Value::Bool(
+        !(f.is_native() || f.scope().is_some_and(|c| c.has_flag(cflags::INTERNAL))),
+    ))
 }
 fn fa_is_generator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
@@ -946,7 +1067,8 @@ fn fa_is_variadic(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn fa_is_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _) = need_func!(vm, a);
-    let st = f.flags & mflags::STATIC != 0 || code_of(&f).is_some_and(|c| c.flags & fflags::STATIC_CLOSURE != 0);
+    let st = f.flags & mflags::STATIC != 0
+        || code_of(&f).is_some_and(|c| c.flags & fflags::STATIC_CLOSURE != 0);
     let _ = c;
     Ok(Value::Bool(st))
 }
@@ -959,7 +1081,9 @@ fn closure_cd<T>(c: &ObjRef, f: impl FnOnce(&ClosureData) -> T) -> Option<T> {
 
 fn fa_closure_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, c, _) = need_func!(vm, a);
-    Ok(c.and_then(|c| closure_cd(&c, |d| d.this.clone()).flatten()).map(Value::Object).unwrap_or_default())
+    Ok(c.and_then(|c| closure_cd(&c, |d| d.this.clone()).flatten())
+        .map(Value::Object)
+        .unwrap_or_default())
 }
 fn fa_closure_scope(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, c, _) = need_func!(vm, a);
@@ -967,7 +1091,11 @@ fn fa_closure_scope(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match p {
         Some(p) if !p.is_null() => {
             let cls = vm.rc_class(p);
-            Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(cls))?))
+            Ok(Value::Object(new_refl(
+                vm,
+                "ReflectionClass",
+                Refl::Class(cls),
+            )?))
         }
         _ => Ok(Value::Null),
     }
@@ -978,7 +1106,11 @@ fn fa_closure_called(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match p {
         Some(p) if !p.is_null() => {
             let cls = vm.rc_class(p);
-            Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(cls))?))
+            Ok(Value::Object(new_refl(
+                vm,
+                "ReflectionClass",
+                Refl::Class(cls),
+            )?))
         }
         _ => Ok(Value::Null),
     }
@@ -999,7 +1131,10 @@ fn fa_closure_used(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn fa_doc(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(code_of(&f).and_then(|c| c.doc_comment.clone()).map(Value::Str).unwrap_or(Value::Bool(false)))
+    Ok(code_of(&f)
+        .and_then(|c| c.doc_comment.clone())
+        .map(Value::Str)
+        .unwrap_or(Value::Bool(false)))
 }
 fn fa_end_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
@@ -1029,7 +1164,11 @@ fn fa_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !f.is_native() {
         return Ok(Value::Null);
     }
-    Ok(Value::Object(new_refl(vm, "ReflectionExtension", Refl::Extension(PhpStr::from("standard")))?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionExtension",
+        Refl::Extension(PhpStr::from("standard")),
+    )?))
 }
 fn fa_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
@@ -1039,7 +1178,11 @@ fn fa_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let name = vm
         .modules
         .iter()
-        .find(|m| m.functions.iter().any(|(s, _)| crate::registry::sig_name(s).eq_ignore_ascii_case(&f.name.to_string_lossy())))
+        .find(|m| {
+            m.functions.iter().any(|(s, _)| {
+                crate::registry::sig_name(s).eq_ignore_ascii_case(&f.name.to_string_lossy())
+            })
+        })
         .map(|m| m.name)
         .unwrap_or("Core");
     Ok(Value::from(name))
@@ -1105,12 +1248,20 @@ fn fa_params(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn fa_statics(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _) = need_func!(vm, a);
     let mut out = PhpArray::new();
-    let Some(code) = code_of(&f) else { return Ok(Value::Array(out)) };
+    let Some(code) = code_of(&f) else {
+        return Ok(Value::Array(out));
+    };
     // Names of static variables from the BindStatic instructions.
     let mut names: Vec<(u32, PhpStr)> = Vec::new();
     for op in &code.ops {
         if let crate::bytecode::Op::BindStatic { var, index, .. } = op {
-            names.push((*index, code.cv_names.get(*var as usize).cloned().unwrap_or_default()));
+            names.push((
+                *index,
+                code.cv_names
+                    .get(*var as usize)
+                    .cloned()
+                    .unwrap_or_default(),
+            ));
         }
     }
     let cells: Vec<Option<goro_runtime::PhpRef>> = match &c {
@@ -1174,7 +1325,9 @@ fn fa_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn f_is_anon(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _) = need_func!(vm, a);
-    Ok(Value::Bool(c.is_some() && func_name(&f, true).starts_with(b"{closure")))
+    Ok(Value::Bool(
+        c.is_some() && func_name(&f, true).starts_with(b"{closure"),
+    ))
 }
 
 fn f_invoke(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1207,7 +1360,11 @@ fn f_get_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn param_string(vm: &mut Vm, p: &ParamInfo, i: usize, required: bool) -> String {
-    let mut s = format!("Parameter #{} [ <{}> ", i, if required { "required" } else { "optional" });
+    let mut s = format!(
+        "Parameter #{} [ <{}> ",
+        i,
+        if required { "required" } else { "optional" }
+    );
     if let Some(t) = &p.ty {
         s.push_str(&t.display());
         s.push(' ');
@@ -1256,7 +1413,9 @@ fn text_has_name(t: &str) -> bool {
         }
         if c.is_ascii_alphabetic() || c == b'_' || c == b'\\' || c >= 0x80 {
             let st = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'\\' || b[i] >= 0x80) {
+            while i < b.len()
+                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'\\' || b[i] >= 0x80)
+            {
                 i += 1;
             }
             let w = t[st..i].to_ascii_lowercase();
@@ -1320,7 +1479,11 @@ fn render_expr_text(t: &str) -> String {
             Some(p) => (rest[..p].trim(), &rest[p..]),
             None => (rest, "()"),
         };
-        let name = if name.starts_with('\\') { name.to_string() } else { format!("\\{}", name) };
+        let name = if name.starts_with('\\') {
+            name.to_string()
+        } else {
+            format!("\\{}", name)
+        };
         return format!("new {}{}", name, args);
     }
     tt.to_string()
@@ -1342,7 +1505,15 @@ fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         "Function"
     };
     let internal = f.is_native();
-    s.push_str(&format!("{} [ <{}> ", kind, if internal { "internal:standard" } else { "user" }));
+    s.push_str(&format!(
+        "{} [ <{}> ",
+        kind,
+        if internal {
+            "internal:standard"
+        } else {
+            "user"
+        }
+    ));
     if m.is_some() {
         let mods = method_modifiers(&f);
         let names: Vec<&str> = [
@@ -1374,7 +1545,12 @@ fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(code) = code_of(&f)
         && !internal
     {
-        s.push_str(&format!("  @@ {} {} - {}\n", code.file.to_string_lossy(), code.line_start, code.line_end));
+        s.push_str(&format!(
+            "  @@ {} {} - {}\n",
+            code.file.to_string_lossy(),
+            code.line_start,
+            code.line_end
+        ));
     }
     if !params.is_empty() {
         s.push_str(&format!("\n  - Parameters [{}] {{\n", params.len()));
@@ -1405,7 +1581,11 @@ fn find_method_in(vm: &mut Vm, cls: &Rc<Class>, name: &[u8]) -> R<Rc<Func>> {
     }
     refl_error(
         vm,
-        &format!("Method {}::{}() does not exist", cls.name.dname(), String::from_utf8_lossy(name)),
+        &format!(
+            "Method {}::{}() does not exist",
+            cls.name.dname(),
+            String::from_utf8_lossy(name)
+        ),
     )
 }
 
@@ -1444,11 +1624,18 @@ fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn m_create_from(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.str(0);
     let Some(p) = s.windows(2).position(|w| w == b"::") else {
-        return refl_error(vm, "ReflectionMethod::createFromMethodName(): Argument #1 ($method) must be a valid method name");
+        return refl_error(
+            vm,
+            "ReflectionMethod::createFromMethodName(): Argument #1 ($method) must be a valid method name",
+        );
     };
     let cls = class_arg(vm, &Value::Str(PhpStr::new(&s[..p])))?;
     let f = find_method_in(vm, &cls, &s[p + 2..])?;
-    let target = if a.static_class.is_null() { "ReflectionMethod".to_string() } else { unsafe { (*a.static_class).name.to_string_lossy() } };
+    let target = if a.static_class.is_null() {
+        "ReflectionMethod".to_string()
+    } else {
+        unsafe { (*a.static_class).name.to_string_lossy() }
+    };
     let o = new_refl(vm, &target, Refl::Method { func: f, cls })?;
     Ok(Value::Object(o))
 }
@@ -1529,12 +1716,19 @@ fn m_callee(vm: &mut Vm, f: &Rc<Func>, cls: &Rc<Class>, obj: Value, fname: &str)
     let oc = vm.class_of(&o);
     let decl = f.scope().unwrap();
     if !oc.is_subclass_of(decl) {
-        return refl_error(vm, "Given object is not an instance of the class this method was declared in");
+        return refl_error(
+            vm,
+            "Given object is not an instance of the class this method was declared in",
+        );
     }
     if f.flags & mflags::ABSTRACT != 0 {
         return refl_error(
             vm,
-            &format!("Trying to invoke abstract method {}::{}()", decl.name.dname(), f.name.dname()),
+            &format!(
+                "Trying to invoke abstract method {}::{}()",
+                decl.name.dname(),
+                f.name.dname()
+            ),
         );
     }
     Ok(Callee {
@@ -1555,27 +1749,36 @@ fn this_method(a: &Args) -> Option<(Rc<Func>, Rc<Class>)> {
 }
 
 fn m_invoke(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((f, cls)) = this_method(a) else { return Ok(Value::Null) };
+    let Some((f, cls)) = this_method(a) else {
+        return Ok(Value::Null);
+    };
     let c = m_callee(vm, &f, &cls, a.val(0), "invoke")?;
     let args = a.vals[1.min(a.vals.len())..].to_vec();
     vm.call_callee(c, args)
 }
 
 fn m_invoke_args(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((f, cls)) = this_method(a) else { return Ok(Value::Null) };
+    let Some((f, cls)) = this_method(a) else {
+        return Ok(Value::Null);
+    };
     let c = m_callee(vm, &f, &cls, a.val(0), "invokeArgs")?;
     let args = a.array(1);
     vm.call_callee_named(c, args)
 }
 
 fn m_get_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((f, cls)) = this_method(a) else { return Ok(Value::Null) };
+    let Some((f, cls)) = this_method(a) else {
+        return Ok(Value::Null);
+    };
     let c = if f.flags & mflags::STATIC != 0 {
         m_callee(vm, &f, &cls, Value::Null, "getClosure")?
     } else {
         let v = a.val(0);
         if v.is_null() {
-            return refl_error(vm, "ReflectionMethod::getClosure(): Argument #1 ($object) must be provided for non-static methods");
+            return refl_error(
+                vm,
+                "ReflectionMethod::getClosure(): Argument #1 ($object) must be provided for non-static methods",
+            );
         }
         m_callee(vm, &f, &cls, v, "getClosure")?
     };
@@ -1584,13 +1787,21 @@ fn m_get_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn m_declaring(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((f, _)) = this_method(a) else { return Ok(Value::Null) };
+    let Some((f, _)) = this_method(a) else {
+        return Ok(Value::Null);
+    };
     let c = vm.rc_class(f.scope.get());
-    Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(c))?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionClass",
+        Refl::Class(c),
+    )?))
 }
 
 fn m_prototype(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((f, _)) = this_method(a) else { return Ok(Value::Null) };
+    let Some((f, _)) = this_method(a) else {
+        return Ok(Value::Null);
+    };
     let proto = f.proto.borrow().clone();
     match proto {
         Some(p) => {
@@ -1603,7 +1814,11 @@ fn m_prototype(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }
             let c = vm.rc_class(root.scope.get());
-            Ok(Value::Object(new_refl(vm, "ReflectionMethod", Refl::Method { func: root, cls: c })?))
+            Ok(Value::Object(new_refl(
+                vm,
+                "ReflectionMethod",
+                Refl::Method { func: root, cls: c },
+            )?))
         }
         None => refl_error(
             vm,
@@ -1617,7 +1832,9 @@ fn m_prototype(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn m_has_prototype(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((f, _)) = this_method(a) else { return Ok(Value::Null) };
+    let Some((f, _)) = this_method(a) else {
+        return Ok(Value::Null);
+    };
     let _ = vm;
     Ok(Value::Bool(f.proto.borrow().is_some()))
 }
@@ -1666,8 +1883,18 @@ fn c_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut s = format!(
         "{} [ <{}> {}class {}",
         kind,
-        if cls.has_flag(cflags::INTERNAL) { "internal:Core" } else { "user" },
-        if cls.has_flag(cflags::ABSTRACT) { "abstract " } else if cls.has_flag(cflags::FINAL) { "final " } else { "" },
+        if cls.has_flag(cflags::INTERNAL) {
+            "internal:Core"
+        } else {
+            "user"
+        },
+        if cls.has_flag(cflags::ABSTRACT) {
+            "abstract "
+        } else if cls.has_flag(cflags::FINAL) {
+            "final "
+        } else {
+            ""
+        },
         cls.name.dname()
     );
     if let Some(p) = &cls.parent {
@@ -1677,7 +1904,12 @@ fn c_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(f) = &cls.file
         && !cls.has_flag(cflags::INTERNAL)
     {
-        s.push_str(&format!("  @@ {} {}-{}\n", f.to_string_lossy(), cls.line_start, cls.line_end));
+        s.push_str(&format!(
+            "  @@ {} {}-{}\n",
+            f.to_string_lossy(),
+            cls.line_start,
+            cls.line_end
+        ));
     }
     s.push_str("}\n");
     Ok(Value::Str(PhpStr::from(s)))
@@ -1705,15 +1937,22 @@ fn c_is_instantiable(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     }
     let ctor = c.magic.borrow().construct.clone();
-    Ok(Value::Bool(ctor.is_none_or(|f| f.flags & mflags::PUBLIC != 0)))
+    Ok(Value::Bool(
+        ctor.is_none_or(|f| f.flags & mflags::PUBLIC != 0),
+    ))
 }
 fn c_is_cloneable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    if c.kind != ClassKind::Class || c.has_flag(cflags::ABSTRACT) || c.has_flag(cflags::NOT_CLONEABLE) {
+    if c.kind != ClassKind::Class
+        || c.has_flag(cflags::ABSTRACT)
+        || c.has_flag(cflags::NOT_CLONEABLE)
+    {
         return Ok(Value::Bool(false));
     }
     let cl = c.magic.borrow().clone.clone();
-    Ok(Value::Bool(cl.is_none_or(|f| f.flags & mflags::PUBLIC != 0)))
+    Ok(Value::Bool(
+        cl.is_none_or(|f| f.flags & mflags::PUBLIC != 0),
+    ))
 }
 fn c_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -1744,7 +1983,11 @@ fn c_ctor(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let ctor = c.magic.borrow().construct.clone();
     match ctor {
-        Some(f) => Ok(Value::Object(new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls: c })?)),
+        Some(f) => Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionMethod",
+            Refl::Method { func: f, cls: c },
+        )?)),
         None => Ok(Value::Null),
     }
 }
@@ -1757,7 +2000,11 @@ fn c_get_method(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
     let f = find_method_in(vm, &c, &n)?;
-    Ok(Value::Object(new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls: c })?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionMethod",
+        Refl::Method { func: f, cls: c },
+    )?))
 }
 fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -1771,7 +2018,14 @@ fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
         {
             continue;
         }
-        let o = new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls: c.clone() })?;
+        let o = new_refl(
+            vm,
+            "ReflectionMethod",
+            Refl::Method {
+                func: f,
+                cls: c.clone(),
+            },
+        )?;
         let _ = out.push(Value::Object(o));
     }
     Ok(Value::Array(out))
@@ -1794,14 +2048,41 @@ fn c_get_prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let c2 = class_arg(vm, &Value::Str(PhpStr::new(&n[..p])))?;
         let pn = PhpStr::new(&n[p + 2..]);
         if !c.is_subclass_of(&c2) {
-            return refl_error(vm, &format!("Fully qualified property name {}::${} does not specify a base class of {}", c2.name.dname(), pn.dname(), c.name.dname()));
+            return refl_error(
+                vm,
+                &format!(
+                    "Fully qualified property name {}::${} does not specify a base class of {}",
+                    c2.name.dname(),
+                    pn.dname(),
+                    c.name.dname()
+                ),
+            );
         }
-        return Ok(Value::Object(new_refl(vm, "ReflectionProperty", Refl::Prop { cls: c2, name: pn, dynamic: false })?));
+        return Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionProperty",
+            Refl::Prop {
+                cls: c2,
+                name: pn,
+                dynamic: false,
+            },
+        )?));
     }
     if c.prop_map.borrow().contains_key(&n) || c.find_static(&n).is_some() {
-        return Ok(Value::Object(new_refl(vm, "ReflectionProperty", Refl::Prop { cls: c, name: n, dynamic: false })?));
+        return Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionProperty",
+            Refl::Prop {
+                cls: c,
+                name: n,
+                dynamic: false,
+            },
+        )?));
     }
-    refl_error(vm, &format!("Property {}::${} does not exist", c.name.dname(), n.dname()))
+    refl_error(
+        vm,
+        &format!("Property {}::${} does not exist", c.name.dname(), n.dname()),
+    )
 }
 
 fn prop_modifiers(flags: u32) -> i64 {
@@ -1837,7 +2118,10 @@ fn prop_modifiers(flags: u32) -> i64 {
         m |= 4096;
     }
     // readonly implies protected(set) unless declared otherwise.
-    if flags & mflags::READONLY != 0 && flags & (mflags::PRIVATE_SET | mflags::PROTECTED_SET | mflags::PUBLIC_SET) == 0 && flags & mflags::PUBLIC != 0 {
+    if flags & mflags::READONLY != 0
+        && flags & (mflags::PRIVATE_SET | mflags::PROTECTED_SET | mflags::PUBLIC_SET) == 0
+        && flags & mflags::PUBLIC != 0
+    {
         m |= 2048;
     }
     m
@@ -1849,10 +2133,25 @@ fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut out = PhpArray::new();
     let mut seen: Vec<PhpStr> = Vec::new();
     // Own properties first, then inherited (PHP's order).
-    let props: Vec<_> = c.props.borrow().iter().filter(|p| p.flags & mflags::HIDDEN == 0).cloned().collect();
+    let props: Vec<_> = c
+        .props
+        .borrow()
+        .iter()
+        .filter(|p| p.flags & mflags::HIDDEN == 0)
+        .cloned()
+        .collect();
     let cp = Rc::as_ptr(&c);
-    let mut ordered: Vec<_> = props.iter().filter(|p| std::ptr::eq(p.class, cp)).cloned().collect();
-    ordered.extend(props.iter().filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0).cloned());
+    let mut ordered: Vec<_> = props
+        .iter()
+        .filter(|p| std::ptr::eq(p.class, cp))
+        .cloned()
+        .collect();
+    ordered.extend(
+        props
+            .iter()
+            .filter(|p| !std::ptr::eq(p.class, cp) && p.flags & mflags::PRIVATE == 0)
+            .cloned(),
+    );
     for p in ordered {
         if seen.contains(&p.name) {
             continue;
@@ -1863,12 +2162,22 @@ fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
             continue;
         }
         seen.push(p.name.clone());
-        let o = new_refl(vm, "ReflectionProperty", Refl::Prop { cls: c.clone(), name: p.name.clone(), dynamic: false })?;
+        let o = new_refl(
+            vm,
+            "ReflectionProperty",
+            Refl::Prop {
+                cls: c.clone(),
+                name: p.name.clone(),
+                dynamic: false,
+            },
+        )?;
         let _ = out.push(Value::Object(o));
     }
     let statics = c.static_props.borrow().clone();
     for sp in statics {
-        if seen.contains(&sp.name) || (sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, cp)) {
+        if seen.contains(&sp.name)
+            || (sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, cp))
+        {
             continue;
         }
         if let Some(fl) = filter
@@ -1877,7 +2186,15 @@ fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
             continue;
         }
         seen.push(sp.name.clone());
-        let o = new_refl(vm, "ReflectionProperty", Refl::Prop { cls: c.clone(), name: sp.name.clone(), dynamic: false })?;
+        let o = new_refl(
+            vm,
+            "ReflectionProperty",
+            Refl::Prop {
+                cls: c.clone(),
+                name: sp.name.clone(),
+                dynamic: false,
+            },
+        )?;
         let _ = out.push(Value::Object(o));
     }
     // ReflectionObject: dynamic properties of the object.
@@ -1889,7 +2206,15 @@ fn c_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 goro_runtime::KeyRef::Str(s) => s.clone(),
                 goro_runtime::KeyRef::Int(i) => PhpStr::from(i.to_string()),
             };
-            let o = new_refl(vm, "ReflectionProperty", Refl::Prop { cls: c.clone(), name, dynamic: true })?;
+            let o = new_refl(
+                vm,
+                "ReflectionProperty",
+                Refl::Prop {
+                    cls: c.clone(),
+                    name,
+                    dynamic: true,
+                },
+            )?;
             let _ = out.push(Value::Object(o));
         }
     }
@@ -1947,7 +2272,14 @@ fn c_refl_consts(vm: &mut Vm, a: &mut Args) -> R<Value> {
         {
             continue;
         }
-        let o = new_refl(vm, "ReflectionClassConstant", Refl::Const { cls: c.clone(), name: k.name.clone() })?;
+        let o = new_refl(
+            vm,
+            "ReflectionClassConstant",
+            Refl::Const {
+                cls: c.clone(),
+                name: k.name.clone(),
+            },
+        )?;
         let _ = out.push(Value::Object(o));
     }
     Ok(Value::Array(out))
@@ -1972,7 +2304,11 @@ fn c_refl_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if c.find_const(&n).is_none() {
         return Ok(Value::Bool(false));
     }
-    Ok(Value::Object(new_refl(vm, "ReflectionClassConstant", Refl::Const { cls: c, name: n })?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionClassConstant",
+        Refl::Const { cls: c, name: n },
+    )?))
 }
 fn c_interfaces(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -1986,7 +2322,12 @@ fn c_interfaces(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_interface_names(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    Ok(Value::Array(PhpArray::from_values(c.interfaces.borrow().iter().map(|i| Value::Str(i.name.clone())))))
+    Ok(Value::Array(PhpArray::from_values(
+        c.interfaces
+            .borrow()
+            .iter()
+            .map(|i| Value::Str(i.name.clone())),
+    )))
 }
 fn c_is_interface(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -2004,7 +2345,9 @@ fn c_traits(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_trait_names(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    Ok(Value::Array(PhpArray::from_values(c.traits.borrow().iter().map(|i| Value::Str(i.name.clone())))))
+    Ok(Value::Array(PhpArray::from_values(
+        c.traits.borrow().iter().map(|i| Value::Str(i.name.clone())),
+    )))
 }
 fn c_trait_aliases(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -2012,14 +2355,32 @@ fn c_trait_aliases(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(d) = &c.decl {
         for tu in &d.traits {
             for r in &tu.rules {
-                if let crate::class::TraitRule::Alias { trait_, method, alias: Some(al), .. } = r {
+                if let crate::class::TraitRule::Alias {
+                    trait_,
+                    method,
+                    alias: Some(al),
+                    ..
+                } = r
+                {
                     let t = trait_.clone().or_else(|| {
-                        tu.traits.iter().find(|tn| {
-                            vm.classes.get(&lower(tn)).is_some_and(|tc| tc.find_method_str(&lower(method)).is_some())
-                        }).cloned()
+                        tu.traits
+                            .iter()
+                            .find(|tn| {
+                                vm.classes
+                                    .get(&lower(tn))
+                                    .is_some_and(|tc| tc.find_method_str(&lower(method)).is_some())
+                            })
+                            .cloned()
                     });
                     let t = t.unwrap_or_default();
-                    out.insert(Key::Str(al.clone()), Value::Str(PhpStr::from(format!("{}::{}", t.to_string_lossy(), method.to_string_lossy()))));
+                    out.insert(
+                        Key::Str(al.clone()),
+                        Value::Str(PhpStr::from(format!(
+                            "{}::{}",
+                            t.to_string_lossy(),
+                            method.to_string_lossy()
+                        ))),
+                    );
                 }
             }
         }
@@ -2038,8 +2399,18 @@ fn c_is_abstract(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let abs = c.has_flag(cflags::ABSTRACT)
         || c.is_interface()
-        || c.methods.borrow().values().any(|f| f.flags & mflags::ABSTRACT != 0) && c.kind != ClassKind::Class;
-    Ok(Value::Bool(abs || (c.kind == ClassKind::Trait && c.methods.borrow().values().any(|f| f.flags & mflags::ABSTRACT != 0))))
+        || c.methods
+            .borrow()
+            .values()
+            .any(|f| f.flags & mflags::ABSTRACT != 0)
+            && c.kind != ClassKind::Class;
+    Ok(Value::Bool(
+        abs || (c.kind == ClassKind::Trait
+            && c.methods
+                .borrow()
+                .values()
+                .any(|f| f.flags & mflags::ABSTRACT != 0)),
+    ))
 }
 fn c_is_final(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -2065,7 +2436,9 @@ fn c_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn c_is_instance(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    let Some(o) = a.obj(0) else { return Ok(Value::Bool(false)) };
+    let Some(o) = a.obj(0) else {
+        return Ok(Value::Bool(false));
+    };
     Ok(Value::Bool(vm.class_of(&o).is_subclass_of(&c)))
 }
 fn c_new(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2086,7 +2459,13 @@ fn new_with_args(vm: &mut Vm, c: &Rc<Class>, args: PhpArray) -> R<Value> {
     match ctor {
         Some(f) => {
             if f.flags & mflags::PUBLIC == 0 {
-                return refl_error(vm, &format!("Access to non-public constructor of class {}", c.name.dname()));
+                return refl_error(
+                    vm,
+                    &format!(
+                        "Access to non-public constructor of class {}",
+                        c.name.dname()
+                    ),
+                );
             }
             let callee = Callee {
                 func: f.clone(),
@@ -2102,7 +2481,10 @@ fn new_with_args(vm: &mut Vm, c: &Rc<Class>, args: PhpArray) -> R<Value> {
             if !args.is_empty() {
                 return refl_error(
                     vm,
-                    &format!("Class {} does not have a constructor, so you cannot pass any constructor arguments", c.name.dname()),
+                    &format!(
+                        "Class {} does not have a constructor, so you cannot pass any constructor arguments",
+                        c.name.dname()
+                    ),
                 );
             }
         }
@@ -2111,8 +2493,17 @@ fn new_with_args(vm: &mut Vm, c: &Rc<Class>, args: PhpArray) -> R<Value> {
 }
 fn c_new_no_ctor(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
-    if c.has_flag(cflags::INTERNAL) && c.has_flag(cflags::FINAL) && c.lname.as_bytes() != b"stdclass" {
-        return refl_error(vm, &format!("Class {} is an internal class marked as final that cannot be instantiated without invoking its constructor", c.name.dname()));
+    if c.has_flag(cflags::INTERNAL)
+        && c.has_flag(cflags::FINAL)
+        && c.lname.as_bytes() != b"stdclass"
+    {
+        return refl_error(
+            vm,
+            &format!(
+                "Class {} is an internal class marked as final that cannot be instantiated without invoking its constructor",
+                c.name.dname()
+            ),
+        );
     }
     Ok(Value::Object(vm.instantiate(&c)?))
 }
@@ -2124,7 +2515,11 @@ fn c_new_args(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_parent(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     match &c.parent {
-        Some(p) => Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(p.clone()))?)),
+        Some(p) => Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionClass",
+            Refl::Class(p.clone()),
+        )?)),
         None => Ok(Value::Bool(false)),
     }
 }
@@ -2164,7 +2559,14 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some(sp) => {
             let v = sp.cell.get();
             if vm.is_uninit(&v) {
-                return vm.throw("Error", &format!("Typed property {}::${} must not be accessed before initialization", c.name.dname(), n.dname()));
+                return vm.throw(
+                    "Error",
+                    &format!(
+                        "Typed property {}::${} must not be accessed before initialization",
+                        c.name.dname(),
+                        n.dname()
+                    ),
+                );
             }
             Ok(v)
         }
@@ -2172,7 +2574,10 @@ fn c_get_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
             if a.has(1) {
                 return Ok(a.val(1));
             }
-            refl_error(vm, &format!("Property {}::${} does not exist", c.name.dname(), n.dname()))
+            refl_error(
+                vm,
+                &format!("Property {}::${} does not exist", c.name.dname(), n.dname()),
+            )
         }
     }
 }
@@ -2202,7 +2607,14 @@ fn c_set_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
             drop(old);
             Ok(Value::Null)
         }
-        None => refl_error(vm, &format!("Class {} does not have a property named {}", c.name.dname(), n.dname())),
+        None => refl_error(
+            vm,
+            &format!(
+                "Class {} does not have a property named {}",
+                c.name.dname(),
+                n.dname()
+            ),
+        ),
     }
 }
 fn c_default_props(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2245,7 +2657,11 @@ fn c_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !c.has_flag(cflags::INTERNAL) {
         return Ok(Value::Null);
     }
-    Ok(Value::Object(new_refl(vm, "ReflectionExtension", Refl::Extension(PhpStr::from("Core")))?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionExtension",
+        Refl::Extension(PhpStr::from("Core")),
+    )?))
 }
 fn c_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
@@ -2255,7 +2671,11 @@ fn c_extension_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let name = vm
         .modules
         .iter()
-        .find(|m| m.classes.iter().any(|(l, _)| l.as_bytes() == c.lname.as_bytes()))
+        .find(|m| {
+            m.classes
+                .iter()
+                .any(|(l, _)| l.as_bytes() == c.lname.as_bytes())
+        })
         .map(|m| m.name)
         .unwrap_or("Core");
     Ok(Value::from(name))
@@ -2291,7 +2711,12 @@ macro_rules! need_prop {
     ($vm:expr, $a:expr) => {
         match this_prop($a) {
             Some(p) => p,
-            None => return refl_error($vm, "Internal error: Failed to retrieve the reflection object"),
+            None => {
+                return refl_error(
+                    $vm,
+                    "Internal error: Failed to retrieve the reflection object",
+                )
+            }
         }
     };
 }
@@ -2333,7 +2758,11 @@ fn pinfo(cls: &Class, name: &PhpStr) -> Option<PInfo> {
         is_static: true,
         doc: s.doc.clone(),
         attrs: s.attrs.to_vec(),
-        default: s.init.borrow().clone().or_else(|| Some(ConstExpr::Value(s.cell.get()))),
+        default: s
+            .init
+            .borrow()
+            .clone()
+            .or_else(|| Some(ConstExpr::Value(s.cell.get()))),
         has_hooks: (false, false),
         slot: None,
     })
@@ -2351,16 +2780,32 @@ fn p_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     {
         true
     } else {
-        return refl_error(vm, &format!("Property {}::${} does not exist", cls.name.dname(), n.dname()));
+        return refl_error(
+            vm,
+            &format!(
+                "Property {}::${} does not exist",
+                cls.name.dname(),
+                n.dname()
+            ),
+        );
     };
     vm.set_prop_raw(&o, b"name", Value::Str(n.clone()));
     let decl = if dynamic {
         cls.name.clone()
     } else {
-        prop_decl_class(&cls, &n).map(|c| unsafe { (*c).name.clone() }).unwrap_or(cls.name.clone())
+        prop_decl_class(&cls, &n)
+            .map(|c| unsafe { (*c).name.clone() })
+            .unwrap_or(cls.name.clone())
     };
     vm.set_prop_raw(&o, b"class", Value::Str(decl));
-    set_data(&o, Refl::Prop { cls, name: n, dynamic });
+    set_data(
+        &o,
+        Refl::Prop {
+            cls,
+            name: n,
+            dynamic,
+        },
+    );
     Ok(Value::Null)
 }
 fn p_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2374,7 +2819,11 @@ fn p_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
             } else {
                 "public"
             };
-            let mut s = format!("Property [ {}{}", vis, if p.is_static { " static" } else { "" });
+            let mut s = format!(
+                "Property [ {}{}",
+                vis,
+                if p.is_static { " static" } else { "" }
+            );
             if p.flags & mflags::READONLY != 0 {
                 s.push_str(" readonly");
             }
@@ -2398,7 +2847,9 @@ fn p_mangled(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if dynamic {
         return Ok(Value::Str(n));
     }
-    let Some(p) = pinfo(&c, &n) else { return Ok(Value::Str(n)) };
+    let Some(p) = pinfo(&c, &n) else {
+        return Ok(Value::Str(n));
+    };
     let m = if p.flags & mflags::PRIVATE != 0 {
         let mut v = vec![0u8];
         v.extend_from_slice(unsafe { &(*p.class).name });
@@ -2440,7 +2891,14 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let sp = c.find_static(&n).unwrap();
         let v = sp.cell.get();
         if vm.is_uninit(&v) {
-            return vm.throw("Error", &format!("Typed static property {}::${} must not be accessed before initialization", unsafe { (*sp.class).name.dname() }, n.dname()));
+            return vm.throw(
+                "Error",
+                &format!(
+                    "Typed static property {}::${} must not be accessed before initialization",
+                    unsafe { (*sp.class).name.dname() },
+                    n.dname()
+                ),
+            );
         }
         return Ok(v);
     }
@@ -2450,7 +2908,12 @@ fn p_get_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
         ));
     };
     if !vm.class_of(&o).is_subclass_of(&c) {
-        return vm.type_error(&format!("Cannot fetch property {}::${} of instance of {}", c.name.dname(), n.dname(), vm.class_of(&o).name.dname()));
+        return vm.type_error(&format!(
+            "Cannot fetch property {}::${} of instance of {}",
+            c.name.dname(),
+            n.dname(),
+            vm.class_of(&o).name.dname()
+        ));
     }
     let scope = info.map(|p| p.class).unwrap_or(Rc::as_ptr(&c));
     with_scope(vm, scope, |vm| vm.read_prop(&o, &n, false, None))
@@ -2478,7 +2941,9 @@ fn p_set_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
-    let Some(o) = a.obj(0) else { return Ok(Value::Null) };
+    let Some(o) = a.obj(0) else {
+        return Ok(Value::Null);
+    };
     let info = pinfo(&c, &n);
     if let Some(p) = &info
         && let Some(slot) = p.slot
@@ -2488,7 +2953,14 @@ fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         let v = o.obj().slots.borrow()[slot as usize].clone();
         if vm.is_uninit(&v) {
-            return vm.throw("Error", &format!("Typed property {}::${} must not be accessed before initialization", c.name.dname(), n.dname()));
+            return vm.throw(
+                "Error",
+                &format!(
+                    "Typed property {}::${} must not be accessed before initialization",
+                    c.name.dname(),
+                    n.dname()
+                ),
+            );
         }
         return Ok(v.into_deref());
     }
@@ -2496,7 +2968,9 @@ fn p_get_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_set_raw(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
-    let Some(o) = a.obj(0) else { return Ok(Value::Null) };
+    let Some(o) = a.obj(0) else {
+        return Ok(Value::Null);
+    };
     let v = a.val(1);
     let info = pinfo(&c, &n);
     if let Some(p) = &info
@@ -2565,7 +3039,9 @@ fn p_is_private_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_is_protected_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
-    Ok(Value::Bool(pinfo(&c, &n).is_some_and(|p| prop_modifiers(p.flags) & 2048 != 0)))
+    Ok(Value::Bool(
+        pinfo(&c, &n).is_some_and(|p| prop_modifiers(p.flags) & 2048 != 0),
+    ))
 }
 fn p_is_static(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
@@ -2608,12 +3084,23 @@ fn p_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_declaring(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
-    let dc = if dynamic { c } else { vm.rc_class(pinfo(&c, &n).unwrap().class) };
-    Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(dc))?))
+    let dc = if dynamic {
+        c
+    } else {
+        vm.rc_class(pinfo(&c, &n).unwrap().class)
+    };
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionClass",
+        Refl::Class(dc),
+    )?))
 }
 fn p_doc(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
-    Ok(pinfo(&c, &n).and_then(|p| p.doc).map(Value::Str).unwrap_or(Value::Bool(false)))
+    Ok(pinfo(&c, &n)
+        .and_then(|p| p.doc)
+        .map(Value::Str)
+        .unwrap_or(Value::Bool(false)))
 }
 fn p_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
@@ -2632,7 +3119,9 @@ fn p_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     }
     let p = pinfo(&c, &n).unwrap();
-    Ok(Value::Bool(p.default.is_some() || (p.ty.is_none() && p.flags & mflags::VIRTUAL == 0)))
+    Ok(Value::Bool(
+        p.default.is_some() || (p.ty.is_none() && p.flags & mflags::VIRTUAL == 0),
+    ))
 }
 fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, dynamic) = need_prop!(vm, a);
@@ -2647,12 +3136,16 @@ fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn p_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
-    let (attrs, cl) = pinfo(&c, &n).map(|p| (p.attrs, p.class)).unwrap_or((Vec::new(), Rc::as_ptr(&c)));
+    let (attrs, cl) = pinfo(&c, &n)
+        .map(|p| (p.attrs, p.class))
+        .unwrap_or((Vec::new(), Rc::as_ptr(&c)));
     attributes_array(vm, a, &attrs, 8, cl, 0)
 }
 fn p_has_hooks(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
-    Ok(Value::Bool(pinfo(&c, &n).is_some_and(|p| p.has_hooks.0 || p.has_hooks.1)))
+    Ok(Value::Bool(
+        pinfo(&c, &n).is_some_and(|p| p.has_hooks.0 || p.has_hooks.1),
+    ))
 }
 fn hook_func(c: &Class, n: &PhpStr, get: bool) -> Option<Rc<Func>> {
     let map = c.prop_map.borrow();
@@ -2665,7 +3158,14 @@ fn p_hooks(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut out = PhpArray::new();
     for (k, get) in [("get", true), ("set", false)] {
         if let Some(f) = hook_func(&c, &n, get) {
-            let o = new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls: c.clone() })?;
+            let o = new_refl(
+                vm,
+                "ReflectionMethod",
+                Refl::Method {
+                    func: f,
+                    cls: c.clone(),
+                },
+            )?;
             out.insert(Key::from(k), Value::Object(o));
         }
     }
@@ -2689,7 +3189,11 @@ fn p_hook(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n, _) = need_prop!(vm, a);
     let get = hook_kind(vm, &a.val(0));
     match hook_func(&c, &n, get) {
-        Some(f) => Ok(Value::Object(new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls: c })?)),
+        Some(f) => Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionMethod",
+            Refl::Method { func: f, cls: c },
+        )?)),
         None => Ok(Value::Null),
     }
 }
@@ -2707,7 +3211,12 @@ macro_rules! need_const {
     ($vm:expr, $a:expr) => {
         match this_const($a) {
             Some(p) => p,
-            None => return refl_error($vm, "Internal error: Failed to retrieve the reflection object"),
+            None => {
+                return refl_error(
+                    $vm,
+                    "Internal error: Failed to retrieve the reflection object",
+                )
+            }
         }
     };
 }
@@ -2717,14 +3226,31 @@ fn cc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let cls = class_arg(vm, &a.val(0))?;
     let n = a.str(1);
     let Some(k) = cls.find_const(&n) else {
-        return refl_error(vm, &format!("Constant {}::{} does not exist", cls.name.dname(), n.dname()));
+        return refl_error(
+            vm,
+            &format!(
+                "Constant {}::{} does not exist",
+                cls.name.dname(),
+                n.dname()
+            ),
+        );
     };
     let oc = vm.class_of(&o);
     if oc.lname.as_bytes().starts_with(b"reflectionenum") && k.flags & mflags::CASE == 0 {
-        return refl_error(vm, &format!("Constant {}::{} is not a case", cls.name.dname(), n.dname()));
+        return refl_error(
+            vm,
+            &format!("Constant {}::{} is not a case", cls.name.dname(), n.dname()),
+        );
     }
     if oc.lname.as_bytes() == b"reflectionenumbackedcase" && cls.enum_backing.is_none() {
-        return refl_error(vm, &format!("Enum case {}::{} is not a backed case", cls.name.dname(), n.dname()));
+        return refl_error(
+            vm,
+            &format!(
+                "Enum case {}::{} is not a backed case",
+                cls.name.dname(),
+                n.dname()
+            ),
+        );
     }
     vm.set_prop_raw(&o, b"name", Value::Str(n.clone()));
     vm.set_prop_raw(&o, b"class", Value::Str(unsafe { (*k.class).name.clone() }));
@@ -2734,7 +3260,11 @@ fn cc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn cc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
     let k = c.find_const(&n).unwrap();
-    let v = if k.flags & mflags::CASE != 0 { vm.enum_case(&c, &n)? } else { vm.eval_class_const(&k)? };
+    let v = if k.flags & mflags::CASE != 0 {
+        vm.enum_case(&c, &n)?
+    } else {
+        vm.eval_class_const(&k)?
+    };
     let vis = if k.flags & mflags::PRIVATE != 0 {
         "private"
     } else if k.flags & mflags::PROTECTED != 0 {
@@ -2744,7 +3274,9 @@ fn cc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let ty = match &v {
         Value::Object(_) => "object".to_string(),
-        v => crate::builtins::var::type_name(v).replace("integer", "int").replace("boolean", "bool"),
+        v => crate::builtins::var::type_name(v)
+            .replace("integer", "int")
+            .replace("boolean", "bool"),
     };
     let mut val = Vec::new();
     match &v {
@@ -2754,7 +3286,11 @@ fn cc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let s = format!(
         "Constant [ {}{} {} {} ] {{ {} }}\n",
-        if k.flags & mflags::FINAL != 0 { "final " } else { "" },
+        if k.flags & mflags::FINAL != 0 {
+            "final "
+        } else {
+            ""
+        },
         vis,
         ty,
         n.to_string_lossy(),
@@ -2776,7 +3312,9 @@ fn cc_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn ccflag(vm: &mut Vm, a: &Args, f: u32) -> R<Value> {
     let (c, n) = need_const!(vm, a);
-    Ok(Value::Bool(c.find_const(&n).is_some_and(|k| k.flags & f != 0)))
+    Ok(Value::Bool(
+        c.find_const(&n).is_some_and(|k| k.flags & f != 0),
+    ))
 }
 fn cc_is_public(vm: &mut Vm, a: &mut Args) -> R<Value> {
     ccflag(vm, a, mflags::PUBLIC)
@@ -2798,17 +3336,28 @@ fn cc_is_deprecated(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn cc_modifiers(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
-    Ok(Value::Int(c.find_const(&n).map(|k| const_modifiers(k.flags)).unwrap_or(0)))
+    Ok(Value::Int(
+        c.find_const(&n)
+            .map(|k| const_modifiers(k.flags))
+            .unwrap_or(0),
+    ))
 }
 fn cc_declaring(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
     let k = c.find_const(&n).unwrap();
     let dc = vm.rc_class(k.class);
-    Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(dc))?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionClass",
+        Refl::Class(dc),
+    )?))
 }
 fn cc_doc(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
-    Ok(c.find_const(&n).and_then(|k| k.doc.clone()).map(Value::Str).unwrap_or(Value::Bool(false)))
+    Ok(c.find_const(&n)
+        .and_then(|k| k.doc.clone())
+        .map(Value::Str)
+        .unwrap_or(Value::Bool(false)))
 }
 fn cc_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
@@ -2818,7 +3367,9 @@ fn cc_attrs(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn cc_has_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
-    Ok(Value::Bool(c.find_const(&n).is_some_and(|k| k.ty.is_some())))
+    Ok(Value::Bool(
+        c.find_const(&n).is_some_and(|k| k.ty.is_some()),
+    ))
 }
 fn cc_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
@@ -2845,7 +3396,12 @@ macro_rules! need_param {
     ($vm:expr, $a:expr) => {
         match this_param($vm, $a) {
             Some(p) => p,
-            None => return refl_error($vm, "Internal error: Failed to retrieve the reflection object"),
+            None => {
+                return refl_error(
+                    $vm,
+                    "Internal error: Failed to retrieve the reflection object",
+                )
+            }
         }
     };
 }
@@ -2859,9 +3415,18 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let c = class_arg(vm, &Value::Str(PhpStr::new(&s[..p])))?;
                 (find_method_in(vm, &c, &s[p + 2..])?, None)
             } else {
-                match vm.functions.get(&lower(s.strip_prefix(b"\\").unwrap_or(s))).cloned() {
+                match vm
+                    .functions
+                    .get(&lower(s.strip_prefix(b"\\").unwrap_or(s)))
+                    .cloned()
+                {
                     Some(f) => (f, None),
-                    None => return refl_error(vm, &format!("Function {}() does not exist", s.to_string_lossy())),
+                    None => {
+                        return refl_error(
+                            vm,
+                            &format!("Function {}() does not exist", s.to_string_lossy()),
+                        );
+                    }
                 }
             }
         }
@@ -2881,13 +3446,21 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }
         },
-        _ => return refl_error(vm, "The parameter class is expected to be either a string, an array(class, method) or a callable object"),
+        _ => {
+            return refl_error(
+                vm,
+                "The parameter class is expected to be either a string, an array(class, method) or a callable object",
+            );
+        }
     };
     let ps = vm.params_of(&func).to_vec();
     let idx = match a.val(1) {
         Value::Int(i) => {
             if i < 0 || i as usize >= ps.len() {
-                return refl_error(vm, "The parameter specified by its offset could not be found");
+                return refl_error(
+                    vm,
+                    "The parameter specified by its offset could not be found",
+                );
             }
             i as usize
         }
@@ -2895,7 +3468,9 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let n = vm.to_php_str(&v)?;
             match ps.iter().position(|p| p.name == n) {
                 Some(i) => i,
-                None => return refl_error(vm, "The parameter specified by its name could not be found"),
+                None => {
+                    return refl_error(vm, "The parameter specified by its name could not be found");
+                }
             }
         }
     };
@@ -2927,9 +3502,20 @@ fn par_func(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _, _) = need_param!(vm, a);
     if f.scope().is_some() && c.is_none() {
         let cls = vm.rc_class(f.scope.get());
-        return Ok(Value::Object(new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls })?));
+        return Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionMethod",
+            Refl::Method { func: f, cls },
+        )?));
     }
-    Ok(Value::Object(new_refl(vm, "ReflectionFunction", Refl::Func { func: f, closure: c })?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionFunction",
+        Refl::Func {
+            func: f,
+            closure: c,
+        },
+    )?))
 }
 fn par_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, c, _, _) = need_param!(vm, a);
@@ -2941,12 +3527,18 @@ fn par_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Null);
     }
     let cls = vm.rc_class(scope);
-    Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(cls))?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionClass",
+        Refl::Class(cls),
+    )?))
 }
 fn par_get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.deprecated("Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead")?;
     let (f, _, _, p) = need_param!(vm, a);
-    let Some(t) = &p.ty else { return Ok(Value::Null) };
+    let Some(t) = &p.ty else {
+        return Ok(Value::Null);
+    };
     if t.classes.len() != 1 || t.classes[0].len() != 1 {
         return Ok(Value::Null);
     }
@@ -2958,8 +3550,15 @@ fn par_get_class(vm: &mut Vm, a: &mut Args) -> R<Value> {
         _ => vm.find_class(&n, true)?,
     };
     match c {
-        Some(c) => Ok(Value::Object(new_refl(vm, "ReflectionClass", Refl::Class(c))?)),
-        None => refl_error(vm, &format!("Class \"{}\" does not exist", n.to_string_lossy())),
+        Some(c) => Ok(Value::Object(new_refl(
+            vm,
+            "ReflectionClass",
+            Refl::Class(c),
+        )?)),
+        None => refl_error(
+            vm,
+            &format!("Class \"{}\" does not exist", n.to_string_lossy()),
+        ),
     }
 }
 fn par_has_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2976,12 +3575,16 @@ fn par_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn par_is_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.deprecated("Method ReflectionParameter::isArray() is deprecated since 8.0, use ReflectionParameter::getType() instead")?;
     let (_, _, _, p) = need_param!(vm, a);
-    Ok(Value::Bool(p.ty.is_some_and(|t| t.mask & !tmask::NULL == tmask::ARRAY && t.classes.is_empty())))
+    Ok(Value::Bool(p.ty.is_some_and(|t| {
+        t.mask & !tmask::NULL == tmask::ARRAY && t.classes.is_empty()
+    })))
 }
 fn par_is_callable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.deprecated("Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead")?;
     let (_, _, _, p) = need_param!(vm, a);
-    Ok(Value::Bool(p.ty.is_some_and(|t| t.mask & !tmask::NULL == tmask::CALLABLE && t.classes.is_empty())))
+    Ok(Value::Bool(p.ty.is_some_and(|t| {
+        t.mask & !tmask::NULL == tmask::CALLABLE && t.classes.is_empty()
+    })))
 }
 fn par_allows_null(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
@@ -3001,7 +3604,9 @@ fn par_optional(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn par_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
-    Ok(Value::Bool(!matches!(p.default, ParamDefault::None) && p.default_text.as_deref() != Some("UNKNOWN")))
+    Ok(Value::Bool(
+        !matches!(p.default, ParamDefault::None) && p.default_text.as_deref() != Some("UNKNOWN"),
+    ))
 }
 fn par_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _, p) = need_param!(vm, a);
@@ -3012,13 +3617,16 @@ fn par_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Some(ce) => vm.eval_const_expr(ce, f.scope.get()),
             None => Ok(Value::Null),
         },
-        ParamDefault::None => refl_error(vm, "Internal error: Failed to retrieve the default value"),
+        ParamDefault::None => {
+            refl_error(vm, "Internal error: Failed to retrieve the default value")
+        }
     }
 }
 fn default_const_name(p: &ParamInfo) -> Option<String> {
     let t = p.default_text.as_deref()?.trim();
     let ok = !t.is_empty()
-        && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || c == ':')
+        && t.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '\\' || c == ':')
         && !t.chars().next().unwrap().is_ascii_digit()
         && !matches!(t.to_ascii_lowercase().as_str(), "null" | "true" | "false");
     ok.then(|| t.to_string())
@@ -3029,7 +3637,9 @@ fn par_default_is_const(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn par_default_const_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
-    Ok(default_const_name(&p).map(|s| Value::Str(PhpStr::from(s))).unwrap_or_default())
+    Ok(default_const_name(&p)
+        .map(|s| Value::Str(PhpStr::from(s)))
+        .unwrap_or_default())
 }
 fn par_variadic(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, _, _, p) = need_param!(vm, a);
@@ -3102,7 +3712,15 @@ fn new_type(vm: &mut Vm, t: TypeHint, scope: *const Class) -> R<ObjRef> {
         parts += 1;
     }
     if t.classes.len() == 1 && t.classes[0].len() > 1 && t.mask == 0 {
-        return new_refl(vm, "ReflectionIntersectionType", Refl::Type { ty: t, single: None, scope });
+        return new_refl(
+            vm,
+            "ReflectionIntersectionType",
+            Refl::Type {
+                ty: t,
+                single: None,
+                scope,
+            },
+        );
     }
     if parts <= 1 {
         let name: PhpStr = if let Some(c) = t.classes.first() {
@@ -3113,10 +3731,26 @@ fn new_type(vm: &mut Vm, t: TypeHint, scope: *const Class) -> R<ObjRef> {
             PhpStr::from("null")
         };
         let builtin = t.classes.is_empty();
-        return new_refl(vm, "ReflectionNamedType", Refl::Type { ty: t, single: Some((name, builtin)), scope });
+        return new_refl(
+            vm,
+            "ReflectionNamedType",
+            Refl::Type {
+                ty: t,
+                single: Some((name, builtin)),
+                scope,
+            },
+        );
     }
     let _ = null;
-    new_refl(vm, "ReflectionUnionType", Refl::Type { ty: t, single: None, scope })
+    new_refl(
+        vm,
+        "ReflectionUnionType",
+        Refl::Type {
+            ty: t,
+            single: None,
+            scope,
+        },
+    )
 }
 
 fn this_type(a: &Args) -> Option<(TypeHint, Option<(PhpStr, bool)>, *const Class)> {
@@ -3127,48 +3761,111 @@ fn this_type(a: &Args) -> Option<(TypeHint, Option<(PhpStr, bool)>, *const Class
 }
 
 fn t_allows_null(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((t, _, _)) = this_type(a) else { return Ok(Value::Bool(false)) };
+    let Some((t, _, _)) = this_type(a) else {
+        return Ok(Value::Bool(false));
+    };
     Ok(Value::Bool(t.allows_null()))
 }
 fn t_to_string(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((t, _, _)) = this_type(a) else { return Ok(Value::Str(PhpStr::empty())) };
-    if t.mask & tmask::ITERABLE != 0 && t.classes.is_empty() && t.mask & !(tmask::ITERABLE | tmask::NULL) == 0 {
-        return Ok(Value::Str(PhpStr::from(if t.mask & tmask::NULL != 0 { "?iterable" } else { "iterable" })));
+    let Some((t, _, _)) = this_type(a) else {
+        return Ok(Value::Str(PhpStr::empty()));
+    };
+    if t.mask & tmask::ITERABLE != 0
+        && t.classes.is_empty()
+        && t.mask & !(tmask::ITERABLE | tmask::NULL) == 0
+    {
+        return Ok(Value::Str(PhpStr::from(if t.mask & tmask::NULL != 0 {
+            "?iterable"
+        } else {
+            "iterable"
+        })));
     }
     Ok(Value::Str(PhpStr::from(t.display())))
 }
 fn t_name(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((_, single, _)) = this_type(a) else { return Ok(Value::Str(PhpStr::empty())) };
+    let Some((_, single, _)) = this_type(a) else {
+        return Ok(Value::Str(PhpStr::empty()));
+    };
     Ok(Value::Str(single.map(|s| s.0).unwrap_or_default()))
 }
 fn t_builtin(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((t, single, _)) = this_type(a) else { return Ok(Value::Bool(false)) };
+    let Some((t, single, _)) = this_type(a) else {
+        return Ok(Value::Bool(false));
+    };
     let _ = t;
-    Ok(Value::Bool(single.is_some_and(|s| s.1 && s.0.as_bytes() != b"static")))
+    Ok(Value::Bool(
+        single.is_some_and(|s| s.1 && s.0.as_bytes() != b"static"),
+    ))
 }
 fn t_types(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((t, _, scope)) = this_type(a) else { return Ok(Value::Array(PhpArray::new())) };
+    let Some((t, _, scope)) = this_type(a) else {
+        return Ok(Value::Array(PhpArray::new()));
+    };
     let mut out = PhpArray::new();
     let is_inter = vm.class_of(a.this_obj()).lname.as_bytes() == b"reflectionintersectiontype";
     if is_inter {
         for n in &t.classes[0] {
-            let o = new_refl(vm, "ReflectionNamedType", Refl::Type { ty: TypeHint { mask: 0, classes: vec![vec![n.clone()]] }, single: Some((n.clone(), false)), scope })?;
+            let o = new_refl(
+                vm,
+                "ReflectionNamedType",
+                Refl::Type {
+                    ty: TypeHint {
+                        mask: 0,
+                        classes: vec![vec![n.clone()]],
+                    },
+                    single: Some((n.clone(), false)),
+                    scope,
+                },
+            )?;
             let _ = out.push(Value::Object(o));
         }
         return Ok(Value::Array(out));
     }
     for c in &t.classes {
         let o = if c.len() > 1 {
-            new_refl(vm, "ReflectionIntersectionType", Refl::Type { ty: TypeHint { mask: 0, classes: vec![c.clone()] }, single: None, scope })?
+            new_refl(
+                vm,
+                "ReflectionIntersectionType",
+                Refl::Type {
+                    ty: TypeHint {
+                        mask: 0,
+                        classes: vec![c.clone()],
+                    },
+                    single: None,
+                    scope,
+                },
+            )?
         } else {
-            new_refl(vm, "ReflectionNamedType", Refl::Type { ty: TypeHint { mask: 0, classes: vec![c.clone()] }, single: Some((c[0].clone(), false)), scope })?
+            new_refl(
+                vm,
+                "ReflectionNamedType",
+                Refl::Type {
+                    ty: TypeHint {
+                        mask: 0,
+                        classes: vec![c.clone()],
+                    },
+                    single: Some((c[0].clone(), false)),
+                    scope,
+                },
+            )?
         };
         let _ = out.push(Value::Object(o));
     }
     let mut names = builtin_names(t.mask);
     if t.mask & tmask::ITERABLE != 0 {
         names.retain(|n| *n != "iterable");
-        let o = new_refl(vm, "ReflectionNamedType", Refl::Type { ty: TypeHint { mask: 0, classes: vec![vec![PhpStr::from("Traversable")]] }, single: Some((PhpStr::from("Traversable"), false)), scope })?;
+        let o = new_refl(
+            vm,
+            "ReflectionNamedType",
+            Refl::Type {
+                ty: TypeHint {
+                    mask: 0,
+                    classes: vec![vec![PhpStr::from("Traversable")]],
+                },
+                single: Some((PhpStr::from("Traversable"), false)),
+                scope,
+            },
+        )?;
         let _ = out.push(Value::Object(o));
         if !names.contains(&"array") {
             names.push("array");
@@ -3192,7 +3889,18 @@ fn t_types(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "static" => tmask::STATIC,
             _ => 0,
         };
-        let o = new_refl(vm, "ReflectionNamedType", Refl::Type { ty: TypeHint { mask: bit, classes: Vec::new() }, single: Some((PhpStr::from(n), true)), scope })?;
+        let o = new_refl(
+            vm,
+            "ReflectionNamedType",
+            Refl::Type {
+                ty: TypeHint {
+                    mask: bit,
+                    classes: Vec::new(),
+                },
+                single: Some((PhpStr::from(n), true)),
+                scope,
+            },
+        )?;
         let _ = out.push(Value::Object(o));
     }
     Ok(Value::Array(out))
@@ -3202,7 +3910,14 @@ fn t_types(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 /// `getAttributes()`: the attributes, filtered by name (exactly or with
 /// IS_INSTANCEOF).
-fn attributes_array(vm: &mut Vm, a: &Args, attrs: &[AttrInfo], target: i64, scope: *const Class, _base: usize) -> R<Value> {
+fn attributes_array(
+    vm: &mut Vm,
+    a: &Args,
+    attrs: &[AttrInfo],
+    target: i64,
+    scope: *const Class,
+    _base: usize,
+) -> R<Value> {
     let filter = a.opt_str(0);
     let flags = a.int_or(1, 0);
     if flags & !2 != 0 {
@@ -3211,7 +3926,12 @@ fn attributes_array(vm: &mut Vm, a: &Args, attrs: &[AttrInfo], target: i64, scop
     let filter_cls = match (&filter, flags & 2 != 0) {
         (Some(n), true) => match vm.find_class(n, true)? {
             Some(c) => Some(c),
-            None => return vm.throw("Error", &format!("Class \"{}\" not found", n.to_string_lossy())),
+            None => {
+                return vm.throw(
+                    "Error",
+                    &format!("Class \"{}\" not found", n.to_string_lossy()),
+                );
+            }
         },
         _ => None,
     };
@@ -3228,8 +3948,21 @@ fn attributes_array(vm: &mut Vm, a: &Args, attrs: &[AttrInfo], target: i64, scop
                 continue;
             }
         }
-        let repeated = attrs.iter().filter(|x| lower(&x.name) == lower(&info.name)).count() > 1;
-        let o = new_refl(vm, "ReflectionAttribute", Refl::Attr { info: info.clone(), target, scope, repeated })?;
+        let repeated = attrs
+            .iter()
+            .filter(|x| lower(&x.name) == lower(&info.name))
+            .count()
+            > 1;
+        let o = new_refl(
+            vm,
+            "ReflectionAttribute",
+            Refl::Attr {
+                info: info.clone(),
+                target,
+                scope,
+                repeated,
+            },
+        )?;
         let _ = out.push(Value::Object(o));
     }
     Ok(Value::Array(out))
@@ -3237,20 +3970,33 @@ fn attributes_array(vm: &mut Vm, a: &Args, attrs: &[AttrInfo], target: i64, scop
 
 fn this_attr(a: &Args) -> Option<(AttrInfo, i64, *const Class, bool)> {
     data(a.this_obj(), |r| match r {
-        Refl::Attr { info, target, scope, repeated } => Some((info.clone(), *target, *scope, *repeated)),
+        Refl::Attr {
+            info,
+            target,
+            scope,
+            repeated,
+        } => Some((info.clone(), *target, *scope, *repeated)),
         _ => None,
     })
 }
 fn a_name(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((info, _, _, _)) = this_attr(a) else { return Ok(Value::Null) };
-    Ok(Value::Str(PhpStr::new(info.name.strip_prefix(b"\\").unwrap_or(&info.name))))
+    let Some((info, _, _, _)) = this_attr(a) else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Str(PhpStr::new(
+        info.name.strip_prefix(b"\\").unwrap_or(&info.name),
+    )))
 }
 fn a_target(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((_, t, _, _)) = this_attr(a) else { return Ok(Value::Null) };
+    let Some((_, t, _, _)) = this_attr(a) else {
+        return Ok(Value::Null);
+    };
     Ok(Value::Int(t))
 }
 fn a_repeated(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((_, _, _, r)) = this_attr(a) else { return Ok(Value::Null) };
+    let Some((_, _, _, r)) = this_attr(a) else {
+        return Ok(Value::Null);
+    };
     Ok(Value::Bool(r))
 }
 fn attr_args(vm: &mut Vm, info: &AttrInfo, scope: *const Class) -> R<PhpArray> {
@@ -3260,7 +4006,13 @@ fn attr_args(vm: &mut Vm, info: &AttrInfo, scope: *const Class) -> R<PhpArray> {
         match n {
             Some(n) => {
                 if out.get_str(n).is_some() {
-                    return vm.throw("Error", &format!("Named parameter ${} overwrites previous argument", n.to_string_lossy()));
+                    return vm.throw(
+                        "Error",
+                        &format!(
+                            "Named parameter ${} overwrites previous argument",
+                            n.to_string_lossy()
+                        ),
+                    );
                 }
                 out.insert(Key::Str(n.clone()), v);
             }
@@ -3272,19 +4024,36 @@ fn attr_args(vm: &mut Vm, info: &AttrInfo, scope: *const Class) -> R<PhpArray> {
     Ok(out)
 }
 fn a_args(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((info, _, scope, _)) = this_attr(a) else { return Ok(Value::Null) };
+    let Some((info, _, scope, _)) = this_attr(a) else {
+        return Ok(Value::Null);
+    };
     Ok(Value::Array(attr_args(vm, &info, scope)?))
 }
 fn a_new(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((info, target, scope, repeated)) = this_attr(a) else { return Ok(Value::Null) };
+    let Some((info, target, scope, repeated)) = this_attr(a) else {
+        return Ok(Value::Null);
+    };
     let name = PhpStr::new(info.name.strip_prefix(b"\\").unwrap_or(&info.name));
     let Some(cls) = vm.find_class(&name, true)? else {
-        return vm.throw("Error", &format!("Attribute class \"{}\" not found", name.to_string_lossy()));
+        return vm.throw(
+            "Error",
+            &format!("Attribute class \"{}\" not found", name.to_string_lossy()),
+        );
     };
     // The class must be an attribute (#[Attribute]) allowing this target.
-    let attr_decl = cls.attrs.iter().find(|x| lower(x.name.strip_prefix(b"\\").unwrap_or(&x.name)).as_bytes() == b"attribute").cloned();
+    let attr_decl = cls
+        .attrs
+        .iter()
+        .find(|x| lower(x.name.strip_prefix(b"\\").unwrap_or(&x.name)).as_bytes() == b"attribute")
+        .cloned();
     let Some(attr_decl) = attr_decl else {
-        return vm.throw("Error", &format!("Attempting to use non-attribute class \"{}\" as attribute", cls.name.dname()));
+        return vm.throw(
+            "Error",
+            &format!(
+                "Attempting to use non-attribute class \"{}\" as attribute",
+                cls.name.dname()
+            ),
+        );
     };
     let flags = match attr_decl.args.first() {
         Some((_, ce)) => match vm.eval_const_expr(ce, Rc::as_ptr(&cls))? {
@@ -3297,11 +4066,19 @@ fn a_new(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let tn = target_name(target);
         return vm.throw(
             "Error",
-            &format!("Attribute \"{}\" cannot target {} (allowed targets: {})", cls.name.dname(), tn, allowed_targets(flags)),
+            &format!(
+                "Attribute \"{}\" cannot target {} (allowed targets: {})",
+                cls.name.dname(),
+                tn,
+                allowed_targets(flags)
+            ),
         );
     }
     if repeated && flags & 128 == 0 {
-        return vm.throw("Error", &format!("Attribute \"{}\" must not be repeated", cls.name.dname()));
+        return vm.throw(
+            "Error",
+            &format!("Attribute \"{}\" must not be repeated", cls.name.dname()),
+        );
     }
     let args = attr_args(vm, &info, scope)?;
     new_with_args(vm, &cls, args)
@@ -3320,7 +4097,15 @@ fn target_name(t: i64) -> &'static str {
 }
 fn allowed_targets(f: i64) -> String {
     let mut v = Vec::new();
-    for (bit, n) in [(1, "class"), (2, "function"), (4, "method"), (8, "property"), (16, "class constant"), (32, "parameter"), (64, "constant")] {
+    for (bit, n) in [
+        (1, "class"),
+        (2, "function"),
+        (4, "method"),
+        (8, "property"),
+        (16, "class constant"),
+        (32, "parameter"),
+        (64, "constant"),
+    ] {
         if f & bit != 0 {
             v.push(n);
         }
@@ -3328,9 +4113,17 @@ fn allowed_targets(f: i64) -> String {
     v.join(", ")
 }
 fn a_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some((info, _, scope, _)) = this_attr(a) else { return Ok(Value::Null) };
+    let Some((info, _, scope, _)) = this_attr(a) else {
+        return Ok(Value::Null);
+    };
     let args = attr_args(vm, &info, scope)?;
-    let mut s = format!("Attribute [ {} ]", info.name.strip_prefix(b"\\").map(String::from_utf8_lossy).unwrap_or(String::from_utf8_lossy(&info.name)));
+    let mut s = format!(
+        "Attribute [ {} ]",
+        info.name
+            .strip_prefix(b"\\")
+            .map(String::from_utf8_lossy)
+            .unwrap_or(String::from_utf8_lossy(&info.name))
+    );
     if !args.is_empty() {
         s.push_str(" {\n");
         s.push_str(&format!("  - Arguments [{}] {{\n", args.len()));
@@ -3341,7 +4134,12 @@ fn a_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 goro_runtime::KeyRef::Str(s) => format!("{} = ", s.to_string_lossy()),
                 _ => String::new(),
             };
-            s.push_str(&format!("    Argument #{} [ {}{} ]\n", i, key, String::from_utf8_lossy(&out)));
+            s.push_str(&format!(
+                "    Argument #{} [ {}{} ]\n",
+                i,
+                key,
+                String::from_utf8_lossy(&out)
+            ));
         }
         s.push_str("  }\n}");
     }
@@ -3355,7 +4153,10 @@ fn e_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let cls = class_arg(vm, &a.val(0))?;
     if !cls.is_enum() {
-        return refl_error(vm, &format!("Class \"{}\" is not an enum", cls.name.dname()));
+        return refl_error(
+            vm,
+            &format!("Class \"{}\" is not an enum", cls.name.dname()),
+        );
     }
     vm.set_prop_raw(&o, b"name", Value::Str(cls.name.clone()));
     set_data(&o, Refl::Class(cls));
@@ -3364,28 +4165,56 @@ fn e_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn e_has_case(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
-    Ok(Value::Bool(c.find_const(&n).is_some_and(|k| k.flags & mflags::CASE != 0)))
+    Ok(Value::Bool(
+        c.find_const(&n)
+            .is_some_and(|k| k.flags & mflags::CASE != 0),
+    ))
 }
 fn e_get_case(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
     match c.find_const(&n) {
         Some(k) if k.flags & mflags::CASE != 0 => {
-            let cls = if c.enum_backing.is_some() { "ReflectionEnumBackedCase" } else { "ReflectionEnumUnitCase" };
-            Ok(Value::Object(new_refl(vm, cls, Refl::Const { cls: c, name: n })?))
+            let cls = if c.enum_backing.is_some() {
+                "ReflectionEnumBackedCase"
+            } else {
+                "ReflectionEnumUnitCase"
+            };
+            Ok(Value::Object(new_refl(
+                vm,
+                cls,
+                Refl::Const { cls: c, name: n },
+            )?))
         }
-        Some(_) => refl_error(vm, &format!("{}::{} is not a case", c.name.dname(), n.dname())),
-        None => refl_error(vm, &format!("Case {}::{} does not exist", c.name.dname(), n.dname())),
+        Some(_) => refl_error(
+            vm,
+            &format!("{}::{} is not a case", c.name.dname(), n.dname()),
+        ),
+        None => refl_error(
+            vm,
+            &format!("Case {}::{} does not exist", c.name.dname(), n.dname()),
+        ),
     }
 }
 fn e_cases(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let consts = c.consts.borrow().clone();
     let mut out = PhpArray::new();
-    let cls = if c.enum_backing.is_some() { "ReflectionEnumBackedCase" } else { "ReflectionEnumUnitCase" };
+    let cls = if c.enum_backing.is_some() {
+        "ReflectionEnumBackedCase"
+    } else {
+        "ReflectionEnumUnitCase"
+    };
     for k in consts {
         if k.flags & mflags::CASE != 0 {
-            let o = new_refl(vm, cls, Refl::Const { cls: c.clone(), name: k.name.clone() })?;
+            let o = new_refl(
+                vm,
+                cls,
+                Refl::Const {
+                    cls: c.clone(),
+                    name: k.name.clone(),
+                },
+            )?;
             let _ = out.push(Value::Object(o));
         }
     }
@@ -3398,13 +4227,24 @@ fn e_is_backed(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn e_backing_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     match c.enum_backing {
-        Some(m) => Ok(Value::Object(new_type(vm, TypeHint { mask: m, classes: Vec::new() }, Rc::as_ptr(&c))?)),
+        Some(m) => Ok(Value::Object(new_type(
+            vm,
+            TypeHint {
+                mask: m,
+                classes: Vec::new(),
+            },
+            Rc::as_ptr(&c),
+        )?)),
         None => Ok(Value::Null),
     }
 }
 fn ec_enum(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, _) = need_const!(vm, a);
-    Ok(Value::Object(new_refl(vm, "ReflectionEnum", Refl::Class(c))?))
+    Ok(Value::Object(new_refl(
+        vm,
+        "ReflectionEnum",
+        Refl::Class(c),
+    )?))
 }
 fn ec_backing(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (c, n) = need_const!(vm, a);
@@ -3453,14 +4293,21 @@ fn ext_name_of(a: &Args) -> PhpStr {
 fn ext_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let n = a.str(0);
-    let m = vm.modules.iter().find(|m| m.name.as_bytes().eq_ignore_ascii_case(&n)).map(|m| m.name);
+    let m = vm
+        .modules
+        .iter()
+        .find(|m| m.name.as_bytes().eq_ignore_ascii_case(&n))
+        .map(|m| m.name);
     match m {
         Some(name) => {
             vm.set_prop_raw(&o, b"name", Value::from(name));
             set_data(&o, Refl::Extension(PhpStr::from(name)));
             Ok(Value::Null)
         }
-        None => refl_error(vm, &format!("Extension \"{}\" does not exist", n.to_string_lossy())),
+        None => refl_error(
+            vm,
+            &format!("Extension \"{}\" does not exist", n.to_string_lossy()),
+        ),
     }
 }
 fn ext_name(_vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3472,12 +4319,24 @@ fn ext_version(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn ext_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    let mods: Vec<_> = vm.modules.iter().filter(|m| m.name.as_bytes() == n.as_bytes()).copied().collect();
+    let mods: Vec<_> = vm
+        .modules
+        .iter()
+        .filter(|m| m.name.as_bytes() == n.as_bytes())
+        .copied()
+        .collect();
     for m in mods {
         for (sig, _) in m.functions {
             let name = crate::registry::sig_name(sig);
             if let Some(f) = vm.functions.get(&lower(name.as_bytes())).cloned() {
-                let o = new_refl(vm, "ReflectionFunction", Refl::Func { func: f, closure: None })?;
+                let o = new_refl(
+                    vm,
+                    "ReflectionFunction",
+                    Refl::Func {
+                        func: f,
+                        closure: None,
+                    },
+                )?;
                 out.insert(Key::from(name), Value::Object(o));
             }
         }
@@ -3487,7 +4346,11 @@ fn ext_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ext_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    for m in vm.modules.iter().filter(|m| m.name.as_bytes() == n.as_bytes()) {
+    for m in vm
+        .modules
+        .iter()
+        .filter(|m| m.name.as_bytes() == n.as_bytes())
+    {
         for (k, v) in m.constants {
             out.insert(Key::from(*k), v.to_value());
         }
@@ -3497,7 +4360,12 @@ fn ext_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ext_ini(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    let mods: Vec<_> = vm.modules.iter().filter(|m| m.name.as_bytes() == n.as_bytes()).copied().collect();
+    let mods: Vec<_> = vm
+        .modules
+        .iter()
+        .filter(|m| m.name.as_bytes() == n.as_bytes())
+        .copied()
+        .collect();
     for m in mods {
         for (k, _) in m.ini {
             let v = vm.get_ini(k.as_bytes()).map(Value::Str).unwrap_or_default();
@@ -3509,7 +4377,12 @@ fn ext_ini(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ext_classes(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    let mods: Vec<_> = vm.modules.iter().filter(|m| m.name.as_bytes() == n.as_bytes()).copied().collect();
+    let mods: Vec<_> = vm
+        .modules
+        .iter()
+        .filter(|m| m.name.as_bytes() == n.as_bytes())
+        .copied()
+        .collect();
     for m in mods {
         for (l, _) in m.classes {
             if let Some(c) = vm.find_class(l.as_bytes(), false)? {
@@ -3523,7 +4396,12 @@ fn ext_classes(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ext_class_names(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = ext_name_of(a);
     let mut out = PhpArray::new();
-    let mods: Vec<_> = vm.modules.iter().filter(|m| m.name.as_bytes() == n.as_bytes()).copied().collect();
+    let mods: Vec<_> = vm
+        .modules
+        .iter()
+        .filter(|m| m.name.as_bytes() == n.as_bytes())
+        .copied()
+        .collect();
     for m in mods {
         for (l, _) in m.classes {
             if let Some(c) = vm.find_class(l.as_bytes(), false)? {
@@ -3544,7 +4422,10 @@ fn gc_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = a.str(0);
     let n = PhpStr::new(n.strip_prefix(b"\\").unwrap_or(&n));
     if vm.lookup_constant(&n)?.is_none() {
-        return refl_error(vm, &format!("Constant \"{}\" does not exist", n.to_string_lossy()));
+        return refl_error(
+            vm,
+            &format!("Constant \"{}\" does not exist", n.to_string_lossy()),
+        );
     }
     vm.set_prop_raw(&o, b"name", Value::Str(n.clone()));
     set_data(&o, Refl::GlobalConst(n));
@@ -3568,7 +4449,9 @@ fn gc_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn gc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let n = gc_name_of(a);
     let v = vm.lookup_constant(&n)?.unwrap_or_default();
-    let ty = crate::builtins::var::type_name(&v).replace("integer", "int").replace("boolean", "bool");
+    let ty = crate::builtins::var::type_name(&v)
+        .replace("integer", "int")
+        .replace("boolean", "bool");
     let mut val = Vec::new();
     vm.append_to_string(&mut val, &v)?;
     Ok(Value::Str(PhpStr::from(format!(
@@ -3586,51 +4469,99 @@ fn gen_of(a: &Args) -> Option<ObjRef> {
 }
 fn g_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
-    let Some(g) = a.obj(0) else { return Ok(Value::Null) };
-    let done = vm.with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done).unwrap_or(true);
+    let Some(g) = a.obj(0) else {
+        return Ok(Value::Null);
+    };
+    let done = vm
+        .with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done)
+        .unwrap_or(true);
     if done {
-        return refl_error(vm, "Cannot create ReflectionGenerator based on a terminated Generator");
+        return refl_error(
+            vm,
+            "Cannot create ReflectionGenerator based on a terminated Generator",
+        );
     }
     set_data(&o, Refl::Generator(g));
     Ok(Value::Null)
 }
 fn g_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else { return Ok(Value::Null) };
+    let Some(g) = gen_of(a) else {
+        return Ok(Value::Null);
+    };
     let l = vm
-        .with_gen(&g, |d| d.frame.as_ref().map(|f| f.code().line_of(f.ip.saturating_sub(1) as usize)))
+        .with_gen(&g, |d| {
+            d.frame
+                .as_ref()
+                .map(|f| f.code().line_of(f.ip.saturating_sub(1) as usize))
+        })
         .flatten()
         .unwrap_or(0);
     Ok(Value::Int(l as i64))
 }
 fn g_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else { return Ok(Value::Null) };
-    let f = vm.with_gen(&g, |d| d.frame.as_ref().map(|f| f.code().file.clone())).flatten().unwrap_or_default();
+    let Some(g) = gen_of(a) else {
+        return Ok(Value::Null);
+    };
+    let f = vm
+        .with_gen(&g, |d| d.frame.as_ref().map(|f| f.code().file.clone()))
+        .flatten()
+        .unwrap_or_default();
     Ok(Value::Str(f))
 }
 fn g_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else { return Ok(Value::Null) };
-    let info = vm.with_gen(&g, |d| d.frame.as_ref().map(|f| (f.func.clone(), f.closure.clone()))).flatten();
+    let Some(g) = gen_of(a) else {
+        return Ok(Value::Null);
+    };
+    let info = vm
+        .with_gen(&g, |d| {
+            d.frame
+                .as_ref()
+                .map(|f| (f.func.clone(), f.closure.clone()))
+        })
+        .flatten();
     match info {
         Some((f, c)) => {
             if f.scope().is_some() && c.is_none() {
                 let cls = vm.rc_class(f.scope.get());
-                return Ok(Value::Object(new_refl(vm, "ReflectionMethod", Refl::Method { func: f, cls })?));
+                return Ok(Value::Object(new_refl(
+                    vm,
+                    "ReflectionMethod",
+                    Refl::Method { func: f, cls },
+                )?));
             }
-            Ok(Value::Object(new_refl(vm, "ReflectionFunction", Refl::Func { func: f, closure: c })?))
+            Ok(Value::Object(new_refl(
+                vm,
+                "ReflectionFunction",
+                Refl::Func {
+                    func: f,
+                    closure: c,
+                },
+            )?))
         }
         None => Ok(Value::Null),
     }
 }
 fn g_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else { return Ok(Value::Null) };
-    Ok(vm.with_gen(&g, |d| d.frame.as_ref().and_then(|f| f.this.clone())).flatten().map(Value::Object).unwrap_or_default())
+    let Some(g) = gen_of(a) else {
+        return Ok(Value::Null);
+    };
+    Ok(vm
+        .with_gen(&g, |d| d.frame.as_ref().and_then(|f| f.this.clone()))
+        .flatten()
+        .map(Value::Object)
+        .unwrap_or_default())
 }
 fn g_gen(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(gen_of(a).map(Value::Object).unwrap_or_default())
 }
 fn g_closed(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(g) = gen_of(a) else { return Ok(Value::Bool(true)) };
-    Ok(Value::Bool(vm.with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done).unwrap_or(true)))
+    let Some(g) = gen_of(a) else {
+        return Ok(Value::Bool(true));
+    };
+    Ok(Value::Bool(
+        vm.with_gen(&g, |d| d.state == crate::vm::iter::GenState::Done)
+            .unwrap_or(true),
+    ))
 }
 
 #[allow(dead_code)]

@@ -13,6 +13,7 @@ pub mod math;
 pub mod misc;
 pub mod output;
 pub mod password;
+pub mod pcre;
 pub mod reflection;
 pub mod serialize;
 pub mod spl;
@@ -40,6 +41,7 @@ pub fn modules() -> Vec<&'static Module> {
         &password::MODULE,
         &misc::MODULE,
         &ini::MODULE,
+        &pcre::MODULE,
         &array::MODULE,
         &math::MODULE,
     ]

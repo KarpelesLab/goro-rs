@@ -9,5 +9,6 @@ repository.workspace = true
 goro-syntax = { path = "../goro-syntax" }
 goro-runtime = { path = "../goro-runtime" }
 goro-ext-standard = { path = "../goro-ext-standard" }
+goro-regex = { path = "../goro-regex" }
 libc = "0.2"
 corosensei = "0.2"

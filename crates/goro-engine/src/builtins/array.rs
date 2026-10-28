@@ -1549,17 +1549,23 @@ fn array_walk_common(vm: &mut Vm, a: &mut Args, recursive: bool) -> R<Value> {
     match target {
         Value::Array(_) => walk_ref(vm, &r, &cb, extra.as_ref(), recursive, 0)?,
         Value::Object(o) => {
-            // Properties are walked by value through a copy of the table.
-            let props = vm.visible_props(&o);
-            for (k, v) in props {
-                let pr = PhpRef::new(v.deref());
-                let mut args = vec![Value::Ref(pr.clone()), k.clone()];
+            // The property table, with mangled names for private and
+            // protected properties (test array_walk/array_walk_objects
+            // .phpt); changed public values are written back.
+            let props = vm.object_props_array(&o, true);
+            for (k, v) in entries(&props) {
+                let old = v.deref();
+                let pr = PhpRef::new(old.clone());
+                let mut args = vec![Value::Ref(pr.clone()), k.to_value()];
                 if let Some(x) = &extra {
                     args.push(x.clone());
                 }
                 call(vm, &cb, args)?;
-                if let Value::Str(name) = &k {
-                    let nv = pr.get();
+                let nv = pr.get();
+                if let Key::Str(name) = &k
+                    && !name.starts_with(b"\0")
+                    && !goro_runtime::compare::strict_eq(&nv, &old)
+                {
                     vm.write_prop(&o, name, nv, None)?;
                 }
             }
