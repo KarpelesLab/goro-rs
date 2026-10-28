@@ -772,7 +772,18 @@ impl goro_runtime::NativeData for WeakData {}
 
 fn weakref_hooks() -> NativeHooks {
     NativeHooks {
-        debug_props: Some(|_, _| Some(PhpArray::new())),
+        debug_props: Some(|_, o| {
+            let n = o.obj().native.borrow();
+            let any: &dyn std::any::Any = &**n.as_ref()?;
+            let w = any.downcast_ref::<WeakData>()?;
+            let target = w.0.as_ref().and_then(|w| w.upgrade());
+            let mut out = PhpArray::new();
+            out.insert(
+                Key::from("object"),
+                target.map(Value::Object).unwrap_or(Value::Null),
+            );
+            Some(out)
+        }),
         ..Default::default()
     }
 }

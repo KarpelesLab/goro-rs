@@ -20,6 +20,7 @@ pub mod spl;
 pub mod string;
 pub mod strmisc;
 pub mod var;
+pub mod weakmap;
 
 use crate::registry::Module;
 
@@ -36,6 +37,7 @@ pub fn modules() -> Vec<&'static Module> {
         &json::MODULE,
         &reflection::MODULE,
         &spl::MODULE,
+        &weakmap::MODULE,
         &string::MODULE,
         &strmisc::MODULE,
         &password::MODULE,

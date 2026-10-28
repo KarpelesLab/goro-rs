@@ -540,6 +540,12 @@ impl Vm {
             let Some(cls) = cls else {
                 return Err(UErr::At(start));
             };
+            if cls.has_flag(cflags::NOT_SERIALIZABLE) {
+                return Err(UErr::Php(self.throw::<()>(
+                    "Exception",
+                    &format!("Unserialization of '{}' is not allowed", cls.name.dname()),
+                ).unwrap_err()));
+            }
             let o = self.instantiate(&cls)?;
             u.vals.push(Value::Object(o.clone()));
             if cls.find_method(b"unserialize").is_none() {

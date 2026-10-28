@@ -64,6 +64,15 @@ pub trait NativeData: Any {
     /// Drop every PHP value this data holds (the collector breaks garbage
     /// cycles this way).
     fn clear(&mut self) {}
+    /// Weak-keyed maps (WeakMap): the values stored for `key`. The
+    /// collector treats them as referenced by the key (ephemerons), not by
+    /// the map; `trace` must not report them.
+    fn ephemerons(&self, _key: &ObjRef, _visit: &mut dyn FnMut(&Value)) {}
+    /// A key object (by address) of this weak map went away: its entries
+    /// are removed (their values returned, to be dropped by the caller).
+    fn weak_key_dropped(&mut self, _key_addr: usize) -> Vec<Value> {
+        Vec::new()
+    }
 }
 
 pub(crate) const F_HAS_DTOR: u32 = 1;
@@ -72,6 +81,8 @@ pub(crate) const F_GC_BUFFERED: u32 = 4;
 pub(crate) const F_GC_CLEARED: u32 = 8;
 /// A lazy object (uninitialized, or an initialized lazy proxy).
 pub(crate) const F_LAZY: u32 = 16;
+/// The object is (or was) a key of a weak map (see [`crate::gc`]).
+pub(crate) const F_WEAK_KEY: u32 = 32;
 
 /// An object's storage.
 pub struct Object {
@@ -98,6 +109,11 @@ pub struct WeakObj(Weak<Object>);
 impl WeakObj {
     pub fn upgrade(&self) -> Option<ObjRef> {
         self.0.upgrade().map(ObjRef)
+    }
+
+    /// The object's address (stable while any handle exists).
+    pub fn addr(&self) -> usize {
+        self.0.as_ptr() as usize
     }
 }
 
@@ -262,6 +278,9 @@ impl Drop for Object {
         drop(std::mem::take(self.slots.get_mut()));
         drop(std::mem::take(self.props.get_mut()));
         drop(self.native.get_mut().take());
+        if self.flags.get() & F_WEAK_KEY != 0 {
+            crate::gc::forget_weak_key(self as *const Object as usize);
+        }
         let h = self.handle as usize;
         let _ = STORE.try_with(|s| {
             if let Ok(mut s) = s.try_borrow_mut() {

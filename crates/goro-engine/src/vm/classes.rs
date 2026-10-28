@@ -1493,6 +1493,11 @@ impl Vm {
             }
             let cls = self.declare_class(decl)?;
             cls.flags.set(cls.flags.get() | cflags::INTERNAL);
+            // Stub-only markers (php-src stubs' @not-serializable).
+            if cls.attrs.iter().any(|a| a.name.as_bytes() == b"NotSerializable") {
+                cls.flags
+                    .set(cls.flags.get() | cflags::NOT_SERIALIZABLE | cflags::NO_DYNAMIC);
+            }
             self.bind_natives(&cls);
         }
         Ok(())

@@ -4659,7 +4659,8 @@ fn reset_lazy(vm: &mut Vm, a: &mut Args, proxy: bool) -> R<Value> {
     let o = obj_of_class(vm, a, &c, method)?;
     let oc = vm.class_of(&o);
     lazy_class_check(vm, &oc)?;
-    if o.is_lazy() {
+    // (A ghost being initialized has its lazy flag off.)
+    if o.is_lazy() || crate::vm::lazy::with_lazy(&o, |d| d.initializing).unwrap_or(false) {
         let (init, uninit) = crate::vm::lazy::with_lazy(&o, |d| (d.initializing, d.instance.is_none())).unwrap_or((false, false));
         if init {
             return vm.throw("Error", "Can not reset an object while it is being initialized");
