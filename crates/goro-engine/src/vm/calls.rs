@@ -1951,6 +1951,11 @@ impl Vm {
             Some((self.cur_file(), self.cur_line()))
         };
         let argc = p.argc;
+        let named_hi = if p.has_named {
+            (64 - p.passed.leading_zeros()).min(code.params.len() as u32)
+        } else {
+            0
+        };
         let mut flags = 0;
         if entry {
             flags |= frame_flags::ENTRY;
@@ -1995,7 +2000,14 @@ impl Vm {
         let Pending { args, .. } = p;
         self.give_args_vec(args);
         self.push_frame(frame);
-        let saved_loc = self.loc_override.replace(code as *const FuncCode);
+        // Argument errors of internal classes written in PHP are located at
+        // the call, as an internal function's are (test
+        // ext/spl/tests/AppendIterator_invalid_ctor).
+        let saved_loc = if code.file.is_empty() {
+            self.loc_override.take()
+        } else {
+            self.loc_override.replace(code as *const FuncCode)
+        };
         let r = self.bind_args(
             &func,
             code,
@@ -2011,6 +2023,12 @@ impl Vm {
         if let Err(e) = r {
             self.pop_frame();
             return Err(e);
+        }
+        // With named arguments, func_num_args() counts up to the last
+        // parameter passed, skipped ones taking their defaults (observed on
+        // PHP 8.5).
+        if named_hi > argc {
+            self.frame_mut().argc = named_hi;
         }
         if code.flags & fflags::GENERATOR != 0 {
             let f = self.ex.frames.pop().unwrap();
@@ -2088,6 +2106,24 @@ impl Vm {
                     if exact { "exactly" } else { "at most" },
                     np,
                     if np == 1 { "" } else { "s" },
+                    argc
+                ),
+            );
+        }
+        // Internal functions check the argument count before the types
+        // (test ext/spl/tests/CallbackFilterIteratorTest-002).
+        if internal && !has_named && (argc as usize) < code.num_required as usize {
+            let exact = code.num_required as usize == np && code.flags & fflags::VARIADIC == 0;
+            let n = code.num_required;
+            let fname = self.func_display_name(func);
+            return self.throw(
+                "ArgumentCountError",
+                &format!(
+                    "{}() expects {} {} argument{}, {} given",
+                    fname,
+                    if exact { "exactly" } else { "at least" },
+                    n,
+                    if n == 1 { "" } else { "s" },
                     argc
                 ),
             );
@@ -2336,6 +2372,25 @@ impl Vm {
                     None => *slot = Some(c),
                 }
                 Ok(())
+            }
+            Check::Fail
+                if code.file.is_empty()
+                    && ty.mask & !tmask::NULL == tmask::CALLABLE
+                    && ty.classes.is_empty() =>
+            {
+                // Internal classes written in PHP word callable errors as
+                // internal functions do (test
+                // ext/spl/tests/CallbackFilterIteratorTest-002).
+                let why = self.callable_error(&val);
+                let msg = format!(
+                    "{}(): Argument #{} (${}) must be a valid callback{}, {}",
+                    self.func_display_name(func),
+                    i + 1,
+                    code.params[i].name.dname(),
+                    if ty.allows_null() { " or null" } else { "" },
+                    why
+                );
+                self.throw("TypeError", &msg)
             }
             Check::Fail => {
                 let msg = format!(

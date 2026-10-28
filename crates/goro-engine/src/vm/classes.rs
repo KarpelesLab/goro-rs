@@ -42,10 +42,13 @@ impl Vm {
             return Ok(None);
         }
         self.autoloading.push(lname.clone());
-        let loaders = self.autoloaders.clone();
+        // The live list: an autoloader may register or remove others
+        // (test ext/spl/tests/bug71202).
         let mut result = Ok(None);
-        for l in loaders {
-            if let Err(e) = self.call_value(&l, vec![Value::Str(PhpStr::new(name))]) {
+        let mut i = 0;
+        while let Some(l) = self.autoloaders.get(i).cloned() {
+            i += 1;
+            if let Err(e) = self.call_callee(l, vec![Value::Str(PhpStr::new(name))]) {
                 result = Err(e);
                 break;
             }
@@ -1661,7 +1664,10 @@ impl Vm {
         m.set = get(b"__set");
         m.isset = get(b"__isset");
         m.unset = get(b"__unset");
-        m.call = get(b"__call");
+        // Internal classes written in PHP may take unknown method calls
+        // through a hidden `__h_call` (SPL's iterators forward them to
+        // the inner iterator; test RecursiveDirectoryIterator_getSubPath_basic).
+        m.call = get(b"__call").or_else(|| get(b"__h_call"));
         m.call_static = get(b"__callstatic");
         m.to_string = get(b"__tostring");
         m.invoke = get(b"__invoke");

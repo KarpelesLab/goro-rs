@@ -733,10 +733,20 @@ impl Vm {
                     );
                 }
                 self.check_set_visibility(&p, scope, o, name)?;
-                let cur_uninit = {
+                let (cur_uninit, was_unset) = {
                     let slots = o.obj().slots.borrow();
-                    self.is_uninit(&slots[p.slot as usize])
+                    let s = &slots[p.slot as usize];
+                    (self.is_uninit(s), self.is_unset_mark(s))
                 };
+                // An unset declared property takes __set like a missing one
+                // (observed on PHP 8.5; test
+                // ext/spl/tests/ArrayObject/arrayObject_setFlags_basic1).
+                if was_unset
+                    && let Some(f) = cls.magic.borrow().set.clone()
+                    && !self.guarded(o, name, 1)
+                {
+                    return self.magic_set(o, f, name, v);
+                }
                 if p.flags & mflags::READONLY != 0 {
                     if !cur_uninit && !self.readonly_clone_ok(o, &p) {
                         return self.throw(
@@ -1323,6 +1333,18 @@ impl Vm {
                             ),
                         );
                     }
+                }
+                // An unset declared property takes __unset like a missing
+                // one (observed on PHP 8.5; test ext/spl/tests/bug45622).
+                if self.is_unset_mark(&o.obj().slots.borrow()[p.slot as usize])
+                    && let Some(f) = cls.magic.borrow().unset.clone()
+                    && !self.guarded(o, name, 3)
+                {
+                    self.prop_guards.push((o.handle(), name.clone(), 3));
+                    let r =
+                        self.call_func_this(&f, Some(o.clone()), vec![Value::Str(name.clone())]);
+                    self.prop_guards.pop();
+                    return r.map(|_| ());
                 }
                 let mark = self.unset_value();
                 let mut slots = o.obj().slots.borrow_mut();
@@ -2337,6 +2359,20 @@ impl Vm {
     /// numeric keys in object/array casts).
     pub fn object_props_cast(&mut self, o: &ObjRef) -> PhpArray {
         let a = self.object_props_array(o, true);
+        Self::int_keys(a)
+    }
+
+    /// get_mangled_object_vars(): the declared and dynamic properties
+    /// only, whatever the class's property-table hooks give (observed on
+    /// PHP 8.5: ArrayObject, SplFixedArray, DateTime give `[]`; test
+    /// ext/spl/tests/SplFixedArray_get_properties_for).
+    pub fn object_props_mangled(&mut self, o: &ObjRef) -> PhpArray {
+        let o = &self.lazy_target(o);
+        let a = self.plain_props_array(o, true);
+        Self::int_keys(a)
+    }
+
+    fn int_keys(a: PhpArray) -> PhpArray {
         if !a.iter().any(|(k, _)| matches!(k, goro_runtime::KeyRef::Str(s) if matches!(Key::from_php_str(s), Key::Int(_)))) {
             return a;
         }
