@@ -10,6 +10,7 @@ pub mod file;
 pub mod ini;
 pub mod json;
 pub mod math;
+pub mod mbstring;
 pub mod misc;
 pub mod output;
 pub mod password;
@@ -44,6 +45,7 @@ pub fn modules() -> Vec<&'static Module> {
         &misc::MODULE,
         &ini::MODULE,
         &pcre::MODULE,
+        &mbstring::MODULE,
         &array::MODULE,
         &math::MODULE,
     ]
