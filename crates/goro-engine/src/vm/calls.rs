@@ -1940,7 +1940,21 @@ impl Vm {
         let strict = code.flags & fflags::TYPED_PARAMS != 0 && self.caller_strict();
         // The call site, for binding errors ("called in %s on line %d"):
         // only computed when the binding can fail.
-        let call_loc = if entry
+        // call_user_func() calls as its caller does (PHP compiles it to a
+        // direct call; tests Zend/tests/func_get_arg_basic and others).
+        let via_cuf = entry
+            && p.argc < code.num_required
+            && self.ex.native_calls.last().is_some_and(|nc| {
+                nc.depth == self.ex.frames.len() as u32
+                    && nc.func.scope().is_none()
+                    && matches!(
+                        nc.func.lname.as_bytes(),
+                        b"call_user_func" | b"call_user_func_array"
+                    )
+            });
+        let call_loc = if via_cuf {
+            Some((self.cur_file(), self.cur_line()))
+        } else if entry
             || self.ex.frames.is_empty()
             || (p.argc >= code.num_required
                 && !p.has_named

@@ -1113,6 +1113,22 @@ impl<'a> Compiler<'a> {
                 .unwrap_or(&full)
                 .to_vec(),
         };
+        // `use Foo;` in the global namespace (test Zend/tests/bug69388).
+        if kind == UseKind::Normal
+            && self.ns.is_empty()
+            && prefix.is_none()
+            && u.alias.is_none()
+            && !full.contains(&b'\\')
+        {
+            self.notice(
+                goro_runtime::Level::Warning,
+                format!(
+                    "The use statement with non-compound name '{}' has no effect",
+                    String::from_utf8_lossy(&full)
+                ),
+                line,
+            );
+        }
         match kind {
             UseKind::Normal => {
                 let la = alias.to_ascii_lowercase();
@@ -1705,6 +1721,9 @@ impl<'a> Compiler<'a> {
                 self.f.line = c.span.line;
                 let mut names = Vec::new();
                 for n in c.types {
+                    if n.kind == NameKind::Unqualified && n.name.eq_ignore_ascii_case(b"static") {
+                        return self.err("Bad class name in the catch statement", c.span.line);
+                    }
                     let full = self.resolve_class(n);
                     let lf = full.to_ascii_lowercase();
                     if lf == b"self" || lf == b"static" || lf == b"parent" {

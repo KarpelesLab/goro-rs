@@ -20,7 +20,6 @@ use goro_runtime::{Key, KeyRef, PhpArray, PhpStr, ResRef, Value};
 
 use super::file::{Backing, Stream, new_stream_res};
 use super::string::sv;
-use crate::class::TypeName;
 use crate::func::Args;
 use crate::registry::Module;
 use crate::vm::{R, Vm};
@@ -473,7 +472,7 @@ fn with_proc<T>(vm: &mut Vm, a: &Args, f: impl FnOnce(&mut Vm, &mut Proc) -> R<T
             "TypeError",
             &format!(
                 "Argument #1 ($process) must be of type resource, {} given",
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ),
         );
     };
@@ -671,7 +670,7 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
                                 "ValueError",
                                 &format!(
                                     "Redirection target must be of type int, {} given",
-                                    t.tname()
+                                    crate::vm::Vm::type_name_given(&t)
                                 ),
                             );
                         };
@@ -1041,7 +1040,7 @@ fn pclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "TypeError",
             &format!(
                 "Argument #1 ($handle) must be of type resource, {} given",
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ),
         );
     };

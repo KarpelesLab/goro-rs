@@ -92,7 +92,14 @@ impl Vm {
     fn declare_class_opt(&mut self, decl: &Rc<ClassDecl>) -> R<Option<Rc<Class>>> {
         let lname = lower(&decl.name);
         if let Some(prev) = self.classes.get(&lname) {
-            let _ = prev;
+            // A built-in class name (test Zend/tests/inter_06).
+            if prev.has_flag(cflags::INTERNAL) {
+                return Err(self.fatal_at(
+                    &format!("Cannot redeclare class {}", prev.name.dname()),
+                    &decl.file,
+                    decl.line_start,
+                ));
+            }
             let what = match decl.kind {
                 ClassKind::Interface => "interface",
                 ClassKind::Trait => "trait",
@@ -354,6 +361,36 @@ impl Vm {
         // Interfaces (and their parents).
         for ic in &ifaces {
             self.add_interface(&cls, ic);
+        }
+        if decl.kind != ClassKind::Interface {
+            let has = |n: &[u8]| {
+                cls.interfaces
+                    .borrow()
+                    .iter()
+                    .any(|i| i.lname.as_bytes() == n)
+            };
+            // test Zend/tests/throwable_003
+            if has(b"throwable")
+                && !decl.file.is_empty()
+                && !cls.ancestors_have(|a| matches!(a.lname.as_bytes(), b"exception" | b"error"))
+            {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Class {} cannot implement interface Throwable, extend Exception or Error instead",
+                        cname
+                    ),
+                );
+            }
+            if has(b"iterator") && has(b"iteratoraggregate") {
+                return self.link_err(
+                    decl,
+                    &format!(
+                        "Class {} cannot implement both Iterator and IteratorAggregate at the same time",
+                        cname
+                    ),
+                );
+            }
         }
         // Constants.
         for c in &decl.consts {

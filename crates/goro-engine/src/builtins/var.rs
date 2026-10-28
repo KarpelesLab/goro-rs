@@ -2,7 +2,7 @@
 //! gettype/settype, is_*, intval & co (PHP manual: Variable handling
 //! functions; output formats observed on PHP 8.5).
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::DisplayName;
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpStr, Value};
 
 use crate::func::Args;
@@ -1259,7 +1259,7 @@ fn get_resource_type(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Resource(r) => Ok(Value::Str(r.res().kind.borrow().clone())),
         v => vm.type_error(&format!(
             "get_resource_type(): Argument #1 ($resource) must be of type resource, {} given",
-            v.tname()
+            crate::vm::Vm::type_name_given(&v)
         )),
     }
 }
@@ -1269,7 +1269,7 @@ fn get_resource_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Resource(r) => Ok(Value::Int(r.id())),
         v => vm.type_error(&format!(
             "get_resource_id(): Argument #1 ($resource) must be of type resource, {} given",
-            v.tname()
+            crate::vm::Vm::type_name_given(&v)
         )),
     }
 }

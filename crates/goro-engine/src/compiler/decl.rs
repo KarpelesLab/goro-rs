@@ -45,6 +45,13 @@ pub(crate) struct FnSpec<'a> {
 
 impl<'a> Compiler<'a> {
     pub(crate) fn func_decl(&mut self, fd: &'a FunctionDecl<'a>) -> CResult<u32> {
+        if fd.name.name.eq_ignore_ascii_case(b"assert") && !self.ns.is_empty() {
+            // test Zend/tests/custom_assert_forbidden
+            return self.err(
+                "Defining a custom assert() function is not allowed, as the function has special semantics",
+                fd.span.line,
+            );
+        }
         let full = self.qualify_pub(fd.name.name);
         let name = PhpStr::intern(&full);
         let spec = FnSpec {
@@ -1045,6 +1052,22 @@ impl<'a> Compiler<'a> {
                             "Cannot use \"{}\" as {} name as it is reserved",
                             String::from_utf8_lossy(n.name),
                             what
+                        ),
+                        line,
+                    );
+                }
+                if n.name == b"_" {
+                    // PHP 8.4 (RFC: Deprecations for PHP 8.4).
+                    self.notice(
+                        goro_runtime::Level::Deprecated,
+                        format!(
+                            "Using \"_\" as {} name is deprecated since 8.4",
+                            match kind {
+                                ClassKind::Interface => "an interface",
+                                ClassKind::Trait => "a trait",
+                                ClassKind::Enum => "an enum",
+                                ClassKind::Class => "a class",
+                            }
                         ),
                         line,
                     );

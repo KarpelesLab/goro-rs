@@ -334,6 +334,7 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                self.static_as_instance(&cls, name)?;
                 let v = o.obj().props.borrow().get_str(name).cloned();
                 match v {
                     Some(v) => Ok(v.into_deref()),
@@ -466,6 +467,33 @@ impl Vm {
             );
         }
         Ok(())
+    }
+
+    /// `$o->x` naming a static property visible here (tests
+    /// Zend/tests/bug30820, bug76860).
+    fn static_as_instance(&mut self, cls: &Class, name: &PhpStr) -> R<()> {
+        if cls.static_props.borrow().is_empty() {
+            return Ok(());
+        }
+        // __get/__set take the access instead (test Zend/tests/objects/
+        // objects_024).
+        {
+            let m = cls.magic.borrow();
+            if m.get.is_some() || m.set.is_some() {
+                return Ok(());
+            }
+        }
+        let Some(sp) = cls.find_static(name) else {
+            return Ok(());
+        };
+        if sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, self.scope_ptr()) {
+            return Ok(());
+        }
+        self.notice_msg(&format!(
+            "Accessing static property {}::${} as non static",
+            cls.name.dname(),
+            name.to_string_lossy()
+        ))
     }
 
     fn in_hook(&self, o: &ObjRef, p: &PropInfo) -> bool {
@@ -914,6 +942,7 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                self.static_as_instance(&cls, name)?;
                 if let Some(h) = cls.native.dyn_prop
                     && let Some(r) = h(self, o, name, crate::class::DynPropOp::Write)
                 {

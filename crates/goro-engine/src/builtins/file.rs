@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use goro_runtime::{Key, PhpArray, PhpStr, ResRef, Value};
 
-use crate::class::TypeName;
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
@@ -700,7 +699,7 @@ pub fn with_stream<T>(
             &format!(
                 "Argument #{} ($stream) must be of type resource, {} given",
                 i + 1,
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ),
         );
     };
@@ -990,7 +989,7 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "TypeError",
             &format!(
                 "Argument #1 ($stream) must be of type resource, {} given",
-                v.tname()
+                crate::vm::Vm::type_name_given(&v)
             ),
         );
     };

@@ -305,6 +305,12 @@ impl<'a> Compiler<'a> {
             ExprKind::String(s, _) => Ok(self.str_const(&super::lit(s))),
             ExprKind::Interpolated(parts, _) => self.rope(parts, hint),
             ExprKind::ShellExec(parts) => {
+                // PHP 8.5 (RFC: Deprecations for PHP 8.5).
+                self.notice(
+                    goro_runtime::Level::Deprecated,
+                    "The backtick (`) operator is deprecated, use shell_exec() instead",
+                    line,
+                );
                 let s = self.rope(parts, NONE)?;
                 let name = self.name_pair(b"shell_exec");
                 let cache = self.cache();
@@ -489,6 +495,24 @@ impl<'a> Compiler<'a> {
                     let d = self.dst(hint);
                     self.emit(Op::ClassName { dst: d, class });
                     return Ok(d);
+                }
+                // self::X / parent::X outside a class (test
+                // Zend/tests/self_class_const_outside_class).
+                if let ClassRef::Name(n) = &cc.class
+                    && n.kind == NameKind::Unqualified
+                    && (n.name.eq_ignore_ascii_case(b"self")
+                        || n.name.eq_ignore_ascii_case(b"parent"))
+                    && self.class.is_none()
+                    && self.f.flags & (fflags::CLOSURE | fflags::CONST_EXPR | fflags::PSEUDO_MAIN)
+                        == 0
+                {
+                    return self.err(
+                        format!(
+                            "Cannot use \"{}\" when no class scope is active",
+                            String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                        ),
+                        line,
+                    );
                 }
                 let class = self.class_spec(&cc.class)?;
                 let n = self.member_name(&cc.name)?;
