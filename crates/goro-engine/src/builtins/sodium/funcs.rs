@@ -962,6 +962,27 @@ fn sodium_crypto_kdf_keygen(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     let r = sr(vm, r)?;
     Ok(bytes(r))
 }
+/// libsodium's Argon2 memory is outside memory_limit: so is ours.
+fn pwhash_allowance(memlimit: i64) -> goro_runtime::mem::Allowance {
+    goro_runtime::mem::Allowance::new(memlimit.clamp(0, i64::MAX) as usize)
+}
+
+/// The memory (bytes) an encoded `$argon2...$m=K,...` hash uses.
+fn hash_memlimit(h: &[u8]) -> i64 {
+    let Some(p) = h.windows(2).position(|w| w == b"m=") else {
+        return 0;
+    };
+    let digits: Vec<u8> = h[p + 2..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .copied()
+        .collect();
+    std::str::from_utf8(&digits)
+        .ok()
+        .and_then(|d| d.parse::<i64>().ok())
+        .map_or(0, |k| k.saturating_mul(1024))
+}
+
 fn sodium_crypto_pwhash(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let p0 = a.int(0);
     let p1 = a.str(1);
@@ -970,6 +991,7 @@ fn sodium_crypto_pwhash(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let p4 = a.int(4);
     let p5 = a.int_or(5, 2);
     set_limit(vm);
+    let _allow = pwhash_allowance(p4);
     let r = s::sodium_crypto_pwhash(vm, p0, p1.as_bytes(), p2.as_bytes(), p3, p4, p5);
     vm.check_deferred()?;
     let r = sr(vm, r)?;
@@ -980,6 +1002,7 @@ fn sodium_crypto_pwhash_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let p1 = a.int(1);
     let p2 = a.int(2);
     set_limit(vm);
+    let _allow = pwhash_allowance(p2);
     let r = s::sodium_crypto_pwhash_str(vm, p0.as_bytes(), p1, p2);
     vm.check_deferred()?;
     let r = sr(vm, r)?;
@@ -989,6 +1012,7 @@ fn sodium_crypto_pwhash_str_verify(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let p0 = a.str(0);
     let p1 = a.str(1);
     set_limit(vm);
+    let _allow = pwhash_allowance(hash_memlimit(p0.as_bytes()));
     let r = s::sodium_crypto_pwhash_str_verify(vm, p0.as_bytes(), p1.as_bytes());
     vm.check_deferred()?;
     let r = sr(vm, r)?;

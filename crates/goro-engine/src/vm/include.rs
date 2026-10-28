@@ -242,6 +242,12 @@ impl Vm {
 
     /// Runs the main script (global scope).
     pub fn run_main_code(&mut self, src: &[u8], file: &[u8]) -> R<()> {
+        self.run_main_code_value(src, file).map(|_| ())
+    }
+
+    /// Runs `src` as the main script; returns its `return` value (the web
+    /// server's router script: PHP manual, Built-in web server).
+    pub fn run_main_code_value(&mut self, src: &[u8], file: &[u8]) -> R<Value> {
         let unit = match self.compile_source(src, file, false) {
             Ok(u) => u,
             Err(e) => return Err(self.compile_error(e, file, false)),
@@ -297,7 +303,7 @@ impl Vm {
             self.unwind_frames(0);
             return Err(e);
         }
-        self.run().map(|_| ())
+        self.run()
     }
 
     // ------------------------------------------------------------ include

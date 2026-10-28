@@ -116,6 +116,8 @@ pub struct Output {
     /// Output buffering was shut down by a forbidden call in a handler:
     /// no more buffers can be started.
     pub deactivated: bool,
+    /// The SAPI's response state (status, headers, web server connection).
+    pub sapi: super::sapi::Sapi,
 }
 
 impl Default for Output {
@@ -128,6 +130,7 @@ impl Default for Output {
             redirect: None,
             final_flush: false,
             deactivated: false,
+            sapi: Default::default(),
         }
     }
 }
@@ -135,6 +138,14 @@ impl Default for Output {
 impl Output {
     /// Writes pending stdout bytes.
     pub fn flush(&mut self) {
+        if self.sapi.conn.is_some() {
+            // The web server: output is the response body.
+            let b = std::mem::take(&mut self.stdout);
+            self.sapi.write_body(&b);
+            self.stdout = b;
+            self.stdout.clear();
+            return;
+        }
         if !self.stdout.is_empty() {
             let mut so = std::io::stdout().lock();
             let _ = so.write_all(&self.stdout);
@@ -173,8 +184,8 @@ impl Vm {
     #[inline]
     pub fn echo(&mut self, b: &[u8]) {
         if self.out.buffers.is_empty() {
-            if self.out.written == 0 && self.header_callback.is_some() && !b.is_empty() {
-                self.send_headers();
+            if self.out.written == 0 && !b.is_empty() {
+                self.first_output();
             }
             self.out.write_stdout(b);
             return;
@@ -365,6 +376,9 @@ impl Vm {
             // Output buffering was shut down by the handler.
             return Ok(());
         }
+        if n == 1 && !out.is_empty() {
+            self.note_output_start();
+        }
         self.out.write_level(n - 1, &out);
         pending.map_or(Ok(()), Err)
     }
@@ -379,6 +393,9 @@ impl Vm {
         let b = self.out.buffers.pop().unwrap();
         match r {
             Ok((out, pending)) => {
+                if n == 1 && !out.is_empty() {
+                    self.note_output_start();
+                }
                 self.out.write_level(n - 1, &out);
                 pending.map_or(Ok(()), Err)
             }
@@ -421,6 +438,25 @@ impl Vm {
         match r {
             Ok(p) => p.map_or(Ok(()), Err),
             Err(e) => Err(e),
+        }
+    }
+
+    /// The first output byte is about to reach the SAPI: the headers count
+    /// as sent from here on (headers_sent(), "output started at").
+    #[cold]
+    fn first_output(&mut self) {
+        if self.header_callback.is_some() {
+            self.send_headers();
+        }
+        self.note_output_start();
+    }
+
+    /// Remembers where the output started, once.
+    pub fn note_output_start(&mut self) {
+        if self.out.sapi.output_start.is_none() {
+            let f = self.cur_file();
+            let l = self.cur_line();
+            self.out.sapi.output_start = Some((f.to_vec(), l));
         }
     }
 

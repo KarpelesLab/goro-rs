@@ -21,6 +21,7 @@
 pub mod builtins;
 pub mod bytecode;
 pub mod class;
+pub mod cli_server;
 pub mod compiler;
 pub mod func;
 pub mod registry;
@@ -152,18 +153,19 @@ fn run_lines(vm: &mut Vm, lm: &LineMode) -> i32 {
     vm.exit_status
 }
 
-/// Runs a script; returns the process exit status.
-pub fn run(opts: RunOptions) -> i32 {
+/// A started engine: the modules, then the startup settings (`-d`, in
+/// order) and what derives from them.
+pub fn startup(ini: &[(Vec<u8>, Vec<u8>)], extra: &[&'static Module]) -> Vm {
     let mut modules = builtins::modules();
-    modules.extend(opts.modules.iter().copied());
+    modules.extend(extra.iter().copied());
     let mut vm = Vm::new(&modules);
-    for (k, v) in &opts.ini {
+    for (k, v) in ini {
         vm.set_ini(k, v);
     }
-    builtins::misc::startup_ini_deprecations(&mut vm, &opts.ini);
+    builtins::misc::startup_ini_deprecations(&mut vm, ini);
     for m in vm.modules.clone() {
         if let Some(f) = m.startup_ini {
-            f(&mut vm, &opts.ini);
+            f(&mut vm, ini);
         }
     }
     // disable_functions: since PHP 8.0 disabled functions are not defined
@@ -180,6 +182,12 @@ pub fn run(opts: RunOptions) -> i32 {
             }
         }
     }
+    vm
+}
+
+/// Runs a script; returns the process exit status.
+pub fn run(opts: RunOptions) -> i32 {
+    let mut vm = startup(&opts.ini, &opts.modules);
     if let Some(lm) = &opts.lines {
         let mut argv = vec![b"Standard input code".to_vec()];
         argv.extend(opts.args.iter().cloned());

@@ -754,6 +754,9 @@ impl Vm {
                     self.check_deferred()?;
                 }
                 Op::Return { src } => {
+                    if goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
+                    }
                     let v = self.get_hot(src)?;
                     if let Some(v) = self.do_return(v, false)? {
                         return Ok(v);

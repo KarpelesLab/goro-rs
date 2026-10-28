@@ -228,14 +228,6 @@ pub static MODULE: Module = Module {
             disk_free_space,
         ),
         (
-            "function is_uploaded_file(string $filename): bool",
-            ret_false,
-        ),
-        (
-            "function move_uploaded_file(string $from, string $to): bool",
-            ret_false,
-        ),
-        (
             "function fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false",
             fputcsv,
         ),
@@ -843,7 +835,7 @@ pub fn open_stream(
             }
             b"input" => Stream::new(
                 Backing::Memory {
-                    data: Vec::new(),
+                    data: vm.out.sapi.input.clone(),
                     pos: 0,
                 },
                 b"rb",
@@ -1888,9 +1880,22 @@ fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &f, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
-    let data = read_rest(vm, &mut s);
-    vm.echo(&data);
-    Ok(Value::Int(data.len() as i64))
+    // In chunks: the file may be larger than memory_limit (test
+    // ext/standard/tests/file/bug22414).
+    let mut buf = vec![0u8; 64 << 10];
+    let mut total = 0usize;
+    loop {
+        match s.read_some(vm, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                vm.echo(&buf[..n]);
+                total += n;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    Ok(Value::Int(total as i64))
 }
 
 fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
@@ -2413,9 +2418,6 @@ fn noop(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
-}
-fn ret_false(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(false))
 }
 fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))

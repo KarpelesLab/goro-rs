@@ -19,7 +19,6 @@ pub static MODULE: Module = Module {
     classes: &[("uconverter", UCONV_CLASS)],
     methods: &[
         ("uconverter::__construct", u_construct),
-        ("uconverter::__destruct", u_destruct),
         ("uconverter::convert", u_convert),
         ("uconverter::fromucallback", u_from_callback),
         ("uconverter::toucallback", u_to_callback),
@@ -86,7 +85,6 @@ const UCONV_CLASS: &str = r#"<?php class UConverter {
     public const int CESU8 = 31;
     public const int IMAP_MAILBOX = 32;
     public function __construct(?string $destination_encoding = null, ?string $source_encoding = null) {}
-    public function __destruct() {}
     public function convert(string $str, bool $reverse = false): string|false {}
     public function fromUCallback(int $reason, array $source, int $codePoint, &$error): string|int|array|null {}
     public static function getAliases(string $name): array|false|null {}
@@ -124,6 +122,7 @@ fn hooks() -> NativeHooks {
                 store(to, c);
             }
         }),
+        destroy: Some(on_destroy),
         ..Default::default()
     }
 }
@@ -396,8 +395,19 @@ fn u_convert(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
-fn u_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let o = a.this_obj().clone();
+/// The converters close when the object goes: user callbacks see it
+/// (UConverter has no `__destruct`; an exception they throw surfaces at
+/// the statement that released the object).
+fn on_destroy(vm: &mut Vm, o: &ObjRef) {
+    if let Err(e) = close(vm, o)
+        && vm.err.deferred.is_none()
+    {
+        vm.err.deferred = Some(e);
+    }
+}
+
+fn close(vm: &mut Vm, o: &ObjRef) -> R<Value> {
+    let o = o.clone();
     let Some(closed) = with_obj::<UConv, bool>(&o, |x| std::mem::replace(&mut x.v.closed, true))
     else {
         return Ok(Value::Null);
