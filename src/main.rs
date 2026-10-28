@@ -58,6 +58,10 @@ fn usage() -> &'static str {
 /// available without a build script: a fixed text).
 const BUILT: &str = "Jan  1 2026 00:00:00";
 
+/// Counts heap use for memory_limit (PHP manual: memory_limit).
+#[global_allocator]
+static ALLOC: goro_runtime::mem::CountingAlloc = goro_runtime::mem::CountingAlloc;
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args
@@ -212,6 +216,12 @@ fn cli(args: Vec<OsString>) -> i32 {
                 None => (long, None),
             };
             let name = String::from_utf8_lossy(name).into_owned();
+            // goro's own: memory_limit=-1 without the 4 GB backstop.
+            if name == "unlimited-mem" && val.is_none() {
+                goro_engine::vm::setup::set_unlimited_memory(true);
+                i += 1;
+                continue;
+            }
             match LONG.iter().find(|(n, _)| *n == name) {
                 Some((_, c)) => opts.push((*c, val)),
                 None => {

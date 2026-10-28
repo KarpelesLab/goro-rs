@@ -633,6 +633,9 @@ impl Vm {
                 }
                 Op::Jmp { t } => {
                     self.ex.ip = t as usize;
+                    if goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
+                    }
                     continue;
                 }
                 Op::JmpZ { c, t } => {
@@ -653,6 +656,9 @@ impl Vm {
                     }
                 }
                 Op::JmpNZ { c, t } => {
+                    if goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
+                    }
                     if let Some(Value::Bool(b)) = self.peek(c) {
                         // A bool temporary holds nothing to release.
                         let b = *b;
@@ -670,6 +676,9 @@ impl Vm {
                     }
                 }
                 Op::JmpLt { a, b, t } => {
+                    if goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
+                    }
                     let r = if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         if x < y {
                             self.ex.ip = t as usize;
@@ -933,9 +942,15 @@ impl Vm {
                     }
                 }
                 Op::DoCall { dst } => {
+                    if goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
+                    }
                     if let Some(v) = self.do_call(dst)? {
                         // A native call returned a value.
                         let _ = v;
+                    }
+                    if goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
                     }
                 }
                 Op::CallableConvert { dst } => {
