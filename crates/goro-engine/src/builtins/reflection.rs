@@ -1589,6 +1589,9 @@ fn f_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// it (`<internal:ext>`); `None` for engine-provided methods of user
 /// classes (enum `cases()`...).
 fn func_ext(vm: &Vm, f: &Func) -> Option<&'static str> {
+    if is_closure_invoke(f) {
+        return None;
+    }
     if let Some(c) = f.scope() {
         if c.has_flag(cflags::INTERNAL) {
             return Some(class_ext(vm, c));
@@ -1780,7 +1783,7 @@ fn func_string(
         FuncKind::Native { .. } => vm.native_sig(f).num_required as usize,
     };
     let ret = ret_type_of(vm, f);
-    if !params.is_empty() || ret.is_some() || internal {
+    if !params.is_empty() || ret.is_some() {
         s.push_str(&format!("\n{}  - Parameters [{}] {{\n", indent, params.len()));
         for (i, p) in params.iter().enumerate() {
             let ps = param_string(vm, p, i, i < nreq);
@@ -2188,6 +2191,37 @@ fn class_string(vm: &mut Vm, cls: &Rc<Class>, obj: Option<&ObjRef>) -> R<String>
 
 // ---------------------------------------------------------------- methods
 
+/// `Closure::__invoke` of a closure object: an internal public method with
+/// the closure's parameters and return type (observed on PHP 8.5:
+/// "Method [ <internal> public method __invoke ]").
+fn closure_invoke(vm: &mut Vm, v: &Value, name: &[u8]) -> Option<Rc<Func>> {
+    let Value::Object(o) = v else { return None };
+    if !name.eq_ignore_ascii_case(b"__invoke") {
+        return None;
+    }
+    let cd = vm.closure_data(o)?;
+    let code = code_of(&cd.func)?.clone();
+    let closure_cls = vm.class_of(o);
+    let f = Func {
+        name: PhpStr::intern(b"__invoke"),
+        lname: PhpStr::intern(b"__invoke"),
+        kind: FuncKind::User(code),
+        flags: mflags::PUBLIC,
+        scope: std::cell::Cell::new(Rc::as_ptr(&closure_cls)),
+        from_trait: std::cell::Cell::new(std::ptr::null()),
+        statics: std::cell::RefCell::new(Vec::new()),
+        proto: std::cell::RefCell::new(None),
+    };
+    Some(Rc::new(f))
+}
+
+/// The synthesized `Closure::__invoke` (no extension, no source).
+fn is_closure_invoke(f: &Func) -> bool {
+    f.code().is_some()
+        && f.lname.as_bytes() == b"__invoke"
+        && f.scope().is_some_and(|c| c.lname.as_bytes() == b"closure")
+}
+
 fn find_method_in(vm: &mut Vm, cls: &Rc<Class>, name: &[u8]) -> R<Rc<Func>> {
     let ln = lower(name);
     if let Some(f) = cls.find_method_str(&ln) {
@@ -2233,7 +2267,10 @@ fn m_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
 
-    let f = find_method_in(vm, &cls, &mname)?;
+    let f = match closure_invoke(vm, &first, &mname) {
+        Some(f) => f,
+        None => find_method_in(vm, &cls, &mname)?,
+    };
     vm.set_prop_raw(&o, b"name", Value::Str(f.name.clone()));
     let cn = f.scope().map(|c| c.name.clone()).unwrap_or_default();
     vm.set_prop_raw(&o, b"class", Value::Str(cn));
@@ -2609,7 +2646,11 @@ fn c_has_method(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn c_get_method(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let c = need_class!(vm, a);
     let n = a.str(0);
-    let f = find_method_in(vm, &c, &n)?;
+    let obj = this_object(a).map(Value::Object).unwrap_or_default();
+    let f = match closure_invoke(vm, &obj, &n) {
+        Some(f) => f,
+        None => find_method_in(vm, &c, &n)?,
+    };
     Ok(Value::Object(new_refl(
         vm,
         "ReflectionMethod",
@@ -2621,8 +2662,12 @@ fn c_methods(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let filter = a.opt_int(0);
     let mut out = PhpArray::new();
     let order = c.method_order.borrow().clone();
+    let obj = this_object(a).map(Value::Object).unwrap_or_default();
     for ln in order {
-        let f = c.methods.borrow().get(&ln).cloned().unwrap();
+        let mut f = c.methods.borrow().get(&ln).cloned().unwrap();
+        if let Some(inv) = closure_invoke(vm, &obj, &ln) {
+            f = inv;
+        }
         if let Some(fl) = filter
             && method_modifiers(&f) & fl == 0
         {
@@ -4187,10 +4232,14 @@ fn par_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         Value::Array(arr) if arr.len() == 2 => {
-            let c = class_arg(vm, &arr.get_int(0).map(|x| x.deref()).unwrap_or_default())?;
+            let target = arr.get_int(0).map(|x| x.deref()).unwrap_or_default();
+            let c = class_arg(vm, &target)?;
             let m = arr.get_int(1).map(|x| x.deref()).unwrap_or_default();
             let m = vm.to_php_str(&m)?;
-            (find_method_in(vm, &c, &m)?, None)
+            match closure_invoke(vm, &target, &m) {
+                Some(f) => (f, None),
+                None => (find_method_in(vm, &c, &m)?, None),
+            }
         }
         Value::Object(ob) => match vm.closure_data(ob) {
             Some(cd) => (cd.func.clone(), Some(ob.clone())),
