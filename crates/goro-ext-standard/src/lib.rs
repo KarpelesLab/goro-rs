@@ -7,4 +7,7 @@ pub mod error;
 pub mod float;
 pub mod math;
 pub mod mt_rand;
+pub mod natcmp;
+pub mod phonetic;
 pub mod printf;
+pub mod strings;
