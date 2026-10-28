@@ -122,6 +122,16 @@ fn libxml_set_streams_context(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ),
         );
     }
+    if let Value::Resource(r) = &v
+        && r.res().kind.borrow().as_bytes() != b"stream-context"
+    {
+        // Test bug63389.phpt.
+        return vm.fthrow(
+            a,
+            "TypeError",
+            "supplied resource is not a valid Stream-Context resource",
+        );
+    }
     vm.ext::<LibxmlState>().context = Some(v);
     Ok(Value::Null)
 }
@@ -435,10 +445,14 @@ pub fn read_url_quiet(vm: &mut Vm, path: &[u8]) -> R<Option<Vec<u8>>> {
         let fp = vm.fs_path(p);
         return Ok(std::fs::read(&fp).ok());
     }
-    let f = vm.call_value(
-        &Value::from(&b"fopen"[..]),
-        vec![Value::from(path), Value::from(&b"rb"[..])],
-    );
+    // Through libxml_set_streams_context()'s context (tests bug54440.phpt,
+    // libxml_set_streams_context_overwrite.phpt).
+    let mut args = vec![Value::from(path), Value::from(&b"rb"[..])];
+    if let Some(c) = vm.ext::<LibxmlState>().context.clone() {
+        args.push(Value::Bool(false));
+        args.push(c);
+    }
+    let f = vm.call_value(&Value::from(&b"fopen"[..]), args);
     match f {
         Ok(Value::Resource(r)) => {
             let b = read_resource(vm, &r);
@@ -573,6 +587,9 @@ impl EntityLoader for PhpLoader {
             let ctx = if self.bare { &empty } else { ctx };
             let dir = match base {
                 _ if self.bare => None,
+                // Remote bases have no directory (test
+                // libxml_set_external_entity_loader_variation1.phpt).
+                Some(b) if b.contains("://") && !b.starts_with("file://") => None,
                 Some(b) => {
                     let d = super::file::dirname_bytes(b.as_bytes());
                     Some(String::from_utf8_lossy(&d).into_owned())

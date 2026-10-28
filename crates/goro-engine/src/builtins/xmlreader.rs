@@ -38,20 +38,20 @@ class XMLReader {
     const int DEFAULTATTRS = 2;
     const int VALIDATE = 3;
     const int SUBST_ENTITIES = 4;
-    public int $attributeCount { get {} }
-    public string $baseURI { get {} }
-    public int $depth { get {} }
-    public bool $hasAttributes { get {} }
-    public bool $hasValue { get {} }
-    public bool $isDefault { get {} }
-    public bool $isEmptyElement { get {} }
-    public string $localName { get {} }
-    public string $name { get {} }
-    public string $namespaceURI { get {} }
-    public int $nodeType { get {} }
-    public string $prefix { get {} }
-    public string $value { get {} }
-    public string $xmlLang { get {} }
+    public int $attributeCount { get {} set {} }
+    public string $baseURI { get {} set {} }
+    public int $depth { get {} set {} }
+    public bool $hasAttributes { get {} set {} }
+    public bool $hasValue { get {} set {} }
+    public bool $isDefault { get {} set {} }
+    public bool $isEmptyElement { get {} set {} }
+    public string $localName { get {} set {} }
+    public string $name { get {} set {} }
+    public string $namespaceURI { get {} set {} }
+    public int $nodeType { get {} set {} }
+    public string $prefix { get {} set {} }
+    public string $value { get {} set {} }
+    public string $xmlLang { get {} set {} }
     public function close(): true {}
     public function getAttribute(string $name): ?string {}
     public function getAttributeNo(int $index): ?string {}
@@ -303,6 +303,13 @@ fn prop(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .and_then(|s| s.split("::").next())
         .unwrap_or("")
         .to_string();
+    // The properties are read-only (observed on PHP 8.5; test 014.phpt).
+    if fname.ends_with("set") {
+        return vm.throw(
+            "Error",
+            &format!("Cannot modify readonly property XMLReader::${name}"),
+        );
+    }
     let o = this(a);
     Ok(prop_value(vm, &o, &name))
 }

@@ -1502,11 +1502,10 @@ fn simplexml_import_dom(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     });
     let Some(node) = node else {
-        return vm.fthrow(
-            a,
-            "TypeError",
-            "Argument #1 ($node) must be of type SimpleXMLElement|DOMNode, invalid given",
-        );
+        // A document without an element, or another node type (test
+        // bug81325.phpt).
+        vm.fwarn(a, "Invalid Nodetype to import")?;
+        return Ok(Value::Null);
     };
     let Some(cls) = class_arg(vm, a, 1)? else {
         return Ok(Value::Null);
@@ -1959,6 +1958,16 @@ fn declared_ns(a: &Arena, n: NodeId, recursive: bool, out: &mut Vec<(String, Str
                 d.prefix.as_deref().unwrap_or("").to_string(),
                 d.uri.to_string(),
             ));
+        }
+        // Dom\XMLDocument keeps declarations as xmlns attributes (test
+        // getDocNamespaces_no_internal_declaration.phpt).
+        for at in a.attrs(n) {
+            if let Some(q) = a.qname(at)
+                && q.ns.as_deref() == Some(goro_xml::tree::XMLNS_NS)
+            {
+                let prefix = if q.prefix.is_some() { q.local.to_string() } else { String::new() };
+                out.push((prefix, a.attr_value(at)));
+            }
         }
         if recursive {
             for c in a.children(n) {
