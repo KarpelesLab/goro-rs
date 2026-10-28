@@ -43,6 +43,7 @@ pub mod var;
 pub mod weakmap;
 pub mod xml;
 pub mod xmlstore;
+pub mod xmlwriter;
 pub mod zlib;
 
 use crate::registry::Module;
@@ -88,5 +89,6 @@ pub fn modules() -> Vec<&'static Module> {
         &uri::MODULE,
         &libxml::MODULE,
         &xml::MODULE,
+        &xmlwriter::MODULE,
     ]
 }
