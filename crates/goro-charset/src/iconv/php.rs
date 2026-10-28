@@ -90,7 +90,13 @@ pub fn strlen<'a>(
     diags: &mut Vec<Diag>,
 ) -> Option<usize> {
     let cs = string_charset(charset.into(), diags)?;
-    Some(decode(cs, s, diags)?.len())
+    match convert::count_chars(cs, s) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            diags.push(conv_diag(&e));
+            None
+        }
+    }
 }
 
 /// `iconv_substr(string $string, int $offset, ?int $length = null, ?string $encoding = null): string|false`.

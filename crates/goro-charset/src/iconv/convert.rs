@@ -399,6 +399,40 @@ pub(crate) fn decode_all(cs: Charset, input: &[u8]) -> Result<Vec<u32>, ConvertE
     Ok(out)
 }
 
+/// Counts the characters of `input` (`iconv_strlen()`), without keeping
+/// them.
+pub(crate) fn count_chars(cs: Charset, input: &[u8]) -> Result<usize, ConvertError> {
+    if cs.is_utf8()
+        && let Ok(s) = std::str::from_utf8(input)
+    {
+        return Ok(s.bytes().filter(|&b| b & 0xC0 != 0x80).count());
+    }
+    let mut dec = cs.decoder();
+    let mut buf = Vec::with_capacity(CHUNK);
+    let mut count = 0;
+    let mut pos = 0;
+    let err = |kind, offset| ConvertError {
+        kind,
+        offset,
+        output: Vec::new(),
+    };
+    while pos < input.len() {
+        buf.clear();
+        match dec.decode(input, &mut pos, &mut buf, CHUNK) {
+            DecodeStatus::Ok => count += buf.len(),
+            DecodeStatus::Illegal(_) | DecodeStatus::IllegalReplace(_) => {
+                return Err(err(ConvertErrorKind::IllegalSequence, pos));
+            }
+            DecodeStatus::Incomplete => return Err(err(ConvertErrorKind::IncompleteSequence, pos)),
+        }
+    }
+    buf.clear();
+    if dec.finish(&mut buf) == DecodeStatus::Incomplete {
+        return Err(err(ConvertErrorKind::IncompleteSequence, pos));
+    }
+    Ok(count + buf.len())
+}
+
 /// Encodes code points with a fresh encoder (no translit, no ignore).
 pub(crate) fn encode_all(cs: Charset, cps: &[u32]) -> Result<Vec<u8>, ConvertError> {
     let mut enc = cs.encoder();
