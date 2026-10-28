@@ -170,6 +170,7 @@ fn hooks() -> NativeHooks {
             }
             Some(a)
         }),
+        static_this: true,
         ..Default::default()
     }
 }
