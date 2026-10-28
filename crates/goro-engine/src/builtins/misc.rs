@@ -326,6 +326,15 @@ fn ini_flag(vm: &Vm, name: &[u8]) -> i64 {
 /// Whether setting `k` to `v` changes a deprecated assert.* setting from
 /// its default (observed on PHP 8.5: "assert.bail INI setting is
 /// deprecated" for `ini_set("assert.bail", "1")`, not for "0").
+fn assert_ini_truthy(v: &[u8]) -> bool {
+    let l = v.to_ascii_lowercase();
+    match &l[..] {
+        b"on" | b"yes" | b"true" => true,
+        b"off" | b"no" | b"false" | b"none" | b"" => false,
+        _ => goro_runtime::convert::str_to_int(&l) != 0,
+    }
+}
+
 pub(crate) fn assert_ini_deprecated(k: &[u8], v: &[u8]) -> bool {
     let truthy = |v: &[u8]| {
         let l = v.to_ascii_lowercase();
@@ -367,6 +376,19 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
                 0,
             );
         }
+    }
+    if ini
+        .iter()
+        .rev()
+        .find(|(n, _)| n.as_slice() == b"allow_url_include")
+        .is_some_and(|(_, v)| assert_ini_truthy(v))
+    {
+        let _ = vm.raise_at(
+            crate::vm::errors::E_DEPRECATED,
+            "Directive 'allow_url_include' is deprecated",
+            goro_runtime::PhpStr::from("Unknown"),
+            0,
+        );
     }
     for k in [
         &b"mbstring.http_input"[..],
