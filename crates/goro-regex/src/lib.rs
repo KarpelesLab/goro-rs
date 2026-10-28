@@ -13,6 +13,33 @@
 //! assert_eq!(m.group(0), Some((3, 10)));
 //! assert_eq!(re.group_index(b"year"), Some(1));
 //! ```
+//!
+//! # Use from ext/pcre
+//!
+//! - [`php::compile`] takes a whole PHP pattern (`/.../imsxuADSUXJn`),
+//!   checks delimiters and modifiers, and compiles it; the error's
+//!   [`php::PhpCompileError::message`] is the text after `preg_*(): ` in
+//!   PHP's warning ("Compilation failed: ... at offset N", "No ending
+//!   delimiter ...", "Unknown modifier ...").
+//! - [`php::GlobalMatcher`] runs PHP's global loop for preg_match_all,
+//!   preg_replace(_callback) and preg_split (after an empty match, a
+//!   non-empty anchored retry, then a one-character step). After each
+//!   [`next_match`](php::GlobalMatcher::next_match) the groups are in
+//!   `caps`: [`Captures::get`] gives byte offsets, [`Captures::mark`] the
+//!   last (*MARK), [`Regex::group_names`] the names for named keys.
+//! - Single matches (preg_match with an offset, PREG_OFFSET_CAPTURE) use
+//!   [`Regex::exec_with`] with a reused [`Scratch`] and [`Captures`];
+//!   [`MatchOptions`] carries anchored / notempty / notempty_atstart /
+//!   no_utf_check.
+//! - [`Limits::new`]`(pcre.backtrack_limit, pcre.recursion_limit)` gives
+//!   the non-JIT accounting; setting `jit_stack` to
+//!   `Some(`[`Limits::PHP_JIT_STACK`]`)` gives that of pcre.jit=1 (a
+//!   192 KiB JIT stack, no depth limit). [`php::preg_error_code`] maps a
+//!   [`MatchError`] to `preg_last_error()` (PREG_BACKTRACK_LIMIT_ERROR,
+//!   PREG_RECURSION_LIMIT_ERROR, PREG_JIT_STACKLIMIT_ERROR,
+//!   PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR, PREG_INTERNAL_ERROR).
+//! - [`php::expand_replacement`] expands `$n`, `${n}` and `\n` in a
+//!   preg_replace replacement.
 
 pub mod ast;
 pub mod class;

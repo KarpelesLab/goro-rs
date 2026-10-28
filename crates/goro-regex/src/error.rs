@@ -1,7 +1,7 @@
 //! Compile and match errors.
 //!
 //! The compile error texts are the ones PCRE2 reports and PHP prints as
-//! "preg_match(): Compilation failed: <message> at offset N" (observed on
+//! `preg_match(): Compilation failed: <message> at offset N` (observed on
 //! PHP 8.5 with PCRE2 10.46, and in the `--EXPECT--` sections of
 //! ext/pcre/tests). pcre2api: "the textual error messages that are obtained by
 //! calling pcre2_get_error_message() ... should be self-explanatory".

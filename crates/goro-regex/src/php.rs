@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Why a PHP pattern string could not be split into regex and modifiers.
-/// These are PHP warnings ("preg_match(): <message>").
+/// These are PHP warnings (`preg_match(): <message>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatternError {
     Empty,

@@ -55,3 +55,7 @@ bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
   matches `token_get_all()`; every `--FILE--` section of the php-src
   tests that PHP accepts parses, and the in-file parse errors the tests
   expect come out with PHP's message and line (`tools/syntax-corpus.sh`).
+- `goro-regex`: PCRE2 10.46-compatible regex engine for ext/pcre (syntax,
+  PHP modifiers, compile error messages and offsets, backtrack/recursion
+  limit and JIT stack accounting, Unicode 16.0), checked against PHP 8.5 on
+  ~220k fixture cases (`tools/regex_fixtures/`).

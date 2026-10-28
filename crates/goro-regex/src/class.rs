@@ -142,9 +142,9 @@ impl Default for CharSet {
 
 impl CharSet {
     /// Whether PCRE2 compiles this as a class (rather than a character
-    /// type such as \w or \p, or a negated character such as [^b]); a
+    /// type such as `\w` or `\p`, or a negated character such as `[^b]`); a
     /// greedy repeat of a class counts one more try (observed on PHP 8.5:
-    /// /[a-z]+ing/ needs one more match limit than /\w+ing/ or /[^b]+ing/).
+    /// `/[a-z]+ing/` needs one more match limit than `/\w+ing/` or `/[^b]+ing/`).
     pub fn pcre_class(&self) -> bool {
         if self.op_size < 33 {
             return false;
@@ -651,7 +651,7 @@ pub fn posix_ascii(name: &str, c: u32) -> bool {
     }
 }
 
-/// UCP definitions of [:graph:], [:print:], [:punct:] (pcre2pattern: "Four
+/// UCP definitions of `[:graph:]`, `[:print:]`, `[:punct:]` (pcre2pattern: "Four
 /// other POSIX classes are handled specially in UCP mode").
 pub fn ucp_graph(c: u32) -> bool {
     if c == 0x061c || c == 0x180e || (0x2066..=0x2069).contains(&c) {
