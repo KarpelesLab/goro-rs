@@ -71,3 +71,30 @@ fn phpt_datetime_math() {
     println!("datetime math: {bad} of {total} differ");
     assert_eq!(bad, 0);
 }
+
+#[test]
+fn phpt_datetime_massive() {
+    // DateTime_{diff,days,add,sub}-massive.phpt (DateTime_data-massive.inc)
+    let ny = TimeZone::from_id("America/New_York").unwrap();
+    let now = make("2021-06-15 12:00", &ny);
+    let at = |y: i64| now.set_date(y, 1, 1).set_time(16, 18, 2, 0);
+    let (pos, neg) = (at(333_333), at(-333_333));
+    let d = interval::diff(&neg, &pos, false);
+    assert_eq!(
+        (d.y, d.m, d.d, d.invert, d.days),
+        (666_666, 0, 0, false, Some(243_494_757))
+    );
+    assert_eq!(
+        String::from_utf8(d.format(b"P%R%yY%mM%dDT%hH")).unwrap(),
+        "P+666666Y0M0DT0H"
+    );
+    let d = interval::diff(&pos, &neg, false);
+    assert_eq!((d.y, d.invert, d.days), (666_666, true, Some(243_494_757)));
+    let spec = Interval::parse_iso(b"P666666Y").unwrap();
+    let ymd = |d: &DateTime| String::from_utf8(d.format(b"Y-m-d H:i:s")).unwrap();
+    assert_eq!(ymd(&interval::add(&neg, &spec, 1)), "333333-01-01 16:18:02");
+    assert_eq!(
+        ymd(&interval::add(&pos, &spec, -1)),
+        "-333333-01-01 16:18:02"
+    );
+}
