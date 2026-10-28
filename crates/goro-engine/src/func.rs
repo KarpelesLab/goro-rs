@@ -269,4 +269,35 @@ impl<'a> Args<'a> {
     pub fn this_obj(&self) -> &ObjRef {
         self.this.as_ref().expect("method called without $this")
     }
+
+    /// The function's name as PHP prefixes diagnostics (`strlen`,
+    /// `ArrayObject::offsetGet`).
+    pub fn fname(&self) -> String {
+        self.func.display_name()
+    }
+}
+
+impl Vm {
+    /// A warning prefixed with the function name (`"f(): msg"`), as PHP
+    /// reports diagnostics of internal functions.
+    pub fn fwarn(&mut self, a: &Args, msg: &str) -> R<()> {
+        let m = format!("{}(): {}", a.fname(), msg);
+        self.warn(&m)
+    }
+
+    pub fn fnotice(&mut self, a: &Args, msg: &str) -> R<()> {
+        let m = format!("{}(): {}", a.fname(), msg);
+        self.notice_msg(&m)
+    }
+
+    pub fn fdeprecated(&mut self, a: &Args, msg: &str) -> R<()> {
+        let m = format!("{}(): {}", a.fname(), msg);
+        self.deprecated(&m)
+    }
+
+    /// Throws `class` with `"f(): msg"`.
+    pub fn fthrow<T>(&mut self, a: &Args, class: &str, msg: &str) -> R<T> {
+        let m = format!("{}(): {}", a.fname(), msg);
+        self.throw(class, &m)
+    }
 }
