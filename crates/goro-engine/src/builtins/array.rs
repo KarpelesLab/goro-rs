@@ -353,7 +353,7 @@ fn ref_array(vm: &mut Vm, a: &Args, i: usize, pname: &str) -> R<(PhpRef, PhpArra
                 "Argument #{} (${}) must be of type array, {} given",
                 i + 1,
                 pname,
-                other.type_name_for_error()
+                Vm::type_name_given(&other)
             ),
         ),
     }
@@ -514,7 +514,7 @@ fn arrays_from(vm: &mut Vm, a: &Args, start: usize) -> R<Vec<PhpArray>> {
                     &format!(
                         "Argument #{} must be of type array, {} given",
                         i + 1,
-                        other.type_name_for_error()
+                        Vm::type_name_given(&other)
                     ),
                 );
             }
@@ -853,7 +853,7 @@ fn range(vm: &mut Vm, a: &mut Args) -> R<Value> {
                         "Argument #{} (${}) must be of type string|int|float, {} given",
                         argn,
                         name,
-                        other.type_name_for_error()
+                        Vm::type_name_given(&other)
                     ),
                 );
             }
@@ -1425,7 +1425,7 @@ fn array_walk_common(vm: &mut Vm, a: &mut Args, recursive: bool) -> R<Value> {
                 "TypeError",
                 &format!(
                     "Argument #1 ($array) must be of type array, {} given",
-                    other.type_name_for_error()
+                    Vm::type_name_given(&other)
                 ),
             );
         }
@@ -1736,6 +1736,13 @@ fn array_multisort(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut flag_set = false;
     for i in 0..a.len() {
         let v = a.val(i);
+        // Tests array_multisort_variation1/2.phpt: only the first
+        // parameter is named in messages.
+        let what = if i == 0 {
+            "Argument #1 ($array)".to_string()
+        } else {
+            format!("Argument #{}", i + 1)
+        };
         match v {
             Value::Array(arr) => {
                 cols.push(Col {
@@ -1748,67 +1755,40 @@ fn array_multisort(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 flag_set = false;
             }
             Value::Int(n) => {
-                let argn = i + 1;
-                let pname = if i == 0 { "$array" } else { "$rest" };
-                if cols.is_empty() {
+                let is_order = n == 3 || n == 4;
+                let is_flag = matches!(n & !SORT_FLAG_CASE, 0 | 1 | 2 | 5 | 6);
+                if !is_order && !is_flag {
+                    return vm.fthrow(
+                        a,
+                        "ValueError",
+                        &format!("{} must be a valid sort flag", what),
+                    );
+                }
+                let dup = cols.is_empty() || (is_order && order_set) || (is_flag && flag_set);
+                if dup {
                     return vm.fthrow(
                         a,
                         "TypeError",
                         &format!(
-                            "Argument #{} ({}) must be an array or a sort flag",
-                            argn, pname
+                            "{} must be an array or a sort flag that has not already been specified",
+                            what
                         ),
                     );
                 }
-                match n {
-                    3 | 4 => {
-                        if order_set {
-                            return vm.fthrow(
-                                a,
-                                "TypeError",
-                                &format!(
-                                    "Argument #{} ({}) must be an array or a sort flag that has not already been specified",
-                                    argn, pname
-                                ),
-                            );
-                        }
-                        order_set = true;
-                        cols.last_mut().unwrap().desc = n == 3;
-                    }
-                    0 | 1 | 2 | 5 | 6 | 9 | 10 | 14 => {
-                        if flag_set {
-                            return vm.fthrow(
-                                a,
-                                "TypeError",
-                                &format!(
-                                    "Argument #{} ({}) must be an array or a sort flag that has not already been specified",
-                                    argn, pname
-                                ),
-                            );
-                        }
-                        flag_set = true;
-                        cols.last_mut().unwrap().flags = n;
-                    }
-                    _ => {
-                        return vm.fthrow(
-                            a,
-                            "ValueError",
-                            &format!("Argument #{} ({}) must be a valid sort flag", argn, pname),
-                        );
-                    }
+                let col = cols.last_mut().unwrap();
+                if is_order {
+                    order_set = true;
+                    col.desc = n == 3;
+                } else {
+                    flag_set = true;
+                    col.flags = n;
                 }
             }
-            other => {
-                let pname = if i == 0 { "$array" } else { "$rest" };
-                let _ = other;
+            _ => {
                 return vm.fthrow(
                     a,
                     "TypeError",
-                    &format!(
-                        "Argument #{} ({}) must be an array or a sort flag",
-                        i + 1,
-                        pname
-                    ),
+                    &format!("{} must be an array or a sort flag", what),
                 );
             }
         }
@@ -1818,7 +1798,7 @@ fn array_multisort(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let n = cols[0].arr.len();
     if cols.iter().any(|c| c.arr.len() != n) {
-        return vm.fthrow(a, "ValueError", "Array sizes are inconsistent");
+        return vm.throw("ValueError", "Array sizes are inconsistent");
     }
     let data: Vec<Vec<(Key, Value)>> = cols.iter().map(|c| entries(&c.arr)).collect();
     let mut idx: Vec<usize> = (0..n).collect();
@@ -2207,7 +2187,7 @@ fn arrays_from_range(vm: &mut Vm, a: &Args, start: usize, end: usize) -> R<Vec<P
                     &format!(
                         "Argument #{} must be of type array, {} given",
                         i + 1,
-                        other.type_name_for_error()
+                        Vm::type_name_given(&other)
                     ),
                 );
             }

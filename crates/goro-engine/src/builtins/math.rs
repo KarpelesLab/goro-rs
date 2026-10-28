@@ -392,7 +392,7 @@ fn minmax(vm: &mut Vm, a: &mut Args, want_max: bool) -> R<Value> {
                     "TypeError",
                     &format!(
                         "Argument #1 ($value) must be of type array, {} given",
-                        v.type_name_for_error()
+                        Vm::type_name_given(&v)
                     ),
                 );
             }

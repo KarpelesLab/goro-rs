@@ -437,6 +437,26 @@ pub(crate) fn sr<T>(vm: &mut Vm, r: Result<T, StdError>) -> R<T> {
     r.map_err(|e| std_err(vm, e))
 }
 
+/// Refuses an allocation beyond memory_limit with PHP's fatal error (the
+/// engine would otherwise abort on a huge allocation).
+pub(crate) fn alloc_check(vm: &mut Vm, bytes: u128) -> R<()> {
+    let limit = vm.ini.memory_limit;
+    let cap: u128 = if limit < 0 {
+        isize::MAX as u128 / 2
+    } else {
+        limit as u128
+    };
+    if bytes > cap {
+        let shown = if limit < 0 { cap } else { limit as u128 };
+        return Err(vm.fatal(&format!(
+            "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
+            shown,
+            bytes + 25
+        )));
+    }
+    Ok(())
+}
+
 /// The value of an int argument that may also be absent / null.
 fn opt_len(a: &Args, i: usize) -> Option<i64> {
     a.opt_int(i)
@@ -472,6 +492,9 @@ fn str_repeat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let s = a.str(0);
     if times == 1 {
         return Ok(Value::Str(s));
+    }
+    if times > 0 {
+        alloc_check(vm, s.len() as u128 * times as u128)?;
     }
     let r = std_ext::strings::str_repeat(&s, times);
     Ok(sv(sr(vm, r)?))
@@ -623,7 +646,6 @@ fn replace_common(vm: &mut Vm, a: &mut Args, ci: bool) -> R<Value> {
             for (k, v) in arr.iter() {
                 let v = v.deref();
                 let nv = match &v {
-                    Value::Array(_) | Value::Object(_) => v.clone(),
                     Value::Str(s) => one(s, &mut total),
                     other => {
                         let s = vm.to_php_str(other)?;
@@ -812,6 +834,9 @@ fn rtrim(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn str_pad(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let pad: &[u8] = if a.has(2) { a.bytes(2) } else { b" " };
+    if !pad.is_empty() {
+        alloc_check(vm, a.int(1).max(0) as u128)?;
+    }
     let r = std_ext::strings::str_pad(a.bytes(0), a.int(1), pad, a.int_or(3, 1));
     Ok(sv(sr(vm, r)?))
 }
@@ -819,12 +844,7 @@ fn str_pad(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn str_split(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let r = std_ext::strings::str_split(a.bytes(0), a.int_or(1, 1));
     let parts = sr(vm, r)?;
-    if parts.is_empty() {
-        // Observed on PHP 8.5: an empty string gives [""].
-        return Ok(Value::Array(PhpArray::from_values([Value::Str(
-            PhpStr::empty(),
-        )])));
-    }
+    // Test str_split_basic.phpt: an empty string gives an empty array.
     Ok(str_list(parts))
 }
 
@@ -877,12 +897,28 @@ fn nl2br(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn wordwrap(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let brk: &[u8] = if a.has(2) { a.bytes(2) } else { b"\n" };
+    let width = a.int_or(1, 75);
+    if a.bool_or(3, false) && width >= 0 {
+        // Worst case: a break after every `width` bytes.
+        let n = a.bytes(0).len() as u128;
+        let w = width.max(1) as u128;
+        alloc_check(vm, n + n.div_ceil(w) * brk.len() as u128)?;
+    } else if width >= 0 && !brk.is_empty() {
+        let n = a.bytes(0).len() as u128;
+        let spaces = a.bytes(0).iter().filter(|&&c| c == b' ').count() as u128;
+        alloc_check(vm, n + spaces * brk.len() as u128)?;
+    }
     let r = std_ext::strings::wordwrap(a.bytes(0), a.int_or(1, 75), brk, a.bool_or(3, false));
     Ok(sv(sr(vm, r)?))
 }
 
 fn chunk_split(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let end: &[u8] = if a.has(2) { a.bytes(2) } else { b"\r\n" };
+    let chunk = a.int_or(1, 76);
+    if chunk > 0 {
+        let n = a.bytes(0).len() as u128;
+        alloc_check(vm, n + n.div_ceil(chunk as u128) * end.len() as u128)?;
+    }
     let r = std_ext::strings::chunk_split(a.bytes(0), a.int_or(1, 76), end);
     Ok(sv(sr(vm, r)?))
 }
@@ -1264,35 +1300,51 @@ fn strpbrk(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(str_or_false(sr(vm, r)?))
 }
 
-/// strtok() state: the string being tokenized and the position.
+/// strtok() state: the string being tokenized (None when not started or
+/// started on an empty string) and the position.
 #[derive(Default)]
 struct StrtokState {
-    s: PhpStr,
+    s: Option<PhpStr>,
     pos: usize,
 }
 
 fn strtok(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let token = match a.opt_str(1) {
         Some(t) => {
+            let s = a.str(0);
             let st = vm.ext::<StrtokState>();
-            st.s = a.str(0);
+            st.s = Some(s);
             st.pos = 0;
             t
         }
         None => a.str(0),
     };
     let st = vm.ext::<StrtokState>();
-    let s = st.s.clone();
+    let Some(s) = st.s.clone() else {
+        if a.opt_str(1).is_none() {
+            // Tests strtok_variation3.phpt and friends.
+            vm.fwarn(
+                a,
+                "Both arguments must be provided when starting tokenization",
+            )?;
+        }
+        return Ok(Value::Bool(false));
+    };
     let mut mask = [false; 256];
     for &c in token.iter() {
         mask[c as usize] = true;
     }
     let mut p = st.pos;
+    if p >= s.len() {
+        return Ok(Value::Bool(false));
+    }
     while p < s.len() && mask[s[p] as usize] {
         p += 1;
     }
     if p >= s.len() {
-        st.pos = s.len();
+        // Only delimiters were left: the tokenization ends (observed on
+        // PHP 8.5: a later strtok($token) warns).
+        st.s = None;
         return Ok(Value::Bool(false));
     }
     let start = p;
