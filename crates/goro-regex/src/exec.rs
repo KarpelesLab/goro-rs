@@ -1660,7 +1660,8 @@ impl Vm<'_, '_> {
             Some(OpStep::Lit(i)) => Some(self.prog.lits[*i as usize][0]),
             _ => None,
         };
-        self.count = op.frames as u64;
+        // The first try is the repeat's own frame.
+        self.count = op.frames as u64 - 1;
         let limit = self.limits.match_limit as u64;
         let n_steps = op.steps.len();
         let finish = |me: usize, k: usize| (if k == UNSET { start } else { k }, me);
