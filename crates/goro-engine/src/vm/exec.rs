@@ -1005,8 +1005,12 @@ impl Vm {
                 Op::Error { msg, kind } => {
                     let m = self.code_ref().consts[msg as usize].clone();
                     let m = m.as_str().map(|s| s.to_string_lossy()).unwrap_or_default();
-                    let _ = kind;
-                    return Err(self.throw_error_msg("Error", &m));
+                    if kind == 1 {
+                        // A run-time notice.
+                        self.notice_msg(&m)?;
+                    } else {
+                        return Err(self.throw_error_msg("Error", &m));
+                    }
                 }
                 Op::MatchError { src } => {
                     let v = self.get(src)?;

@@ -2485,6 +2485,16 @@ impl Vm {
             if cls.lname.as_bytes() == b"closure" {
                 cls.flags.set(cls.flags.get() | cflags::NO_DYNAMIC);
             }
+            // tests Zend/tests/generators/clone, dynamic_properties,
+            // errors/serialize_unserialize_error
+            if cls.lname.as_bytes() == b"generator" {
+                cls.flags.set(
+                    cls.flags.get()
+                        | cflags::NO_DYNAMIC
+                        | cflags::NOT_CLONEABLE
+                        | cflags::NOT_SERIALIZABLE,
+                );
+            }
             // Stub-only markers (php-src stubs' @not-serializable).
             if cls
                 .attrs

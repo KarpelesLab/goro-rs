@@ -1232,13 +1232,11 @@ impl Vm {
     }
 
     pub fn gen_throw(&mut self, g: &ObjRef, e: ObjRef) -> R<Value> {
+        // A generator not started yet first runs to its first yield (PHP
+        // manual: Generator::throw).
+        self.gen_ensure_started(g)?;
         let st = self.with_gen(g, |d| d.state).unwrap();
-        if st == GenState::Created {
-            // Thrown before the first yield: the generator is closed.
-            self.with_gen(g, |d| {
-                d.state = GenState::Done;
-                d.frame = None;
-            });
+        if st == GenState::Done {
             return Err(super::Unwind::Throw(e));
         }
         self.with_gen(g, |d| d.advanced = true);
@@ -1248,6 +1246,8 @@ impl Vm {
     }
 
     pub fn gen_return_value(&mut self, g: &ObjRef) -> R<Value> {
+        // Auto-priming (test Zend/tests/generators/get_return).
+        self.gen_ensure_started(g)?;
         let (st, ret) = self.with_gen(g, |d| (d.state, d.ret.clone())).unwrap();
         match (st, ret) {
             (GenState::Done, Some(v)) => Ok(v),

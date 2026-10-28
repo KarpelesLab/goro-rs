@@ -711,10 +711,12 @@ fn closure_invoke(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn closure_get_current(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    for f in vm.ex.frames.iter().rev() {
-        if let Some(c) = &f.closure {
-            return Ok(Value::Object(c.clone()));
-        }
+    // The calling function only (test Zend/tests/closures/
+    // closure_get_current).
+    if let Some(f) = vm.ex.frames.last()
+        && let Some(c) = &f.closure
+    {
+        return Ok(Value::Object(c.clone()));
     }
     vm.throw("Error", "Current function is not a closure")
 }
