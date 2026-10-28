@@ -180,9 +180,16 @@ pub fn resolve(p: &Parsed, base_ts: i64, base_us: u32, zone: &TimeZone, mode: Mo
     let extra_s = us.div_euclid(1_000_000);
     let us = us.rem_euclid(1_000_000) as u32;
     let local = civil::civil_to_ts(y, m, d, h, i, s.saturating_add(extra_s));
-    let ts = match mode {
-        Mode::Create => target_zone.local_to_ts(local),
-        Mode::Modify => target_zone.local_to_ts_with_dst(local, base.is_dst),
+    let ts = match (mode, &p.zone) {
+        // an identifier written in the string reads an overlap as its DST
+        // time ("2021-10-31 02:30 Europe/Paris" is CEST, Dublin's winter
+        // GMT included; the same time with the zone as argument is CET;
+        // observed on PHP 8.5)
+        (Mode::Create, Some(ParsedZone::Zone(TimeZone::Id(_)))) => {
+            target_zone.local_to_ts_with_dst(local, true)
+        }
+        (Mode::Create, _) => target_zone.local_to_ts(local),
+        (Mode::Modify, _) => target_zone.local_to_ts_with_dst(local, base.is_dst),
     };
     DateTime::from_ts(ts, us, target_zone)
 }

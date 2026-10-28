@@ -143,6 +143,71 @@ fn constructor_errors() {
 }
 
 #[test]
+fn overlap_reading_by_zone_source() {
+    // observed on PHP 8.5 (default zone UTC): (string, zone, unix time with
+    // the zone in the string, unix time with the zone as argument)
+    let utc = z("UTC");
+    for (s, zone, in_string, as_arg) in [
+        ("2021-10-31 02:30", "Europe/Paris", 1635640200, 1635643800),
+        ("2021-10-31 01:30", "Europe/London", 1635640200, 1635643800),
+        (
+            "2021-11-07 01:30",
+            "America/New_York",
+            1636263000,
+            1636263000,
+        ),
+        (
+            "2021-04-04 01:45",
+            "Australia/Lord_Howe",
+            1617461100,
+            1617462900,
+        ),
+        (
+            "2021-04-04 02:30",
+            "Australia/Sydney",
+            1617463800,
+            1617467400,
+        ),
+        (
+            "2018-02-17 23:30",
+            "America/Sao_Paulo",
+            1518917400,
+            1518917400,
+        ),
+        ("2021-10-31 01:30", "Europe/Dublin", 1635643800, 1635643800),
+        ("2021-03-28 02:30", "Europe/Paris", 1616895000, 1616895000),
+        (
+            "2021-11-07 02:00",
+            "America/New_York",
+            1636268400,
+            1636268400,
+        ),
+    ] {
+        let with = format!("{s} {zone}");
+        assert_eq!(
+            resolve::create(with.as_bytes(), NOW, 0, &utc).unwrap().ts,
+            in_string,
+            "{with}"
+        );
+        assert_eq!(
+            resolve::strtotime(with.as_bytes(), NOW, &utc),
+            Some(in_string),
+            "{with}"
+        );
+        assert_eq!(
+            resolve::create(s.as_bytes(), NOW, 0, &z(zone)).unwrap().ts,
+            as_arg,
+            "{s} in {zone}"
+        );
+        assert_eq!(
+            resolve::strtotime(s.as_bytes(), NOW, &z(zone)),
+            Some(as_arg),
+            "{s} in {zone}"
+        );
+    }
+}
+
+#[test]
 fn interval_dump_fields() {
     let paris = z("Europe/Paris");
     let a = resolve::create(b"2021-01-01", NOW, 0, &paris).unwrap();
