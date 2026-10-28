@@ -6,3 +6,8 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+# Cross-check only (tests/strtotime_crate.rs): the maintainer's parser of
+# PHP-style date/time expressions, without its own zone database.
+strtotime = { version = "0.1.2", default-features = false }

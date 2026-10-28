@@ -240,7 +240,7 @@ fn monthabbr() -> impl Pat {
 }
 fn monthroman() -> impl Pat {
     // Roman numerals are upper case in the manual's grammar.
-    move |s: &[u8], p: usize, out: &mut Ends| {
+    move |s: &[u8], p: usize, k: &mut dyn FnMut(usize)| {
         for w in MONTH_ROMAN {
             let w = w.as_bytes();
             if s.len() >= p + w.len()
@@ -249,7 +249,7 @@ fn monthroman() -> impl Pat {
                     .zip(w)
                     .all(|(a, b)| *a == b.to_ascii_uppercase())
             {
-                out.push(p + w.len());
+                k(p + w.len());
             }
         }
     }
@@ -524,9 +524,68 @@ fn day_digits() -> impl Pat {
     )
 }
 
+/// Whether `rule` can match at `p`, from the first byte and the length of
+/// the run of digits there (a cheap filter before the full match).
+pub(crate) fn can_start(rule: Rule, s: &[u8], p: usize) -> bool {
+    use Rule::*;
+    let c = s[p];
+    let run = s[p..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let t = c == b't' || c == b'T';
+    let alpha = c.is_ascii_alphabetic();
+    match rule {
+        Timestamp | TimestampMs => c == b'@',
+        TimeTiny24 => t,
+        TimeShort24 | TimeLong24 | Iso8601Long => t || (1..=2).contains(&run),
+        GnuNoColon => t || run >= 4,
+        Iso8601NoColon => t || run >= 6,
+        Iso8601Date4 => run == 4 || c == b'+' || c == b'-',
+        Iso8601DateX => c == b'+' || c == b'-',
+        Relative => run >= 1 || c == b'+' || c == b'-',
+        TzCorrection => c == b'+' || c == b'-' || c == b'G',
+        Tz => alpha || c == b'(',
+        TimeTiny12 | TimeShort12 | TimeLong12 | MsSqlTime | AmericanShort | American
+        | PointedDate4 | PointedDate2 | DateFull | DateNoYearRev | Clf => (1..=2).contains(&run),
+        Iso8601Date2 => run == 2,
+        GnuDateShort | PgTextReverse => (1..=4).contains(&run),
+        Iso8601DateSlash | DateSlash | GnuDateShorter | DateNoDayRev | Soap | Wddx | Exif
+        | IsoWeekDay | IsoWeek => run == 4,
+        PgYearDotDay => run == 4 || run >= 7,
+        Year4 => run >= 4,
+        DateNoColon | XmlRpc | XmlRpcNoColon => run >= 8,
+        DateNoDay
+        | DateTextual
+        | DateNoYear
+        | PgTextShort
+        | DateShortWithTimeShort12
+        | DateShortWithTimeLong12
+        | DateShortWithTimeShort
+        | DateShortWithTimeLong
+        | MonthFull
+        | MonthAbbr => {
+            alpha && (starts_with_any(s, p, MONTH_ABBR) || matches!(c, b'I' | b'V' | b'X'))
+        }
+        DayFull | DayAbbr => alpha && starts_with_any(s, p, DAY_ABBR),
+        WeekdaySpecial => alpha && starts_with_any(s, p, &["weekday"]),
+        WeekdayOf | RelativeText | RelativeTextWeek => {
+            alpha && (starts_with_any(s, p, RELTEXT_NUMBER) || starts_with_any(s, p, RELTEXT_TEXT))
+        }
+        _ => alpha,
+    }
+}
+
+fn starts_with_any(s: &[u8], p: usize, words: &[&str]) -> bool {
+    words.iter().any(|w| {
+        let w = w.as_bytes();
+        s.len() >= p + w.len() && s[p..p + w.len()].eq_ignore_ascii_case(w)
+    })
+}
+
 /// Matches `rule` at `p`, returning the longest match length.
 pub(crate) fn match_rule(rule: Rule, s: &[u8], p: usize) -> Option<usize> {
     use Rule::*;
+    if !can_start(rule, s, p) {
+        return None;
+    }
     match rule {
         Yesterday => lit("yesterday").longest(s, p),
         Now => lit("now").longest(s, p),

@@ -77,42 +77,64 @@ pub fn ordinal_suffix(d: u32) -> &'static str {
     }
 }
 
+/// Decimal `v`, zero-padded to `width` (the sign counts, as `{:0w}`).
 fn push_num(out: &mut Vec<u8>, v: i64, width: usize) {
-    use std::io::Write;
-    let _ = write!(out, "{v:0width$}");
+    let mut buf = [0u8; 20];
+    let mut n = v.unsigned_abs();
+    let mut k = buf.len();
+    loop {
+        k -= 1;
+        buf[k] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let digits = buf.len() - k;
+    let sign = usize::from(v < 0);
+    if v < 0 {
+        out.push(b'-');
+    }
+    for _ in digits + sign..width {
+        out.push(b'0');
+    }
+    out.extend_from_slice(&buf[k..]);
 }
 
 /// C's `%04lld`: the sign counts towards the width ("-001").
 fn push_c_pad4(out: &mut Vec<u8>, y: i64) {
-    use std::io::Write;
-    if y < 0 {
-        let _ = write!(out, "-{:03}", y.unsigned_abs());
-    } else {
-        let _ = write!(out, "{y:04}");
-    }
+    push_num(out, y, 4);
 }
 
 /// "Y": at least four digits, "-" for years before year 0.
 fn push_year(out: &mut Vec<u8>, y: i64) {
-    use std::io::Write;
     if y < 0 {
-        let _ = write!(out, "-{:04}", y.unsigned_abs());
-    } else {
-        let _ = write!(out, "{y:04}");
+        out.push(b'-');
     }
+    push_num(out, y.unsigned_abs().min(i64::MAX as u64) as i64, 4);
+}
+
+/// Two digits.
+#[inline]
+fn push2(out: &mut Vec<u8>, v: u32) {
+    out.push(b'0' + (v / 10 % 10) as u8);
+    out.push(b'0' + (v % 10) as u8);
 }
 
 /// "+hh:mm" (with_colon) or "+hhmm"; seconds are dropped.
 pub fn push_offset(out: &mut Vec<u8>, offset: i32, with_colon: bool) {
-    use std::io::Write;
-    let sign = if offset < 0 { '-' } else { '+' };
+    out.push(if offset < 0 { b'-' } else { b'+' });
     let a = offset.unsigned_abs();
     let (h, m) = (a / 3600, a / 60 % 60);
-    if with_colon {
-        let _ = write!(out, "{sign}{h:02}:{m:02}");
+    if h >= 100 {
+        push_num(out, h as i64, 2);
     } else {
-        let _ = write!(out, "{sign}{h:02}{m:02}");
+        push2(out, h);
     }
+    if with_colon {
+        out.push(b':');
+    }
+    push2(out, m);
 }
 
 /// Formats `t` (in zone `zone`) with a PHP date format string.
@@ -154,20 +176,16 @@ pub fn format_into(out: &mut Vec<u8>, fmt: &[u8], t: &LocalTime, zone: &TimeZone
             b'L' => out.push(if civil::is_leap(t.y) { b'1' } else { b'0' }),
             b'o' => push_num(out, civil::iso_week_date(t.y, t.m, t.d).0, 0),
             b'X' => {
-                let _ = if t.y < 0 {
-                    write!(out, "-{:04}", t.y.unsigned_abs())
-                } else {
-                    write!(out, "+{:04}", t.y)
-                };
+                if t.y >= 0 {
+                    out.push(b'+');
+                }
+                push_year(out, t.y);
             }
             b'x' => {
-                let _ = if t.y < 0 {
-                    write!(out, "-{:04}", t.y.unsigned_abs())
-                } else if t.y >= 10_000 {
-                    write!(out, "+{}", t.y)
-                } else {
-                    write!(out, "{:04}", t.y)
-                };
+                if t.y >= 10_000 {
+                    out.push(b'+');
+                }
+                push_year(out, t.y);
             }
             b'Y' => push_year(out, t.y),
             b'y' => {
@@ -212,7 +230,9 @@ pub fn format_into(out: &mut Vec<u8>, fmt: &[u8], t: &LocalTime, zone: &TimeZone
             b'v' => push_num(out, (t.us / 1000) as i64, 3),
             // zone
             b'e' => match zone {
-                TimeZone::Offset(o) => push_offset(out, *o, true),
+                TimeZone::Offset(o) => {
+                    out.extend_from_slice(crate::tz::format_offset_name(*o).as_bytes())
+                }
                 _ => out.extend_from_slice(zone.name().as_bytes()),
             },
             b'I' => out.push(if t.is_dst { b'1' } else { b'0' }),
@@ -241,11 +261,16 @@ pub fn format_into(out: &mut Vec<u8>, fmt: &[u8], t: &LocalTime, zone: &TimeZone
             // full date/time
             b'c' => {
                 push_c_pad4(out, t.y);
-                let _ = write!(
-                    out,
-                    "-{:02}-{:02}T{:02}:{:02}:{:02}",
-                    t.m, t.d, t.h, t.i, t.s
-                );
+                out.push(b'-');
+                push2(out, t.m);
+                out.push(b'-');
+                push2(out, t.d);
+                out.push(b'T');
+                push2(out, t.h);
+                out.push(b':');
+                push2(out, t.i);
+                out.push(b':');
+                push2(out, t.s);
                 push_offset(out, t.offset, true);
             }
             b'r' => {
