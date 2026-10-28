@@ -805,6 +805,35 @@ impl Vm {
                     // Compound assignments and ++/-- of a typed static
                     // property keep its type (test Zend/tests/
                     // type_declarations/typed_properties_075).
+                    // An untyped one bound to a typed reference keeps that
+                    // reference's types (test Zend/tests/type_declarations/
+                    // typed_properties_102).
+                    if let (PathAction::AssignOp(..) | PathAction::IncDec(_), Some(sp)) =
+                        (path.action, &static_decl)
+                        && sp.ty.is_none()
+                        && r.is_typed()
+                    {
+                        let old = r.get();
+                        let new = match path.action {
+                            PathAction::AssignOp(op, _) => {
+                                let rhs = v.clone().unwrap_or_default().into_deref();
+                                self.binary_op(op, &old, &rhs)?
+                            }
+                            PathAction::IncDec(op) => self.incdec_value(op, &old)?,
+                            _ => unreachable!(),
+                        };
+                        let new = self.typed_ref_value(&r, new)?;
+                        let prev = r.set(new.clone());
+                        drop(prev);
+                        if res != NONE {
+                            let out = match path.action {
+                                PathAction::IncDec(op) if op.is_post() => old,
+                                _ => new,
+                            };
+                            self.put(res, out);
+                        }
+                        return Ok(());
+                    }
                     if let (PathAction::AssignOp(..) | PathAction::IncDec(_), Some(sp)) =
                         (path.action, &static_decl)
                         && let Some(t) = sp.ty.clone()

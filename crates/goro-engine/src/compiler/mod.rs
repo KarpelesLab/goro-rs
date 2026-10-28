@@ -1320,7 +1320,10 @@ impl<'a> Compiler<'a> {
         }
         // A `?->` chain is iterated as a value (test Zend/tests/
         // nullsafe_operator/023).
-        let src = if by_ref && !expr::contains_nullsafe(&f.expr) {
+        let src = if by_ref
+            && !expr::contains_nullsafe(&f.expr)
+            && !matches!(f.expr.kind, ExprKind::Variable(b"this"))
+        {
             self.ref_of(&f.expr)?
         } else {
             self.expr(&f.expr)?

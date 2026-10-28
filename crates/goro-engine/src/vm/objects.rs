@@ -2566,6 +2566,23 @@ impl Vm {
         let info: Rc<dyn goro_runtime::ClassInfo> = cls.clone();
         let n = ObjRef::new(info, slots);
         *n.obj().props.borrow_mut() = o.obj().props.borrow().clone();
+        // The clone's properties hold the typed references too (test
+        // Zend/tests/type_declarations/typed_properties_081).
+        let typed: Vec<(PhpRef, Rc<PropInfo>)> = {
+            let sl = n.obj().slots.borrow();
+            cls.props
+                .borrow()
+                .iter()
+                .filter(|p| p.ty.is_some())
+                .filter_map(|p| match sl.get(p.slot as usize) {
+                    Some(Value::Ref(r)) if r.is_typed() => Some((r.clone(), p.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (r, p) in typed {
+            self.type_ref(&r, &p, Some(&n));
+        }
         let mut c = Some(&*cls);
         while let Some(k) = c {
             if let Some(h) = k.native.clone {
