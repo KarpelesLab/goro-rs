@@ -1026,6 +1026,8 @@ pub mod fflags {
     pub const HAS_DEFAULT_CODE: u32 = 32768;
     pub const DEPRECATED: u32 = 65536;
     pub const NODISCARD: u32 = 131072;
+    /// Some parameter has a type (binding can fail on a type).
+    pub const TYPED_PARAMS: u32 = 1 << 18;
 }
 
 /// Jump table for `switch` / `match`.

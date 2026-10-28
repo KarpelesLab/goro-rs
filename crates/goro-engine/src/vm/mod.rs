@@ -487,7 +487,9 @@ pub struct Vm {
     /// The exception being matched by `catch`.
     pub cur_exception: Option<ObjRef>,
     /// Location used for diagnostics instead of the current line.
-    pub loc_override: Option<(PhpStr, u32)>,
+    /// While a call binds its arguments: the callee, whose declaration
+    /// is where diagnostics of the binding are reported.
+    pub loc_override: Option<*const crate::bytecode::FuncCode>,
     /// Fold internal constants at compile time.
     pub fold_constants: bool,
     /// Values cached by constant fetches.
@@ -537,8 +539,9 @@ impl Vm {
 
     /// The current line (of the running user code).
     pub fn cur_line(&self) -> u32 {
-        if let Some((_, l)) = &self.loc_override {
-            return *l;
+        if let Some(c) = self.loc_override {
+            // SAFETY: set only while the callee's code is held by its frame.
+            return unsafe { (*c).line_start };
         }
         match self.ex.frames.last() {
             Some(f) if !f.code().file.is_empty() => {
@@ -565,8 +568,9 @@ impl Vm {
     }
 
     pub fn cur_file(&self) -> PhpStr {
-        if let Some((f, _)) = &self.loc_override {
-            return f.clone();
+        if let Some(c) = self.loc_override {
+            // SAFETY: as in cur_line.
+            return unsafe { (*c).file.clone() };
         }
         match self.ex.frames.last() {
             Some(f) if !f.code().file.is_empty() => f.code().file.clone(),
@@ -622,6 +626,9 @@ impl Vm {
 
     #[inline]
     pub fn give_args_vec(&mut self, mut v: Vec<Value>) {
+        if v.capacity() == 0 {
+            return;
+        }
         v.clear();
         if self.arg_pool.len() < 64 {
             self.arg_pool.push(v);

@@ -572,6 +572,9 @@ impl<'a> Compiler<'a> {
         if self.strict {
             flags |= fflags::STRICT;
         }
+        if params.iter().any(|p| p.ty.is_some()) {
+            flags |= fflags::TYPED_PARAMS;
+        }
         Ok(FuncCode {
             name,
             class_name: self.class.as_ref().map(|c| c.name.clone()),

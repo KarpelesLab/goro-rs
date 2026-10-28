@@ -1779,43 +1779,21 @@ impl Vm {
             unreachable!()
         };
         let code: &FuncCode = code;
-        if code.flags & fflags::DEPRECATED != 0 {
-            let what = if func.scope().is_some() {
-                "Method"
-            } else {
-                "Function"
-            };
-            let magic = self
-                .magic_call_name
-                .clone()
-                .filter(|_| is_magic_call(&func));
-            let r = self.raise_func_deprecation(code, what, &func, magic.as_ref());
-            if let Err(e) = r {
-                self.discard_pending(p);
-                return Err(e);
-            }
-        }
-        if code.flags & fflags::ABSTRACT != 0 {
-            let r = self.throw(
-                "Error",
-                &format!("Cannot call abstract method {}()", func.display_name()),
-            );
+        if code.flags & (fflags::DEPRECATED | fflags::ABSTRACT | fflags::NODISCARD) != 0
+            && let Err(e) = self.activate_checks(code, &func)
+        {
             self.discard_pending(p);
-            return r;
+            return Err(e);
         }
-        if code.flags & fflags::NODISCARD != 0 && self.caller_discards_result() {
-            let what = if func.scope().is_some() {
-                "method"
-            } else {
-                "function"
-            };
-            if let Err(e) = self.raise_nodiscard(code, what, &func) {
-                self.discard_pending(p);
-                return Err(e);
-            }
-        }
-        let strict = self.caller_strict();
-        let call_loc = if entry || self.ex.frames.is_empty() {
+        let strict = code.flags & fflags::TYPED_PARAMS != 0 && self.caller_strict();
+        // The call site, for binding errors ("called in %s on line %d"):
+        // only computed when the binding can fail.
+        let call_loc = if entry
+            || self.ex.frames.is_empty()
+            || (p.argc >= code.num_required
+                && !p.has_named
+                && code.flags & fflags::TYPED_PARAMS == 0)
+        {
             None
         } else {
             Some((self.cur_file(), self.cur_line()))
@@ -1865,9 +1843,7 @@ impl Vm {
         let Pending { args, .. } = p;
         self.give_args_vec(args);
         self.push_frame(frame);
-        let saved_loc = self
-            .loc_override
-            .replace((code.file.clone(), code.line_start));
+        let saved_loc = self.loc_override.replace(code as *const FuncCode);
         let r = self.bind_args(
             &func,
             code,
@@ -1895,6 +1871,35 @@ impl Vm {
                 let old = unsafe { (*ret).replace(Value::Object(g)) };
                 drop(old);
             }
+        }
+        Ok(())
+    }
+
+    /// The rare checks of a call: #[\\Deprecated], abstract methods,
+    /// #[\\NoDiscard].
+    fn activate_checks(&mut self, code: &FuncCode, func: &Rc<Func>) -> R<()> {
+        if code.flags & fflags::DEPRECATED != 0 {
+            let what = if func.scope().is_some() {
+                "Method"
+            } else {
+                "Function"
+            };
+            let magic = self.magic_call_name.clone().filter(|_| is_magic_call(func));
+            self.raise_func_deprecation(code, what, func, magic.as_ref())?;
+        }
+        if code.flags & fflags::ABSTRACT != 0 {
+            return self.throw(
+                "Error",
+                &format!("Cannot call abstract method {}()", func.display_name()),
+            );
+        }
+        if code.flags & fflags::NODISCARD != 0 && self.caller_discards_result() {
+            let what = if func.scope().is_some() {
+                "method"
+            } else {
+                "function"
+            };
+            self.raise_nodiscard(code, what, func)?;
         }
         Ok(())
     }
@@ -2089,8 +2094,8 @@ impl Vm {
             self.frame_mut().extra_args = extra;
         }
         // Closure `use` variables.
-        if let Some(cl) = self.frame().closure.clone()
-            && !code.uses.is_empty()
+        if !code.uses.is_empty()
+            && let Some(cl) = self.frame().closure.clone()
         {
             let n = cl.obj().native.borrow();
             if let Some(n) = n.as_ref() {
