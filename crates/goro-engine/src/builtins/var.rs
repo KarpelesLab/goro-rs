@@ -248,6 +248,21 @@ impl Vm {
                         Value::Ref(rf) => (rf.get(), rf.refcount() > 2),
                         v => (v.clone(), false),
                     };
+                    // An array being dumped, seen again through an object
+                    // (an ArrayObject's storage: test bug45826).
+                    if let Value::Array(a) = &val
+                        && self.dump_stack.contains(&(a.data() as *const _ as usize))
+                    {
+                        out.extend_from_slice(
+                            format!(
+                                "{}  *RECURSION*
+",
+                                pad
+                            )
+                            .as_bytes(),
+                        );
+                        continue;
+                    }
                     if let Err(e) = self.var_dump_into(out, &val, indent + 2, r) {
                         self.dump_stack.pop();
                         return Err(e);
