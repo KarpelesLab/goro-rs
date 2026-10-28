@@ -9,7 +9,7 @@ use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
 
 pub static MODULE: Module = Module {
-    name: "info",
+    name: "standard",
     functions: &[
         ("function phpinfo(int $flags = INFO_ALL): true", phpinfo),
         (

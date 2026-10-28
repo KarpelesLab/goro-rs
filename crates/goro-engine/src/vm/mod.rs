@@ -44,7 +44,7 @@ use std::rc::Rc;
 
 use goro_runtime::{ObjRef, PhpArray, PhpRef, PhpStr, Value};
 
-use crate::bytecode::FuncCode;
+use crate::bytecode::{FuncCode, Op};
 use crate::class::Class;
 use crate::func::Func;
 
@@ -323,6 +323,18 @@ pub struct TypedRefSource {
 pub struct TopFrame {
     pub base: *mut Slot,
     pub code: *const FuncCode,
+    /// The code's instructions (the dispatch loop reads them through it).
+    pub ops: *const Op,
+}
+
+impl TopFrame {
+    /// The pointers of a frame running `code` with slots at `base`.
+    #[inline(always)]
+    pub fn of(base: *mut Slot, code: *const FuncCode) -> TopFrame {
+        // SAFETY: frames point to live code.
+        let ops = unsafe { (*code).ops.as_ptr() };
+        TopFrame { base, code, ops }
+    }
 }
 
 impl Default for TopFrame {
@@ -330,6 +342,7 @@ impl Default for TopFrame {
         TopFrame {
             base: std::ptr::null_mut(),
             code: std::ptr::null(),
+            ops: std::ptr::null(),
         }
     }
 }
@@ -339,10 +352,7 @@ impl ExecState {
     #[inline]
     pub fn sync_top(&mut self) {
         self.top = match self.frames.last() {
-            Some(f) => TopFrame {
-                base: f.base,
-                code: f.code,
-            },
+            Some(f) => TopFrame::of(f.base, f.code),
             None => TopFrame::default(),
         };
     }
@@ -502,6 +512,9 @@ pub struct Vm {
     pub disabled_wrappers: Vec<Vec<u8>>,
     pub autoloading: Vec<PhpStr>,
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
+    /// header_register_callback(): called when the headers are sent (at
+    /// the first output, or at the end of the request).
+    pub header_callback: Option<Value>,
     pub exit_status: i32,
     pub script_path: PhpStr,
     pub argv: Vec<PhpStr>,

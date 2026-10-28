@@ -437,10 +437,9 @@ impl Vm {
                     self.gen_next(&g)?;
                 }
                 unsafe { *sb = Some(enc(M_GEN, 0)) };
-                if !self.gen_valid(&g)? {
+                let Some((k, v)) = self.gen_valid_current(&g)? else {
                     return Ok(false);
-                }
-                let (k, v) = self.gen_current(&g)?;
+                };
                 let byref = matches!(v, Value::Ref(_));
                 if byref {
                     let p = self.slot_ptr(val);
@@ -775,52 +774,31 @@ impl Vm {
         mut throw: Option<ObjRef>,
     ) -> R<()> {
         loop {
-            let state = self.with_gen(g, |d| d.state).unwrap();
-            match state {
-                GenState::Done => {
-                    if let Some(e) = throw {
-                        return Err(super::Unwind::Throw(e));
-                    }
-                    return Ok(());
-                }
-                GenState::Running => {
-                    return self.throw("Error", "Cannot resume an already running generator");
-                }
-                _ => {}
-            }
-            // Delegation (`yield from`).
-            let has_delegate = self.with_gen(g, |d| d.delegate.is_some()).unwrap();
-            if has_delegate {
-                let fresh = self
-                    .with_gen(g, |d| std::mem::replace(&mut d.delegate_fresh, false))
-                    .unwrap();
-                // Running while its delegate runs (it cannot be resumed or
-                // force-closed meanwhile).
-                self.with_gen(g, |d| d.state = GenState::Running);
-                let r = self.delegate_step(g, fresh, send.take(), throw.take());
-                self.with_gen(g, |d| {
-                    if d.state == GenState::Running {
-                        d.state = GenState::Suspended;
-                    }
-                });
-                match r? {
-                    true => return Ok(()),
-                    false => {
-                        // Delegate finished: its result went to yield_dst.
-                    }
-                }
-            }
-            // Resume the frame.
-            let (frame, saved, dst) = self
+            // The common case first: a paused (or new) generator without a
+            // delegate is taken out to run in one step.
+            let taken = self
                 .with_gen(g, |d| {
-                    d.state = GenState::Running;
-                    (
-                        d.frame.take(),
-                        std::mem::take(&mut d.saved_pending),
-                        d.yield_dst,
-                    )
+                    if matches!(d.state, GenState::Created | GenState::Suspended)
+                        && d.delegate.is_none()
+                    {
+                        d.state = GenState::Running;
+                        Some((
+                            d.frame.take(),
+                            std::mem::take(&mut d.saved_pending),
+                            d.yield_dst,
+                        ))
+                    } else {
+                        None
+                    }
                 })
                 .unwrap();
+            let (frame, saved, dst) = match taken {
+                Some(t) => t,
+                None => match self.gen_resume_prepare(g, &mut send, &mut throw)? {
+                    Some(t) => t,
+                    None => return Ok(()),
+                },
+            };
             let Some(mut frame) = frame else {
                 self.with_gen(g, |d| d.state = GenState::Done);
                 return Ok(());
@@ -888,6 +866,67 @@ impl Vm {
                     return Err(e);
                 }
             }
+        }
+    }
+
+    /// The general start of a resume step: state errors and `yield from`
+    /// delegates. The frame to run (with its saved calls and the yield's
+    /// destination), or `None` when the step is over.
+    #[allow(clippy::type_complexity)]
+    fn gen_resume_prepare(
+        &mut self,
+        g: &ObjRef,
+        send: &mut Option<Value>,
+        throw: &mut Option<ObjRef>,
+    ) -> R<Option<(Option<Frame>, Vec<(Pending, Vec<Slot>)>, Reg)>> {
+        {
+            let state = self.with_gen(g, |d| d.state).unwrap();
+            match state {
+                GenState::Done => {
+                    if let Some(e) = throw.take() {
+                        return Err(super::Unwind::Throw(e));
+                    }
+                    return Ok(None);
+                }
+                GenState::Running => {
+                    return self.throw("Error", "Cannot resume an already running generator");
+                }
+                _ => {}
+            }
+            // Delegation (`yield from`).
+            let has_delegate = self.with_gen(g, |d| d.delegate.is_some()).unwrap();
+            if has_delegate {
+                let fresh = self
+                    .with_gen(g, |d| std::mem::replace(&mut d.delegate_fresh, false))
+                    .unwrap();
+                // Running while its delegate runs (it cannot be resumed or
+                // force-closed meanwhile).
+                self.with_gen(g, |d| d.state = GenState::Running);
+                let r = self.delegate_step(g, fresh, send.take(), throw.take());
+                self.with_gen(g, |d| {
+                    if d.state == GenState::Running {
+                        d.state = GenState::Suspended;
+                    }
+                });
+                match r? {
+                    true => return Ok(None),
+                    false => {
+                        // Delegate finished: its result went to yield_dst.
+                    }
+                }
+            }
+            // Resume the frame.
+            let t = self
+                .with_gen(g, |d| {
+                    d.state = GenState::Running;
+                    (
+                        d.frame.take(),
+                        std::mem::take(&mut d.saved_pending),
+                        d.yield_dst,
+                    )
+                })
+                .unwrap();
+            Ok(Some(t))
         }
     }
 
@@ -1279,12 +1318,49 @@ impl Vm {
     }
 
     pub fn gen_next(&mut self, g: &ObjRef) -> R<()> {
-        let st = self.with_gen(g, |d| d.state).unwrap();
+        let st = self
+            .with_gen(g, |d| {
+                if d.state != GenState::Created {
+                    d.advanced = true;
+                }
+                d.state
+            })
+            .unwrap();
         if st == GenState::Created {
             self.gen_resume(g, None, None)?;
+            self.with_gen(g, |d| d.advanced = true);
         }
-        self.with_gen(g, |d| d.advanced = true);
         self.gen_resume(g, None, None)
+    }
+
+    /// `valid()` then `current()` (foreach): the key and value, or `None`
+    /// once the generator is done.
+    pub(crate) fn gen_valid_current(&mut self, g: &ObjRef) -> R<Option<(Value, Value)>> {
+        enum Step {
+            Start,
+            Done,
+            Delegated,
+            Kv(Value, Value),
+        }
+        loop {
+            let step = self
+                .with_gen(g, |d| match (&d.state, &d.delegate) {
+                    (GenState::Created, _) => Step::Start,
+                    (GenState::Done, _) => Step::Done,
+                    (GenState::Suspended, Some(Delegate::Gen(_))) => Step::Delegated,
+                    _ => Step::Kv(d.key.clone(), d.value.clone()),
+                })
+                .unwrap();
+            return match step {
+                Step::Start => {
+                    self.gen_resume(g, None, None)?;
+                    continue;
+                }
+                Step::Done => Ok(None),
+                Step::Delegated => self.gen_current(g).map(Some),
+                Step::Kv(k, v) => Ok(Some((k, v))),
+            };
+        }
     }
 
     pub fn gen_send(&mut self, g: &ObjRef, v: Value) -> R<Value> {

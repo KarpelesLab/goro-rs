@@ -105,13 +105,18 @@ fn run_lines(vm: &mut Vm, lm: &LineMode) -> i32 {
             Script::Stdin => (Vec::new(), Vec::new()),
         };
         use std::io::BufRead;
-        let stdin = std::io::stdin();
-        let mut lock = stdin.lock();
         let mut n = 0i64;
         let mut buf = Vec::new();
         loop {
             buf.clear();
-            match lock.read_until(b'\n', &mut buf) {
+            // Through the same stdin the script's STDIN reads, without
+            // holding it while the code runs (test sapi/cli/tests/010).
+            let r = {
+                let stdin = std::io::stdin();
+                let mut lock = stdin.lock();
+                lock.read_until(b'\n', &mut buf)
+            };
+            match r {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }

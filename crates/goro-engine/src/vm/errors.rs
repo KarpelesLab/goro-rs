@@ -231,6 +231,9 @@ impl Vm {
     /// An exception was pending from a callback that could not fail.
     #[inline]
     pub fn check_deferred(&mut self) -> R<()> {
+        if self.err.deferred.is_none() {
+            return Ok(());
+        }
         match self.err.deferred.take() {
             Some(e) => Err(e),
             None => Ok(()),

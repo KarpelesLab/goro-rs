@@ -88,7 +88,11 @@ pub(crate) const F_WEAK_KEY: u32 = 32;
 pub struct Object {
     handle: u32,
     pub(crate) flags: Cell<u32>,
+    /// Root-buffer entry (when buffered).
+    pub(crate) gc_idx: Cell<u32>,
     class: Rc<dyn ClassInfo>,
+    /// The address of the class data (see [`ObjRef::class_addr`]).
+    class_addr: usize,
     /// Declared property slots, laid out by the engine's class.
     pub slots: RefCell<Vec<Value>>,
     /// The property table for dynamic properties (and anything else the
@@ -159,6 +163,8 @@ impl ObjRef {
         let obj = Rc::new(Object {
             handle,
             flags: Cell::new(flags),
+            gc_idx: Cell::new(0),
+            class_addr: Rc::as_ptr(&class) as *const () as usize,
             class,
             slots: RefCell::new(slots),
             props: RefCell::new(PhpArray::new()),
@@ -172,6 +178,13 @@ impl ObjRef {
     #[inline]
     pub fn handle(&self) -> u32 {
         self.0.handle
+    }
+
+    /// The address of the class data, `Rc::as_ptr(self.class())` without
+    /// the vtable lookup (inline caches key on it).
+    #[inline]
+    pub fn class_addr(&self) -> usize {
+        self.0.class_addr
     }
 
     #[inline]
@@ -285,6 +298,9 @@ impl Drop for Object {
         drop(self.native.get_mut().take());
         if self.flags.get() & F_WEAK_KEY != 0 {
             crate::gc::forget_weak_key(self as *const Object as usize);
+        }
+        if self.flags.get() & F_GC_BUFFERED != 0 {
+            crate::gc::remove_root(self.gc_idx.get(), self as *const Object as usize);
         }
         let h = self.handle as usize;
         let _ = STORE.try_with(|s| {

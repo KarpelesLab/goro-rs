@@ -360,10 +360,41 @@ pub(crate) fn assert_ini_deprecated(k: &[u8], v: &[u8]) -> bool {
     }
 }
 
+/// A memory_limit above max_memory_limit (or unlimited while the maximum
+/// isn't) is replaced by the maximum: the value to use and the warning,
+/// none for -1 (tests tests/basic/gh17951_*).
+pub(crate) fn memory_limit_cap(vm: &Vm, v: &[u8]) -> Option<(PhpStr, Option<String>)> {
+    let max_s = vm.get_ini(b"max_memory_limit")?;
+    let max = crate::vm::setup::parse_size(&max_s);
+    let n = crate::vm::setup::parse_size(v);
+    if max == -1 || (n != -1 && n <= max) {
+        return None;
+    }
+    let msg = (n != -1).then(|| {
+        format!(
+            "Failed to set memory_limit to {n} bytes. Setting to max_memory_limit instead (currently: {max} bytes)"
+        )
+    });
+    Some((max_s, msg))
+}
+
 /// Startup diagnostics for deprecated `-d` settings, in registration
 /// order (observed on PHP 8.5).
 pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
     super::date::startup_timezone_check(vm, ini);
+    // memory_limit is capped by max_memory_limit (tests tests/basic/
+    // gh17951_ini_parse_*).
+    if let Some((v, msg)) = memory_limit_cap(vm, &vm.get_ini(b"memory_limit").unwrap_or_default()) {
+        if let Some(msg) = msg {
+            let _ = vm.raise_at(
+                crate::vm::errors::E_WARNING,
+                &msg,
+                goro_runtime::PhpStr::from("Unknown"),
+                0,
+            );
+        }
+        vm.set_ini(b"memory_limit", &v);
+    }
     for k in [
         &b"assert.active"[..],
         b"assert.bail",

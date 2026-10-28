@@ -271,6 +271,8 @@ pub struct ArrayData {
     next_free: i64,
     nstate: u8,
     pub(crate) flags: Cell<u8>,
+    /// Root-buffer entry (when buffered).
+    pub(crate) gc_idx: Cell<u32>,
     /// Internal pointer (entry position).
     pos: u32,
     /// Registered iterator positions `(id, pos)` (by-reference foreach).
@@ -444,6 +446,9 @@ impl HashStore {
 
 impl Drop for ArrayData {
     fn drop(&mut self) {
+        if self.flags.get() & A_GC_BUFFERED != 0 {
+            crate::gc::remove_root(self.gc_idx.get(), self as *const ArrayData as usize);
+        }
         // Drop only the elements that own something; scalars are skipped
         // without calling drop glue (most arrays hold mostly scalars).
         match &mut self.store {
@@ -512,6 +517,7 @@ impl Clone for ArrayData {
             next_free: self.next_free,
             nstate: self.nstate,
             flags: Cell::new(self.flags.get() & A_MAY_CYCLE),
+            gc_idx: Cell::new(0),
             pos: self.pos,
             iters: self.iters.clone(),
         }
@@ -531,6 +537,7 @@ impl ArrayData {
             next_free: 0,
             nstate: 0,
             flags: Cell::new(0),
+            gc_idx: Cell::new(0),
             pos: 0,
             iters: Vec::new(),
         }
@@ -1251,9 +1258,18 @@ impl PhpArray {
     #[inline(always)]
     pub fn make_mut(&mut self) -> &mut ArrayData {
         let rc = self.0.get_or_insert_with(|| Rc::new(ArrayData::new()));
-        // A unique array with a weak pointer (its GC root entry) is moved
-        // to a new allocation by `make_mut`, leaving the root entry dead:
-        // clear the "buffered" flag so it can be recorded again.
+        // A unique array with a weak pointer (its GC root entry) would be
+        // moved to a new allocation by `make_mut`: its root entry goes
+        // first (as when the original is freed), which also avoids the
+        // move.
+        if Rc::strong_count(rc) == 1 && Rc::weak_count(rc) > 0 {
+            let f = rc.flags.get();
+            if f & A_GC_BUFFERED != 0 {
+                rc.flags.set(f & !A_GC_BUFFERED);
+                crate::gc::remove_root(rc.gc_idx.get(), Rc::as_ptr(rc) as usize);
+            }
+        }
+        // Moved anyway (another weak pointer): the flag goes with it.
         let moved = Rc::strong_count(rc) == 1 && Rc::weak_count(rc) > 0;
         let d = Rc::make_mut(rc);
         if moved {
