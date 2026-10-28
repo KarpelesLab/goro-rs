@@ -144,7 +144,7 @@ pub fn format(fmt: &[u8], t: &LocalTime, zone: &TimeZone) -> Vec<u8> {
     out
 }
 
-/// Like [`format`], appending to `out`.
+/// Like [`fn@format`], appending to `out`.
 pub fn format_into(out: &mut Vec<u8>, fmt: &[u8], t: &LocalTime, zone: &TimeZone) {
     use std::io::Write;
     let mut i = 0;

@@ -2,7 +2,7 @@
 //! constructor, `modify()` and `date_parse()`.
 //!
 //! The grammar is the PHP manual's "Supported Date and Time Formats"
-//! (see [`grammar`]); the scanner takes the longest matching format at each
+//! (see `grammar.rs`); the scanner takes the longest matching format at each
 //! position, as that page's tables read, and every behaviour detail
 //! (which fields a format sets, the error and warning texts and their
 //! positions) was checked against `date_parse()` on PHP 8.5.
