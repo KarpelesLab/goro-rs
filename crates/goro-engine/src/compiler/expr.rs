@@ -505,6 +505,28 @@ impl<'a> Compiler<'a> {
                 });
                 Ok(d)
             }
+            // `(NAME)(...)` calls the constant's value (PHP 8.5 constants may
+            // hold closures: test Zend/tests/closures/closure_const_expr).
+            ExprKind::Call { name, args }
+                if self.src[name.span.end as usize..]
+                    .iter()
+                    .find(|c| !c.is_ascii_whitespace())
+                    == Some(&b')')
+                    && name.kind != NameKind::FullyQualified =>
+            {
+                let callee: &'a Expr<'a> = Box::leak(Box::new(Expr {
+                    kind: ExprKind::Const(*name),
+                    span: name.span,
+                }));
+                self.chain_root(e, |c| {
+                    let f = c.expr(callee)?;
+                    c.free(f);
+                    let nargs = args.as_slice().len() as u32;
+                    c.f.line = line;
+                    c.emit(Op::InitDynCall { callee: f, nargs });
+                    c.finish_call(args, hint, line)
+                })
+            }
             ExprKind::Call { name, args } => self.chain_root(e, |c| c.call(name, args, hint, line)),
             ExprKind::CallExpr { callee, args } => self.chain_root(e, |c| {
                 let f = c.chain_base(callee)?;

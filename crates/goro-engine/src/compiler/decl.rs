@@ -865,6 +865,41 @@ impl<'a> Compiler<'a> {
 
     /// Checks that `e` is a valid constant expression.
     pub(crate) fn check_const_expr(&self, e: &'a Expr<'a>) -> CResult<()> {
+        // Errors PHP finds while compiling the expression come before the
+        // constant-expression check (tests Zend/tests/bug70912.phpt,
+        // ast/gh21072.phpt, constexpr/gh9138.phpt, class_name/*).
+        let mut early: Option<(&'static str, u32)> = None;
+        walk_expr(e, &mut |x| {
+            if early.is_some() {
+                return;
+            }
+            let msg = match &x.kind {
+                ExprKind::Index { index: None, .. } => Some("Cannot use [] for reading"),
+                ExprKind::Cast {
+                    kind: CastKind::Unset,
+                    ..
+                } => Some("The (unset) cast is no longer supported"),
+                ExprKind::Array { items, .. } if items.iter().any(|i| i.is_none()) => {
+                    Some("Cannot use empty array elements in arrays")
+                }
+                ExprKind::ClassConst(cc)
+                    if matches!(cc.class, ClassRef::Static(_))
+                        && matches!(&cc.name, MemberName::Ident(i) if i.name.eq_ignore_ascii_case(b"class")) =>
+                {
+                    Some("static::class cannot be used for compile-time class name resolution")
+                }
+                ExprKind::StaticCall(sc) if matches!(sc.class, ClassRef::Static(_)) => {
+                    Some("\"static\" is not allowed in compile-time constants")
+                }
+                _ => None,
+            };
+            if let Some(m) = msg {
+                early = Some((m, x.span.line));
+            }
+        });
+        if let Some((m, line)) = early {
+            return self.err(m, line);
+        }
         if !const_expr_ok(e) {
             return self.err(
                 "Constant expression contains invalid operations",
