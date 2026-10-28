@@ -30,7 +30,16 @@ impl E {
         E { code, lib, reason }
     }
     pub fn message(&self) -> String {
-        format!("error:{:08X}:{}::{}", self.code, self.lib, self.reason)
+        if self.code & 0x8000_0000 != 0 {
+            // System errors print sign-extended (observed on PHP 8.5:
+            // "error:FFFFFFFF80000002:system library::...").
+            format!(
+                "error:{:016X}:{}::{}",
+                self.code as i32 as i64 as u64, self.lib, self.reason
+            )
+        } else {
+            format!("error:{:08X}:{}::{}", self.code, self.lib, self.reason)
+        }
     }
 }
 
@@ -110,7 +119,33 @@ pub mod errs {
         E::new(0x0200006E, lib::RSA, "data too large for key size");
     pub const RSA_DATA_TOO_LARGE_FOR_MOD: E =
         E::new(0x02000084, lib::RSA, "data too large for modulus");
-    pub const RSA_DATA_TOO_SMALL: E = E::new(0x0200006F, lib::RSA, "data too small for key size");
+    pub const RSA_DATA_TOO_SMALL: E = E::new(0x0200007A, lib::RSA, "data too small for key size");
+    pub const RSA_WRONG_SIG_LEN: E = E::new(0x02000077, lib::RSA, "wrong signature length");
+    pub const PROV_RSA_LIB: E = E::new(0x1C880004, lib::PROV, "RSA lib");
+    pub const RSA_INVALID_PADDING: E = E::new(0x0200008A, lib::RSA, "invalid padding");
+    pub const EVP_PROVIDER_SIG_FAILURE: E =
+        E::new(0x030000EA, lib::EVP, "provider signature failure");
+    pub const EVP_OP_NOT_SUPPORTED_KEYTYPE: E = E::new(
+        0x03000096,
+        lib::EVP,
+        "operation not supported for this keytype",
+    );
+    pub const EVP_UNSUPPORTED: E = E::new(0x0308010C, lib::EVP, "unsupported");
+    pub const PROV_KEY_SIZE_TOO_SMALL: E = E::new(0x1C8000AB, lib::PROV, "key size too small");
+    pub const DSA_BAD_FFC_PARAMETERS: E = E::new(0x05000072, lib::DSA, "bad ffc parameters");
+    pub const PROV_INVALID_DIGEST: E = E::new(0x1C80007A, lib::PROV, "invalid digest");
+    pub const OBJ_UNKNOWN_OBJECT_NAME: E = E::new(
+        0x04000067,
+        "object identifier routines",
+        "unknown object name",
+    );
+    pub const X509_INVALID_FIELD_NAME: E = E::new(0x05800077, lib::X509, "invalid field name");
+    pub const ASN1_STRING_TOO_LONG: E = E::new(0x06800097, lib::ASN1, "string too long");
+    pub const ASN1_STRING_TOO_SHORT: E = E::new(0x06800098, lib::ASN1, "string too short");
+    pub const ASN1_UNKNOWN_SIG_ALG: E =
+        E::new(0x068000C7, lib::ASN1, "unknown signature algorithm");
+    pub const X509V3_NO_ISSUER_CERT: E = E::new(0x11000079, lib::X509V3, "no issuer certificate");
+    pub const X509V3_ERROR_IN_EXTENSION: E = E::new(0x11000080, lib::X509V3, "error in extension");
     pub const RSA_DATA_GREATER_THAN_MOD: E =
         E::new(0x02000084, lib::RSA, "data too large for modulus");
     pub const RSA_PKCS_DECODING: E = E::new(0x02000077, lib::RSA, "pkcs decoding error");

@@ -4,7 +4,8 @@
 //! The name lists are those PHP 8.5 reports (observed on PHP 8.5:
 //! openssl_get_md_methods() with and without aliases).
 
-use purecrypto::hash::{ExtendableOutput, HashAlgorithm, Shake128, Shake256};
+pub use purecrypto::hash::HashAlgorithm;
+use purecrypto::hash::{ExtendableOutput, Shake128, Shake256};
 
 /// A digest algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
