@@ -403,6 +403,15 @@ pub struct Vm {
     /// A class constant lookup of a constant expression runs: its errors'
     /// traces show the expression's frame.
     pub trace_const_expr: bool,
+    /// Attribute lists (by address) whose #[\Deprecated] arguments are
+    /// being evaluated: their item's own deprecation is not raised again
+    /// (a constant whose message is itself).
+    pub deprecating: Vec<usize>,
+    /// The method name a `__call`/`__callStatic` call is about to run for.
+    pub magic_call_name: Option<PhpStr>,
+    /// Attributes of user constants declared with `const` (by normalized
+    /// name).
+    pub const_attrs: HashMap<PhpStr, Rc<[crate::bytecode::AttrInfo]>>,
     /// User functions in declaration order (get_defined_functions).
     pub user_functions: Vec<PhpStr>,
     pub classes: HashMap<PhpStr, Rc<Class>>,

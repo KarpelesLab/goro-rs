@@ -68,6 +68,15 @@ impl<'a> Compiler<'a> {
     }
 
     /// Evaluates for side effects only.
+    /// `(void) expr`: evaluated for side effects, its result deliberately
+    /// ignored.
+    pub(crate) fn expr_void(&mut self, e: &'a Expr<'a>) -> CResult<()> {
+        let n = self.f.discarded_calls.len();
+        self.expr_stmt(e)?;
+        self.f.discarded_calls.truncate(n);
+        Ok(())
+    }
+
     pub(crate) fn expr_stmt(&mut self, e: &'a Expr<'a>) -> CResult<()> {
         self.f.line = e.span.line;
         match &e.kind {
@@ -80,7 +89,25 @@ impl<'a> Compiler<'a> {
             ExprKind::Cast {
                 kind: CastKind::Void,
                 expr,
-            } => self.expr_stmt(expr),
+            } => self.expr_void(expr),
+            ExprKind::Call { .. }
+            | ExprKind::CallExpr { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::StaticCall(_) => {
+                let r = self.expr(e)?;
+                // A call whose result goes unused (for #[\NoDiscard]).
+                if let Some(Op::DoCall { .. }) = self.f.ops.last() {
+                    let ip = (self.f.ops.len() - 1) as u32;
+                    self.f.discarded_calls.push(ip);
+                }
+                if r != NONE && is_tmp(r) {
+                    self.emit(Op::Free {
+                        slot: r & SLOT_MASK,
+                    });
+                }
+                self.free(r);
+                Ok(())
+            }
             _ => {
                 let r = self.expr(e)?;
                 if r != NONE && is_tmp(r) {
@@ -603,7 +630,7 @@ impl<'a> Compiler<'a> {
                         return self.err("The (unset) cast is no longer supported", line);
                     }
                     CastKind::Void => {
-                        self.expr_stmt(expr)?;
+                        self.expr_void(expr)?;
                         return Ok(self.null_const());
                     }
                 };

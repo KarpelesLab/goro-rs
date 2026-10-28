@@ -1082,6 +1082,11 @@ pub struct FuncCode {
     pub line_end: u32,
     pub doc_comment: Option<PhpStr>,
     pub attrs: Rc<[AttrInfo]>,
+    /// Instructions (DoCall) whose result is discarded by an expression
+    /// statement (not by a `(void)` cast), sorted.
+    pub discarded_calls: Vec<u32>,
+    /// Attributes of `const` statements in this code, by constant name.
+    pub const_attrs: Vec<(PhpStr, Rc<[AttrInfo]>)>,
     /// Inline caches (instruction-local, by index).
     pub caches: Box<[Cell<Cache>]>,
     /// Lazily computed name → slot map for dynamic variable access.

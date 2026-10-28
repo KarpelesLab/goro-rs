@@ -959,6 +959,10 @@ impl Vm {
                 self.put(dst, v);
                 Ok(())
             }
+            Some((v, n)) if !self.const_attrs.is_empty() && self.user_const_deprecated(&n)? => {
+                self.put(dst, v);
+                Ok(())
+            }
             Some((v, _)) => {
                 let idx = self.const_cache.len();
                 self.const_cache.push(v.clone());
@@ -1014,6 +1018,37 @@ impl Vm {
         Ok(None)
     }
 
+    /// Raises the deprecation of a `#[\\Deprecated]` user constant; whether
+    /// it has one (such constants are not cached).
+    pub(crate) fn user_const_deprecated(&mut self, name: &[u8]) -> R<bool> {
+        let key = normalize_const_name(name);
+        let Some(attrs) = self.const_attrs.get(&key).cloned() else {
+            return Ok(false);
+        };
+        if self.deprecating.contains(&(attrs.as_ptr() as usize)) {
+            // Its own message being evaluated: once is enough.
+            return Ok(attrs.iter().any(|a| {
+                a.name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&a.name)
+                    .eq_ignore_ascii_case(b"Deprecated")
+            }));
+        }
+        let Some((since, msg)) = self.deprecation_detail(&attrs, std::ptr::null(), false)? else {
+            return Ok(false);
+        };
+        let text = deprecation_text(
+            &format!(
+                "Constant {}",
+                String::from_utf8_lossy(name.strip_prefix(b"\\").unwrap_or(name))
+            ),
+            since,
+            msg,
+        );
+        self.raise(super::errors::E_USER_DEPRECATED, &text)?;
+        Ok(true)
+    }
+
     /// Raises the deprecation of an internal constant, if it has one.
     pub(crate) fn const_deprecated(&mut self, name: &[u8]) -> R<()> {
         let name = name.strip_prefix(b"\\").unwrap_or(name);
@@ -1027,12 +1062,33 @@ impl Vm {
         Ok(())
     }
 
+    /// A `const` statement: the constant, with its attributes when it is
+    /// new (a redefinition keeps the first one's).
+    pub(crate) fn declare_const_stmt(&mut self, n: Value, v: Value) -> R<()> {
+        let name = self.to_php_str(&n)?;
+        let key = normalize_const_name(&name);
+        let fresh = !self.constants.contains_key(&key);
+        self.declare_constant(n, v)?;
+        if fresh {
+            let attrs = self
+                .code_ref()
+                .const_attrs
+                .iter()
+                .find(|(k, _)| normalize_const_name(k) == key)
+                .map(|(_, a)| a.clone());
+            if let Some(a) = attrs {
+                self.const_attrs.insert(key, a);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn declare_constant(&mut self, n: Value, v: Value) -> R<()> {
         let name = self.to_php_str(&n)?;
         let key = normalize_const_name(&name);
         if self.constants.contains_key(&key) {
             self.warn(&format!(
-                "Constant {} already defined",
+                "Constant {} already defined, this will be an error in PHP 9",
                 name.to_string_lossy()
             ))?;
             return Ok(());
@@ -1070,4 +1126,18 @@ fn collect_frame_vars(f: &Frame, a: &mut PhpArray) {
             a.insert(k.to_owned(), v.deref());
         }
     }
+}
+
+/// "What is deprecated[ since X][, message]".
+pub(crate) fn deprecation_text(what: &str, since: Option<String>, msg: Option<String>) -> String {
+    let mut s = format!("{} is deprecated", what);
+    if let Some(v) = since {
+        s.push_str(" since ");
+        s.push_str(&v);
+    }
+    if let Some(m) = msg {
+        s.push_str(", ");
+        s.push_str(&m);
+    }
+    s
 }

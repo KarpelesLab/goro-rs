@@ -1415,7 +1415,12 @@ impl Vm {
             magic_name: None,
         };
         self.discard_pending(p);
-        self.call_callee(c, vec![Value::Str(name), Value::Array(arr)])
+        // Diagnostics about the call (#[\Deprecated], #[\NoDiscard]) name
+        // the method asked for.
+        let saved = self.magic_call_name.replace(name.clone());
+        let r = self.call_callee(c, vec![Value::Str(name), Value::Array(arr)]);
+        self.magic_call_name = saved;
+        r
     }
 
     /// Runs a native function on the pending call's arguments.
@@ -1748,8 +1753,12 @@ impl Vm {
             } else {
                 "Function"
             };
-            let msg = self.deprecated_message(code, what, &func);
-            if let Err(e) = self.deprecated(&msg) {
+            let magic = self
+                .magic_call_name
+                .clone()
+                .filter(|_| is_magic_call(&func));
+            let r = self.raise_func_deprecation(code, what, &func, magic.as_ref());
+            if let Err(e) = r {
                 self.discard_pending(p);
                 return Err(e);
             }
@@ -1761,6 +1770,17 @@ impl Vm {
             );
             self.discard_pending(p);
             return r;
+        }
+        if code.flags & fflags::NODISCARD != 0 && self.caller_discards_result() {
+            let what = if func.scope().is_some() {
+                "method"
+            } else {
+                "function"
+            };
+            if let Err(e) = self.raise_nodiscard(code, what, &func) {
+                self.discard_pending(p);
+                return Err(e);
+            }
         }
         let strict = self.caller_strict();
         let call_loc = if entry || self.ex.frames.is_empty() {
@@ -2055,45 +2075,36 @@ impl Vm {
         Ok(())
     }
 
-    fn deprecated_message(&mut self, code: &FuncCode, what: &str, func: &Func) -> String {
-        let mut msg = format!("{} {}() is deprecated", what, func.display_name());
-        if let Some(a) = code
-            .attrs
+    /// The `since` and `message` of a `#[\\Deprecated]` attribute among
+    /// `attrs` (none without one), checked like the arguments of
+    /// `Deprecated::__construct(?string $message = null, ?string $since =
+    /// null)` (tests Zend/tests/attributes/deprecated/type_validation_*).
+    /// Empty strings count as absent.
+    pub(crate) fn deprecation_detail(
+        &mut self,
+        attrs: &[AttrInfo],
+        scope: *const Class,
+        strict: bool,
+    ) -> R<Option<(Option<String>, Option<String>)>> {
+        let Some(a) = attrs
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(b"Deprecated"))
-        {
-            let mut message = None;
-            let mut since = None;
-            for (i, (n, v)) in a.args.iter().enumerate() {
-                let v = match v {
-                    ConstExpr::Value(v) => v.clone(),
-                    _ => Value::Null,
-                };
-                let key = n.as_ref().map(|n| n.to_string_lossy());
-                match (key.as_deref(), i) {
-                    (Some("message"), _) | (None, 0) => {
-                        message = v.as_str().map(|s| s.to_string_lossy())
-                    }
-                    (Some("since"), _) | (None, 1) => {
-                        since = v.as_str().map(|s| s.to_string_lossy())
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(s) = since {
-                msg = format!(
-                    "{} {}() is deprecated since {}",
-                    what,
-                    func.display_name(),
-                    s
-                );
-            }
-            if let Some(m) = message {
-                msg.push_str(", ");
-                msg.push_str(&m);
-            }
-        }
-        msg
+            .find(|a| {
+                a.name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&a.name)
+                    .eq_ignore_ascii_case(b"Deprecated")
+            })
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        self.deprecating.push(attrs.as_ptr() as usize);
+        let r = self.attr_string_args(&a, "Deprecated", &["message", "since"], scope, strict);
+        self.deprecating.pop();
+        let mut v = r?;
+        let since = v.pop().flatten();
+        let message = v.pop().flatten();
+        Ok(Some((since, message)))
     }
 
     /// Checks (and coerces) parameter `i` in the slots at `base`.
@@ -2818,4 +2829,149 @@ pub fn is_scope_introspecting(lname: &[u8]) -> bool {
             | b"func_get_arg"
             | b"func_num_args"
     )
+}
+
+impl Vm {
+    /// "Function f() is deprecated[ since X][, message]" for a
+    /// `#[\\Deprecated]` user function (E_USER_DEPRECATED). Through
+    /// `__call` the method asked for is named (test
+    /// Zend/tests/attributes/deprecated/functions/magic_call.phpt).
+    pub(crate) fn raise_func_deprecation(
+        &mut self,
+        code: &FuncCode,
+        what: &str,
+        func: &Func,
+        magic: Option<&PhpStr>,
+    ) -> R<()> {
+        if self.deprecating.contains(&(code.attrs.as_ptr() as usize)) {
+            return Ok(());
+        }
+        let strict = code.flags & fflags::STRICT != 0;
+        let scope = func.scope.get();
+        let detail = self.deprecation_detail(&code.attrs, scope, strict)?;
+        let (since, msg) = detail.unwrap_or((None, None));
+        let name = match (magic, func.scope()) {
+            (Some(m), Some(c)) => format!("{}::{}", c.name.dname(), m.to_string_lossy()),
+            _ => func.display_name(),
+        };
+        let text = super::include::deprecation_text(&format!("{} {}()", what, name), since, msg);
+        self.raise(super::errors::E_USER_DEPRECATED, &text)
+    }
+}
+
+impl Vm {
+    /// Whether the running user code's current call has its result
+    /// discarded by an expression statement (directly, or through an
+    /// internal function such as call_user_func()).
+    fn caller_discards_result(&self) -> bool {
+        if self.ex.frames.is_empty() {
+            return false;
+        }
+        let code = self.code_ref();
+        if code.discarded_calls.is_empty() {
+            return false;
+        }
+        let ip = self.ex.ip.saturating_sub(1) as u32;
+        code.discarded_calls.binary_search(&ip).is_ok()
+    }
+
+    /// "The return value of function f() should either be used or
+    /// intentionally ignored by casting it as (void)[, message]"
+    /// (E_USER_WARNING; RFC: Marking return values as important).
+    fn raise_nodiscard(&mut self, code: &FuncCode, what: &str, func: &Func) -> R<()> {
+        let strict = code.flags & fflags::STRICT != 0;
+        let msg = match code.attrs.iter().find(|a| {
+            a.name
+                .strip_prefix(b"\\")
+                .unwrap_or(&a.name)
+                .eq_ignore_ascii_case(b"NoDiscard")
+        }) {
+            Some(a) => {
+                let a = a.clone();
+                self.attr_string_args(&a, "NoDiscard", &["message"], func.scope.get(), strict)?
+                    .pop()
+                    .flatten()
+            }
+            None => None,
+        };
+        let magic = self.magic_call_name.clone().filter(|_| is_magic_call(func));
+        let name = match (magic, func.scope()) {
+            (Some(m), Some(c)) => format!("{}::{}", c.name.dname(), m.to_string_lossy()),
+            _ => self.func_display_name(func),
+        };
+        let mut text = format!(
+            "The return value of {} {}() should either be used or intentionally ignored by casting it as (void)",
+            what, name
+        );
+        if let Some(m) = msg {
+            text.push_str(", ");
+            text.push_str(&m);
+        }
+        self.raise(super::errors::E_USER_WARNING, &text)
+    }
+
+    /// The string arguments of an attribute, checked as `?string`
+    /// parameters of `{class}::__construct()` named `params`.
+    pub(crate) fn attr_string_args(
+        &mut self,
+        a: &AttrInfo,
+        class: &str,
+        params: &[&str],
+        scope: *const Class,
+        strict: bool,
+    ) -> R<Vec<Option<String>>> {
+        let mut out: Vec<Option<String>> = vec![None; params.len()];
+        for (i, (n, ce)) in a.args.iter().enumerate() {
+            let v = self.eval_const_expr(ce, scope)?;
+            let pos = match n {
+                Some(n) => match params.iter().position(|p| n.as_bytes() == p.as_bytes()) {
+                    Some(p) => p,
+                    None => {
+                        return self.throw(
+                            "Error",
+                            &format!("Unknown named parameter ${}", n.to_string_lossy()),
+                        );
+                    }
+                },
+                None if i < params.len() => i,
+                None => {
+                    return self.throw(
+                        "ArgumentCountError",
+                        &format!(
+                            "{}::__construct() expects at most {} argument{}, {} given",
+                            class,
+                            params.len(),
+                            if params.len() == 1 { "" } else { "s" },
+                            a.args.len()
+                        ),
+                    );
+                }
+            };
+            let s = match &v {
+                Value::Null => None,
+                Value::Str(s) => Some(s.to_string_lossy()),
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) if !strict => {
+                    let mut o = Vec::new();
+                    self.append_to_string(&mut o, &v)?;
+                    Some(String::from_utf8_lossy(&o).into_owned())
+                }
+                _ => {
+                    return self.type_error(&format!(
+                        "{}::__construct(): Argument #{} (${}) must be of type ?string, {} given",
+                        class,
+                        pos + 1,
+                        params[pos],
+                        Vm::type_name_given(&v)
+                    ));
+                }
+            };
+            out[pos] = s.filter(|s| !s.is_empty());
+        }
+        Ok(out)
+    }
+}
+
+/// `__call` / `__callStatic`.
+fn is_magic_call(f: &Func) -> bool {
+    matches!(f.lname.as_bytes(), b"__call" | b"__callstatic")
 }

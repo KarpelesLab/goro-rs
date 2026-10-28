@@ -398,6 +398,12 @@ impl<'a> Compiler<'a> {
             }
         }
         let attrs = self.attributes(spec.attrs)?;
+        let target = if self.f.flags & fflags::CLOSURE == 0 && self.class.is_some() {
+            4
+        } else {
+            2
+        };
+        self.check_internal_attrs(&attrs, target, spec.span.line)?;
         let mut code = self.finish_func(
             spec.name.clone(),
             params,
@@ -420,6 +426,37 @@ impl<'a> Compiler<'a> {
             .iter()
             .any(|a| a.name.eq_ignore_ascii_case(b"NoDiscard"))
         {
+            // RFC: Marking return values as important (#[\NoDiscard]).
+            let line = spec.span.line;
+            if spec.prop_name.is_some() {
+                return self.err("#[\\NoDiscard] is not supported for property hooks", line);
+            }
+            let ln = spec.name.to_ascii_lowercase();
+            if matches!(spec.kind, FnKind::Method { .. })
+                && matches!(&ln[..], b"__construct" | b"__clone")
+            {
+                return self.err(
+                    format!(
+                        "Method {} cannot be #[\\NoDiscard]",
+                        spec.method_name.to_string_lossy()
+                    ),
+                    line,
+                );
+            }
+            if let Some(t) = &code.ret_type {
+                if t.mask & tmask::VOID != 0 {
+                    return self.err(
+                        "A void function does not return a value, but #[\\NoDiscard] requires a return value",
+                        line,
+                    );
+                }
+                if t.mask & tmask::NEVER != 0 {
+                    return self.err(
+                        "A never returning function does not return a value, but #[\\NoDiscard] requires a return value",
+                        line,
+                    );
+                }
+            }
             code.flags |= fflags::NODISCARD;
         }
         Ok(code)
@@ -573,11 +610,14 @@ impl<'a> Compiler<'a> {
                 }
                 Some(p.modifiers.0)
             };
-            let default_text = p.default.as_ref().map(|d| {
-                String::from_utf8_lossy(&self.src[d.span.start as usize..d.span.end as usize])
-                    .into_owned()
-            });
+            let default_text = p
+                .default
+                .as_ref()
+                .map(|d| self.resolved_source_text(d.span.start as usize, d.span.end as usize));
             let attrs = self.attributes(p.attrs)?;
+            // Promoted parameters are properties too.
+            let t = if p.modifiers.0 != 0 { 32 | 8 } else { 32 };
+            self.check_internal_attrs(&attrs, t, p.span.line)?;
             let default_ce = if matches!(default, ParamDefault::Code) {
                 Some(self.const_expr(p.default.as_ref().unwrap())?)
             } else {
@@ -998,6 +1038,8 @@ impl<'a> Compiler<'a> {
             None => None,
         };
         let attrs = self.attributes(cd.attrs)?;
+        self.check_internal_attrs(&attrs, 1, line)?;
+        self.check_class_attrs(&attrs, kind, flags, &cname, line)?;
         let decl = ClassDecl {
             name: cname,
             kind,
@@ -1067,6 +1109,7 @@ impl<'a> Compiler<'a> {
                         None => None,
                     };
                     let attrs = self.attributes(c.attrs)?;
+                    self.check_internal_attrs(&attrs, 16, c.span.line)?;
                     for item in c.items {
                         if item.name.name.eq_ignore_ascii_case(b"class") {
                             return self.err(
@@ -1149,6 +1192,7 @@ impl<'a> Compiler<'a> {
                         }
                     };
                     let attrs = self.attributes(ec.attrs)?;
+                    self.check_internal_attrs(&attrs, 16, ec.span.line)?;
                     consts.push(ConstDecl {
                         name: PhpStr::intern(ec.name.name),
                         value: match value {
@@ -1228,6 +1272,7 @@ impl<'a> Compiler<'a> {
                         );
                     }
                     let attrs = self.attributes(p.attrs)?;
+                    self.check_internal_attrs(&attrs, 8, p.span.line)?;
                     for (pi, it) in p.props.iter().enumerate() {
                         if props.iter().any(|x| x.name.as_bytes() == it.name.name) {
                             return self.err(
@@ -2329,4 +2374,235 @@ pub fn parse_native_sig(
         variadic,
         ret_text,
     })
+}
+
+impl<'a> Compiler<'a> {
+    /// Source text of an expression with its class names resolved the way
+    /// PHP's AST export shows them (gh9447: `Bar::BAZ` in namespace App is
+    /// `\\App\\Bar::BAZ`, `new Qux` imported is `new \\SomewhereElse\\Qux`);
+    /// names that resolve to themselves stay as written.
+    pub(crate) fn resolved_source_text(&self, start: usize, end: usize) -> String {
+        let src: &'a [u8] = self.src;
+        let b = &src[start..end];
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+        let name_char = |c: u8| ident(c) || c == b'\\';
+        let mut out: Vec<u8> = Vec::with_capacity(b.len());
+        let mut i = 0;
+        let mut after_new = false;
+        while i < b.len() {
+            let c = b[i];
+            if c == b'\'' || c == b'"' {
+                let st = i;
+                i += 1;
+                while i < b.len() && b[i] != c {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(b.len());
+                out.extend_from_slice(&b[st..i]);
+                after_new = false;
+                continue;
+            }
+            let word_start = i == 0 || !(name_char(b[i - 1]) || b[i - 1] == b'$');
+            if word_start && name_char(c) && !c.is_ascii_digit() {
+                let st = i;
+                while i < b.len() && name_char(b[i]) {
+                    i += 1;
+                }
+                let word = &src[start + st..start + i];
+                let mut k = i;
+                while k < b.len() && b[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                let is_class_use = after_new || b[k..].starts_with(b"::");
+                after_new = word.eq_ignore_ascii_case(b"new");
+                if !is_class_use || word.eq_ignore_ascii_case(b"new") {
+                    out.extend_from_slice(word);
+                    continue;
+                }
+                let lower = word.to_ascii_lowercase();
+                if matches!(&lower[..], b"self" | b"parent" | b"static") {
+                    out.extend_from_slice(word);
+                    continue;
+                }
+                let (kind, name) = if let Some(r) = word.strip_prefix(b"\\") {
+                    (NameKind::FullyQualified, r)
+                } else if lower.starts_with(b"namespace\\") {
+                    (NameKind::Relative, &word[10..])
+                } else if word.contains(&b'\\') {
+                    (NameKind::Qualified, word)
+                } else {
+                    (NameKind::Unqualified, word)
+                };
+                let n = Name {
+                    kind,
+                    name,
+                    span: Span {
+                        start: (start + st) as u32,
+                        end: (start + i) as u32,
+                        line: 0,
+                        end_line: 0,
+                    },
+                };
+                let resolved = self.resolve_class(&n);
+                if kind == NameKind::FullyQualified || resolved != word {
+                    out.push(b'\\');
+                    out.extend_from_slice(&resolved);
+                } else {
+                    out.extend_from_slice(word);
+                }
+                continue;
+            }
+            if !c.is_ascii_whitespace() {
+                after_new = false;
+            }
+            out.push(c);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+}
+
+/// Targets and display names of the internal attribute classes (PHP
+/// manual: Predefined Attributes; targets as their errors list them on
+/// PHP 8.5).
+fn internal_attr(lname: &[u8]) -> Option<(&'static str, i64)> {
+    Some(match lname {
+        b"attribute" => ("Attribute", 1),
+        b"returntypewillchange" => ("ReturnTypeWillChange", 4),
+        b"allowdynamicproperties" => ("AllowDynamicProperties", 1),
+        b"sensitiveparameter" => ("SensitiveParameter", 32),
+        b"override" => ("Override", 4 | 8),
+        b"deprecated" => ("Deprecated", 1 | 2 | 4 | 16 | 64),
+        b"nodiscard" => ("NoDiscard", 2 | 4),
+        b"delayedtargetvalidation" => ("DelayedTargetValidation", 127),
+        _ => return None,
+    })
+}
+
+fn attr_lname(a: &AttrInfo) -> Vec<u8> {
+    a.name
+        .strip_prefix(b"\\")
+        .unwrap_or(&a.name)
+        .to_ascii_lowercase()
+}
+
+pub(crate) fn attr_target_names(f: i64) -> String {
+    let mut v = Vec::new();
+    for (bit, n) in [
+        (1, "class"),
+        (2, "function"),
+        (4, "method"),
+        (8, "property"),
+        (16, "class constant"),
+        (32, "parameter"),
+        (64, "constant"),
+    ] {
+        if f & bit != 0 {
+            v.push(n);
+        }
+    }
+    v.join(", ")
+}
+
+impl<'a> Compiler<'a> {
+    /// Compile-time checks of internal attributes: their targets (unless
+    /// #[\DelayedTargetValidation] is present, RFC: Delayed target
+    /// validation) and that they are not repeated.
+    pub(crate) fn check_internal_attrs(
+        &mut self,
+        attrs: &[AttrInfo],
+        target: i64,
+        line: u32,
+    ) -> CResult<()> {
+        let names: Vec<Vec<u8>> = attrs.iter().map(attr_lname).collect();
+        let delayed = names.iter().any(|n| n == b"delayedtargetvalidation");
+        for (i, n) in names.iter().enumerate() {
+            let Some((shown, flags)) = internal_attr(n) else {
+                continue;
+            };
+            if names[..i].contains(n) {
+                return self.err(
+                    format!("Attribute \"{}\" must not be repeated", shown),
+                    attrs[i].line.max(line),
+                );
+            }
+            if flags & target == 0 && !delayed {
+                let tn = match target & !8 {
+                    0 => "property",
+                    1 => "class",
+                    2 => "function",
+                    4 => "method",
+                    16 => "class constant",
+                    32 => "parameter",
+                    _ => "constant",
+                };
+                return self.err(
+                    format!(
+                        "Attribute \"{}\" cannot target {} (allowed targets: {})",
+                        shown,
+                        tn,
+                        attr_target_names(flags)
+                    ),
+                    attrs[i].line.max(line),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Class-kind restrictions of #[\Attribute], #[\AllowDynamicProperties]
+    /// and #[\Deprecated] (observed on PHP 8.5: "Cannot apply #[\Attribute]
+    /// to interface Demo").
+    fn check_class_attrs(
+        &mut self,
+        attrs: &[AttrInfo],
+        kind: ClassKind,
+        flags: u32,
+        cname: &PhpStr,
+        line: u32,
+    ) -> CResult<()> {
+        let names: Vec<Vec<u8>> = attrs.iter().map(attr_lname).collect();
+        if names.iter().any(|n| n == b"delayedtargetvalidation") {
+            return Ok(());
+        }
+        let kind_name = match kind {
+            ClassKind::Class => "class",
+            ClassKind::Interface => "interface",
+            ClassKind::Trait => "trait",
+            ClassKind::Enum => "enum",
+        };
+        for n in &names {
+            let bad = match &n[..] {
+                b"attribute" => {
+                    if kind == ClassKind::Class && flags & crate::class::cflags::ABSTRACT != 0 {
+                        Some(("Attribute", "abstract class"))
+                    } else if kind != ClassKind::Class {
+                        Some(("Attribute", kind_name))
+                    } else {
+                        None
+                    }
+                }
+                b"allowdynamicproperties" if kind != ClassKind::Class => {
+                    Some(("AllowDynamicProperties", kind_name))
+                }
+                b"deprecated" if kind != ClassKind::Trait => Some(("Deprecated", kind_name)),
+                _ => None,
+            };
+            if let Some((a, k)) = bad {
+                return self.err(
+                    format!(
+                        "Cannot apply #[\\{}] to {} {}",
+                        a,
+                        k,
+                        cname.to_string_lossy()
+                    ),
+                    line,
+                );
+            }
+        }
+        Ok(())
+    }
 }

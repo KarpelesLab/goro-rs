@@ -809,7 +809,7 @@ impl Vm {
                 Op::DeclareConst { name, val } => {
                     let n = self.get(name)?;
                     let v = self.get(val)?;
-                    self.declare_constant(n, v)?;
+                    self.declare_const_stmt(n, v)?;
                 }
                 Op::MakeClosure { dst, func } => {
                     let code = self.code_ref().children[func as usize].clone();

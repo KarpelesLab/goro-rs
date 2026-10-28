@@ -1832,15 +1832,30 @@ impl Vm {
                 );
             }
         }
+        if c.flags & mflags::DEPRECATED != 0
+            && !self.deprecating.contains(&(c.attrs.as_ptr() as usize))
+        {
+            let detail = self.deprecation_detail(&c.attrs, c.class, false)?;
+            let (since, msg) = detail.unwrap_or((None, None));
+            let what = if c.flags & mflags::CASE != 0 {
+                "Enum case"
+            } else {
+                "Constant"
+            };
+            let text = super::include::deprecation_text(
+                &format!(
+                    "{} {}::{}",
+                    what,
+                    unsafe { (*c.class).name.dname() },
+                    n.to_string_lossy()
+                ),
+                since,
+                msg,
+            );
+            self.raise(super::errors::E_USER_DEPRECATED, &text)?;
+        }
         if c.flags & mflags::CASE != 0 {
             return self.enum_case(cls, n);
-        }
-        if c.flags & mflags::DEPRECATED != 0 {
-            self.deprecated(&format!(
-                "Constant {}::{} is deprecated",
-                cls.name.dname(),
-                n.to_string_lossy()
-            ))?;
         }
         self.eval_class_const(&c)
     }

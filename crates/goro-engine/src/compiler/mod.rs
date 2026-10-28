@@ -126,6 +126,8 @@ pub(crate) struct FState<'a> {
     region_ids: u32,
     pub flags: u32,
     pub num_statics: u32,
+    pub const_attrs: Vec<(PhpStr, Rc<[AttrInfo]>)>,
+    pub discarded_calls: Vec<u32>,
     pub line: u32,
     /// `__FUNCTION__`
     pub func_name: PhpStr,
@@ -175,6 +177,8 @@ impl<'a> FState<'a> {
             region_ids: 0,
             flags: 0,
             num_statics: 0,
+            const_attrs: Vec::new(),
+            discarded_calls: Vec::new(),
             line: 1,
             func_name: PhpStr::empty(),
             method_name: PhpStr::empty(),
@@ -613,6 +617,8 @@ impl<'a> Compiler<'a> {
             line_end,
             doc_comment: None,
             attrs: Rc::from(Vec::new()),
+            const_attrs: std::mem::take(&mut f.const_attrs),
+            discarded_calls: std::mem::take(&mut f.discarded_calls),
             caches,
             cv_map: std::cell::RefCell::new(None),
             statics: std::cell::RefCell::new(vec![None; f.num_statics as usize]),
@@ -897,7 +903,20 @@ impl<'a> Compiler<'a> {
                     self.add_use(k, u, Some(prefix), s.span.line)?;
                 }
             }
-            StmtKind::Const { items, .. } => {
+            StmtKind::Const { items, attrs } => {
+                if !attrs.is_empty() {
+                    // PHP 8.5 (RFC: Attributes on Constants).
+                    if items.len() > 1 {
+                        return self.err(
+                            "Cannot apply attributes to multiple constants at once",
+                            s.span.line,
+                        );
+                    }
+                    let a = self.attributes(attrs)?;
+                    self.check_internal_attrs(&a, 64, s.span.line)?;
+                    let full = self.qualify(items[0].name.name);
+                    self.f.const_attrs.push((PhpStr::from(full), a));
+                }
                 for c in *items {
                     let full = self.qualify(c.name.name);
                     let name = self.str_const(&full);

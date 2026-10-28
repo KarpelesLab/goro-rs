@@ -1603,7 +1603,10 @@ fn render_expr_text(t: &str) -> String {
             if j > ns {
                 let name = String::from_utf8_lossy(&b[ns..j]);
                 out.extend_from_slice(b"new ");
-                if !name.starts_with('\\') && !name.eq_ignore_ascii_case("class") {
+                let special = ["class", "self", "parent", "static"]
+                    .iter()
+                    .any(|w| name.eq_ignore_ascii_case(w));
+                if !name.starts_with('\\') && !special {
                     out.push(b'\\');
                 }
                 out.extend_from_slice(name.as_bytes());

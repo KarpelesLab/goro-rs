@@ -997,6 +997,17 @@ impl Vm {
             rules.extend(tu.rules.iter().cloned());
         }
         *cls.traits.borrow_mut() = traits.clone();
+        // PHP 8.5: #[\Deprecated] traits (RFC: #[\Deprecated] for traits).
+        for t in &traits {
+            if let Some((since, msg)) = self.deprecation_detail(&t.attrs, Rc::as_ptr(t), false)? {
+                let text = super::include::deprecation_text(
+                    &format!("Trait {} used by {}", t.name.dname(), cname),
+                    since,
+                    msg,
+                );
+                self.raise(super::errors::E_USER_DEPRECATED, &text)?;
+            }
+        }
         // Excluded (trait, method) pairs from insteadof.
         let mut excluded: Vec<(PhpStr, PhpStr)> = Vec::new();
         for r in &rules {
