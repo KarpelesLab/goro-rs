@@ -324,6 +324,15 @@ impl Vm {
 
     #[inline(always)]
     pub(crate) fn put_int(&mut self, dst: Reg, i: i64) {
+        if !self.try_put_int(dst, i) {
+            self.put(dst, Value::Int(i));
+        }
+    }
+
+    /// Stores an int over an int, or into a temporary holding nothing to
+    /// drop; false (nothing done) otherwise. Nothing is released.
+    #[inline(always)]
+    pub(crate) fn try_put_int(&mut self, dst: Reg, i: i64) -> bool {
         let p = self.slot_ptr(dst);
         unsafe {
             match &mut *p {
@@ -331,13 +340,22 @@ impl Vm {
                 s if dst != NONE && dst & TMP != 0 && holds_no_resources(s) => {
                     std::ptr::write(p, Some(Value::Int(i)))
                 }
-                _ => self.put(dst, Value::Int(i)),
+                _ => return false,
             }
         }
+        true
     }
 
     #[inline(always)]
     pub(crate) fn put_bool(&mut self, dst: Reg, b: bool) {
+        if !self.try_put_bool(dst, b) {
+            self.put(dst, Value::Bool(b));
+        }
+    }
+
+    /// [`try_put_int`](Self::try_put_int) for bools.
+    #[inline(always)]
+    pub(crate) fn try_put_bool(&mut self, dst: Reg, b: bool) -> bool {
         let p = self.slot_ptr(dst);
         unsafe {
             match &mut *p {
@@ -345,9 +363,10 @@ impl Vm {
                 s if dst != NONE && dst & TMP != 0 && holds_no_resources(s) => {
                     std::ptr::write(p, Some(Value::Bool(b)))
                 }
-                _ => self.put(dst, Value::Bool(b)),
+                _ => return false,
             }
         }
+        true
     }
 
     /// The name of a variable slot (for messages).
@@ -399,10 +418,10 @@ impl Vm {
     /// returns.
     fn exec(&mut self, entry: usize) -> R<Value> {
         let _ = entry;
+        if goro_runtime::object::has_pending_destructors() {
+            self.run_pending_destructors()?;
+        }
         loop {
-            if goro_runtime::object::has_pending_destructors() {
-                self.run_pending_destructors()?;
-            }
             let ip = self.ex.ip;
             // SAFETY: the running frame's code; ip stays within it.
             let op = unsafe { &*self.ex.top.ops.add(ip) };
@@ -450,7 +469,12 @@ impl Vm {
                 Op::Add { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         match x.checked_add(y) {
-                            Some(s) => self.put_int(dst, s),
+                            Some(s) => {
+                                if self.try_put_int(dst, s) {
+                                    continue;
+                                }
+                                self.put(dst, Value::Int(s));
+                            }
                             None => {
                                 let f = x as f64 + y as f64;
                                 self.put(dst, Value::Float(f));
@@ -469,7 +493,12 @@ impl Vm {
                 Op::Sub { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         match x.checked_sub(y) {
-                            Some(s) => self.put_int(dst, s),
+                            Some(s) => {
+                                if self.try_put_int(dst, s) {
+                                    continue;
+                                }
+                                self.put(dst, Value::Int(s));
+                            }
                             None => {
                                 let f = x as f64 - y as f64;
                                 self.put(dst, Value::Float(f));
@@ -488,7 +517,12 @@ impl Vm {
                 Op::Mul { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         match x.checked_mul(y) {
-                            Some(s) => self.put_int(dst, s),
+                            Some(s) => {
+                                if self.try_put_int(dst, s) {
+                                    continue;
+                                }
+                                self.put(dst, Value::Int(s));
+                            }
                             None => {
                                 let f = x as f64 * y as f64;
                                 self.put(dst, Value::Float(f));
@@ -508,7 +542,10 @@ impl Vm {
                 Op::Lt { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x < y;
-                        self.put_bool(dst, r);
+                        if self.try_put_bool(dst, r) {
+                            continue;
+                        }
+                        self.put(dst, Value::Bool(r));
                     } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
                         && let Some(Value::Bool(r)) = fast_arith(Bin::Lt, x, y)
                     {
@@ -522,7 +559,10 @@ impl Vm {
                 Op::Le { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x <= y;
-                        self.put_bool(dst, r);
+                        if self.try_put_bool(dst, r) {
+                            continue;
+                        }
+                        self.put(dst, Value::Bool(r));
                     } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
                         && let Some(Value::Bool(r)) = fast_arith(Bin::Le, x, y)
                     {
@@ -536,7 +576,10 @@ impl Vm {
                 Op::Eq { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x == y;
-                        self.put_bool(dst, r);
+                        if self.try_put_bool(dst, r) {
+                            continue;
+                        }
+                        self.put(dst, Value::Bool(r));
                     } else {
                         self.binop_slow(Bin::Eq, dst, a, b)?;
                     }
@@ -544,7 +587,10 @@ impl Vm {
                 Op::Identical { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         let r = x == y;
-                        self.put_bool(dst, r);
+                        if self.try_put_bool(dst, r) {
+                            continue;
+                        }
+                        self.put(dst, Value::Bool(r));
                     } else {
                         self.binop_slow(Bin::Identical, dst, a, b)?;
                     }
@@ -570,43 +616,65 @@ impl Vm {
                 Op::AssignOpVar { op, var, src, res } => {
                     self.op_assign_op_var(op, var, src, res)?
                 }
-                Op::IncDecVar { op, var, res } => self.op_incdec_var(op, var, res)?,
-                Op::Jmp { t } => self.ex.ip = t as usize,
+                Op::IncDecVar { op, var, res } => {
+                    // `$i++;` on an int variable: in place, nothing released.
+                    if res == NONE
+                        && let Some(Value::Int(x)) = unsafe { &mut *self.slot_ptr(var) }
+                        && let Some(n) = if op.is_inc() {
+                            x.checked_add(1)
+                        } else {
+                            x.checked_sub(1)
+                        }
+                    {
+                        *x = n;
+                        continue;
+                    }
+                    self.op_incdec_var(op, var, res)?
+                }
+                Op::Jmp { t } => {
+                    self.ex.ip = t as usize;
+                    continue;
+                }
                 Op::JmpZ { c, t } => {
-                    let b = match self.peek(c) {
-                        Some(Value::Bool(b)) => {
-                            let b = *b;
-                            self.drop_tmp(c);
-                            b
+                    if let Some(Value::Bool(b)) = self.peek(c) {
+                        // A bool temporary holds nothing to release.
+                        let b = *b;
+                        self.drop_tmp(c);
+                        if !b {
+                            self.ex.ip = t as usize;
                         }
-                        _ => {
-                            let v = self.get(c)?;
-                            self.to_bool(&v)
-                        }
-                    };
+                        continue;
+                    }
+                    let v = self.get(c)?;
+                    let b = self.to_bool(&v);
+                    drop(v);
                     if !b {
                         self.ex.ip = t as usize;
                     }
                 }
                 Op::JmpNZ { c, t } => {
-                    let b = match self.peek(c) {
-                        Some(Value::Bool(b)) => {
-                            let b = *b;
-                            self.drop_tmp(c);
-                            b
+                    if let Some(Value::Bool(b)) = self.peek(c) {
+                        // A bool temporary holds nothing to release.
+                        let b = *b;
+                        self.drop_tmp(c);
+                        if b {
+                            self.ex.ip = t as usize;
                         }
-                        _ => {
-                            let v = self.get(c)?;
-                            self.to_bool(&v)
-                        }
-                    };
+                        continue;
+                    }
+                    let v = self.get(c)?;
+                    let b = self.to_bool(&v);
+                    drop(v);
                     if b {
                         self.ex.ip = t as usize;
                     }
                 }
                 Op::JmpLt { a, b, t } => {
                     let r = if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        x < y
+                        if x < y {
+                            self.ex.ip = t as usize;
+                        }
+                        continue;
                     } else {
                         let x = self.get(a)?;
                         let y = self.get(b)?;
@@ -1101,6 +1169,12 @@ impl Vm {
                     self.put(dst, Value::Int(n));
                 }
                 Op::TypeCheck { .. } => {}
+            }
+            // Destructors of objects the instruction released run before
+            // the next one. Fast paths that release nothing skip this
+            // (`continue`).
+            if goro_runtime::object::has_pending_destructors() {
+                self.run_pending_destructors()?;
             }
         }
     }
