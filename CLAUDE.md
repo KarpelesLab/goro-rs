@@ -27,6 +27,9 @@ The development machine is the maintainer's desktop, shared with other work.
   count from `~/.cargo/config.toml` (don't pass `-j`). An agent working in its
   own worktree uses its own `CARGO_TARGET_DIR=/tmp/cargo-target-goro-<name>`
   and deletes it when done.
+- Don't let a hang hold the build lock: run tests under `timeout` (e.g.
+  `flock ... timeout 900 cargo test ...`), or build under the lock with
+  `--no-run` and run the test binaries outside it.
 - Tests and benchmarks: at most about 8 parallel jobs. Check `free -g` first,
   and wait if less than 30 GB is available or the machine is swapping.
 - Containers (the reference PHP binary runs in one): spot checks only, batched
