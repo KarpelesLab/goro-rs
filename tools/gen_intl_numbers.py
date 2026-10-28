@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates crates/goro-ext-intl/src/data/numbers.txt, the number
+"""Generates crates/goro-ext-intl/data/numbers.txt.z (raw DEFLATE), the number
 formatting data of ext/intl's NumberFormatter, from the CLDR 48 JSON data
 (npm packages cldr-numbers-full and cldr-core, public Unicode data).
 
@@ -17,6 +17,7 @@ Tab-separated lines:
   A child parent              (CLDR parentLocales)
 """
 import json
+import zlib
 import os
 import sys
 
@@ -114,11 +115,14 @@ def main():
         pl = json.load(f)["supplemental"]["parentLocales"]["parentLocale"]
     for child, parent in sorted(pl.items()):
         lines.append(["A", child, parent])
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("# Number formatting data from CLDR 48 (tools/gen_intl_numbers.py)\n")
-        for l in lines:
-            assert all("\t" not in x and "\n" not in x for x in l)
-            f.write("\t".join(l) + "\n")
+    text = "# Number formatting data from CLDR 48 (tools/gen_intl_numbers.py)\n"
+    for l in lines:
+        assert all("\t" not in x and "\n" not in x for x in l)
+        text += "\t".join(l) + "\n"
+    # raw DEFLATE (RFC 1951), inflated on first use
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    with open(out, "wb") as f:
+        f.write(c.compress(text.encode("utf-8")) + c.flush())
 
 
 main()

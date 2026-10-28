@@ -116,7 +116,7 @@ fn data() -> &'static NumData {
     D.get_or_init(|| {
         let mut map = HashMap::new();
         let mut parents = HashMap::new();
-        for line in include_str!("data/numbers.txt").lines() {
+        for line in crate::inflate_text(include_bytes!("../data/numbers.txt.z")).lines() {
             if line.starts_with('#') {
                 continue;
             }

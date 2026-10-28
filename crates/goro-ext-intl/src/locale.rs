@@ -714,7 +714,11 @@ pub fn is_right_to_left(id: &str) -> bool {
 
 // ---------------------------------------------------------------- display names
 
-static DISPLAY: &str = include_str!("data/display.txt");
+/// The display names (tools/gen_intl_display.py), inflated once.
+fn display_text() -> &'static str {
+    static T: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    T.get_or_init(|| crate::inflate_text(include_bytes!("../data/display.txt.z")))
+}
 
 struct DisplayData {
     map: std::collections::HashMap<(u8, &'static str, &'static str), &'static str>,
@@ -724,7 +728,7 @@ fn display_data() -> &'static DisplayData {
     static D: std::sync::OnceLock<DisplayData> = std::sync::OnceLock::new();
     D.get_or_init(|| {
         let mut map = std::collections::HashMap::new();
-        for line in DISPLAY.lines() {
+        for line in display_text().lines() {
             if line.starts_with('#') {
                 continue;
             }

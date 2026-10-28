@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates crates/goro-ext-intl/src/data/display.txt, the locale display
+"""Generates crates/goro-ext-intl/data/display.txt.z (raw DEFLATE), the locale display
 names ext/intl's Locale::getDisplay*() need, from the CLDR 48 JSON data
 (npm packages cldr-localenames-full and cldr-numbers-full, public Unicode
 data).
@@ -12,6 +12,7 @@ K keyword key, T keyword type ("key/type"), C currency name, P pattern
 (code: pattern, separator, keytype).
 """
 import json
+import zlib
 import os
 import sys
 
@@ -89,11 +90,14 @@ def main():
             lines.append(("P", loc, "pattern", p.get("localePattern", "")))
             lines.append(("P", loc, "separator", p.get("localeSeparator", "")))
             lines.append(("P", loc, "keytype", p.get("localeKeyTypePattern", "")))
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("# Locale display names from CLDR 48 (tools/gen_intl_display.py)\n")
-        for kind, loc, code, name in lines:
-            assert "\t" not in name and "\n" not in name
-            f.write(f"{kind}\t{loc}\t{code}\t{name}\n")
+    text = "# Locale display names from CLDR 48 (tools/gen_intl_display.py)\n"
+    for kind, loc, code, name in lines:
+        assert "\t" not in name and "\n" not in name
+        text += f"{kind}\t{loc}\t{code}\t{name}\n"
+    # raw DEFLATE (RFC 1951), inflated on first use
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    with open(out, "wb") as f:
+        f.write(c.compress(text.encode("utf-8")) + c.flush())
 
 
 main()

@@ -31,3 +31,9 @@ pub mod utf16;
 
 /// The intl crate, for the wiring.
 pub use intl;
+
+/// Inflates embedded raw-DEFLATE text data, kept for the process.
+pub(crate) fn inflate_text(packed: &[u8]) -> &'static str {
+    let raw = goro_ext_zlib::gzinflate(packed, 0).unwrap_or_default();
+    Box::leak(String::from_utf8(raw).unwrap_or_default().into_boxed_str())
+}
