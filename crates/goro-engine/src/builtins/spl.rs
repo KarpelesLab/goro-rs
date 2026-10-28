@@ -1978,6 +1978,10 @@ fn fa_serialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn fa_unserialize(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     let data = a.array(0);
+    // A no-op on a non-empty array (test SplFixedArray_serialize).
+    if with(&o, |d: &mut FaData| !d.items.is_empty()).unwrap_or(false) {
+        return Ok(Value::Null);
+    }
     let mut items = Vec::new();
     for (k, v) in data.iter() {
         match k {

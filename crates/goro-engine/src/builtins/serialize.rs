@@ -478,6 +478,8 @@ struct Unser<'a> {
     overflow: bool,
     /// max_depth was given as an option (see [`VarTable::depth`]).
     explicit_depth: bool,
+    /// Cells held by typed properties (see [`Vm::unser_set_prop_held`]).
+    typed_refs: HashMap<usize, String>,
     /// Follow the outer allowed_classes (see [`VarTable::allowed`]).
     inherit_allowed: bool,
     /// Warn about data after the value (before any __unserialize() or
@@ -516,6 +518,7 @@ impl Unser<'_> {
             opened: 0,
             overflow: false,
             explicit_depth: false,
+            typed_refs: HashMap::new(),
             inherit_allowed: false,
             check_extra: false,
             who: "unserialize()",
@@ -932,13 +935,12 @@ impl Vm {
             if let Some(cls) = &cls
                 && let Some(h) = cls.native.unserialize_legacy
             {
-                // The payload has its own reference numbering, where 1 is
-                // the object (tests unserialize_with_reference.phpt,
-                // bug70284.phpt).
+                // The payload continues the numbering of the outer value
+                // (tests unserialize_with_reference.phpt, bug70284.phpt,
+                // ext/standard/tests/serialize/bug70513.phpt).
                 let end = u.pos + len;
                 let o = self.instantiate(cls)?;
                 let cell = u.cell(Value::Object(o.clone()));
-                let outer = std::mem::replace(&mut u.t.vals, vec![cell.clone()]);
                 let mut vals = Vec::new();
                 let mut r = Ok(());
                 while u.pos < end {
@@ -950,7 +952,6 @@ impl Vm {
                         }
                     }
                 }
-                u.t.vals = outer;
                 if r.is_err() {
                     // A payload that does not parse leaves the number
                     // unreadable.
@@ -1097,7 +1098,7 @@ impl Vm {
                 data.insert(key, v);
                 continue;
             }
-            self.unser_set_prop(&o, key, v)?;
+            self.unser_set_prop_held(&o, key, v, Some(&mut u.typed_refs))?;
         }
         u.expect(b'}')?;
         u.depth -= 1;
@@ -1264,6 +1265,18 @@ impl Vm {
     /// Sets an unserialized property (mangled names select private and
     /// protected properties).
     pub(crate) fn unser_set_prop(&mut self, o: &ObjRef, key: Key, v: Value) -> R<()> {
+        self.unser_set_prop_held(o, key, v, None)
+    }
+
+    /// [`Vm::unser_set_prop`], with the references already held by typed
+    /// properties (cell address: "property C::$p of type T").
+    fn unser_set_prop_held(
+        &mut self,
+        o: &ObjRef,
+        key: Key,
+        mut v: Value,
+        held: Option<&mut HashMap<usize, String>>,
+    ) -> R<()> {
         let cls = self.class_of(o);
         let name = match &key {
             Key::Str(s) => s.clone(),
@@ -1310,16 +1323,41 @@ impl Vm {
         if let Some(p) = idx {
             if let Some(t) = &p.ty {
                 let vv = v.deref();
-                if let crate::vm::types::Check::Fail =
-                    self.check_type(&vv, t, true, p.class, Rc::as_ptr(&cls))?
-                {
-                    return self.type_error(&format!(
-                        "Cannot assign {} to property {}::${} of type {}",
-                        crate::class::TypeName::tname(&vv),
-                        unsafe { (*p.class).name.dname() },
-                        p.name.dname(),
-                        t.display()
-                    ));
+                let pname = format!(
+                    "{}::${} of type {}",
+                    unsafe { (*p.class).name.dname() },
+                    p.name.dname(),
+                    t.display()
+                );
+                match self.check_type(&vv, t, true, p.class, Rc::as_ptr(&cls))? {
+                    crate::vm::types::Check::Fail => {
+                        return self.type_error(&format!(
+                            "Cannot assign {} to property {}",
+                            crate::class::TypeName::tname(&vv),
+                            pname
+                        ));
+                    }
+                    // A widened value (int to float); a reference another
+                    // typed property holds can't change (test
+                    // typed_property_refs).
+                    crate::vm::types::Check::Coerced(nv) => match &v {
+                        Value::Ref(c) => {
+                            if let Some(h) = held.as_ref().and_then(|m| m.get(&c.addr())) {
+                                return self.type_error(&format!(
+                                    "Reference with value of type {} held by {} is not compatible with property {}",
+                                    crate::class::TypeName::tname(&vv),
+                                    h,
+                                    pname
+                                ));
+                            }
+                            drop(c.set(nv));
+                        }
+                        _ => v = nv,
+                    },
+                    crate::vm::types::Check::Ok => {}
+                }
+                if let (Value::Ref(c), Some(m)) = (&v, held) {
+                    m.insert(c.addr(), format!("property {}", pname));
                 }
             }
             let mut slots = o.obj().slots.borrow_mut();

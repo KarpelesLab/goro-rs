@@ -228,7 +228,13 @@ impl Vm {
         };
         let count = entries.iter().filter(|e| e.2.is_some()).count();
         out.extend_from_slice(format!("{}{}{}object(", pad, amp, lazy_prefix).as_bytes());
-        out.extend_from_slice(cls.name.dname().as_bytes());
+        // The name's bytes as they are (test serialize/006: Latin-1);
+        // anonymous classes show their display name.
+        if cls.name.contains(&0) {
+            out.extend_from_slice(cls.name.dname().as_bytes());
+        } else {
+            out.extend_from_slice(&cls.name);
+        }
         out.extend_from_slice(format!(")#{} ({}) {{\n", o.handle(), count).as_bytes());
         self.dump_stack.push(id);
         for (label, ty, val) in entries {
