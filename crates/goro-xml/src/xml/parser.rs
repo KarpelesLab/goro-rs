@@ -906,7 +906,11 @@ impl<'l> Parser<'l> {
                         return Status::NeedMore;
                     }
                     self.flush_errors(sink);
-                    if self.recover() && !self.halted && self.phase == Phase::Content {
+                    if self.recover()
+                        && !self.halted
+                        && self.phase == Phase::Content
+                        && self.pos < self.buf.len()
+                    {
                         self.resync();
                         continue;
                     }

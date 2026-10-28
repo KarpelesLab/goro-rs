@@ -1143,6 +1143,15 @@ fn get_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(o) = a.obj(0) else {
         return Ok(Value::Null);
     };
+    // Classes overloading their properties report their computed table
+    // (SimpleXMLElement; observed on PHP 8.5).
+    let cls = vm.class_of(&o);
+    if cls.native.prop.is_some()
+        && let Some(h) = cls.native.props_for
+        && let Some(arr) = h(vm, &o)
+    {
+        return Ok(Value::Array(arr));
+    }
     let mut out = PhpArray::new();
     for (k, v) in vm.visible_props(&o) {
         let key = match k {

@@ -97,11 +97,12 @@ impl XmlError {
             _ => "parser error",
         };
         let file = self.file.as_deref().unwrap_or("Entity");
-        let mut v = vec![format!(
-            "{file}: line {}: {what} : {}",
-            self.line,
-            self.text()
-        )];
+        // Namespace errors have no location prefix (observed on PHP 8.5).
+        let mut v = vec![if self.domain == Domain::Namespace {
+            format!("{what} : {}", self.text())
+        } else {
+            format!("{file}: line {}: {what} : {}", self.line, self.text())
+        }];
         if self.line > 0 {
             let line = input
                 .split(|&b| b == b'\n')

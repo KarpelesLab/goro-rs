@@ -1009,7 +1009,7 @@ impl Vm {
                 let cls = self.class_of(&o);
                 if cls.native.dim.is_some()
                     && let Some(r) =
-                        self.native_dim(&o, key.as_ref(), crate::class::ObjAccess::Read)
+                        self.native_dim(&o, key.as_ref(), crate::class::ObjAccess::Fetch)
                 {
                     let v = r?;
                     if !matches!(v, Value::Object(_)) {
@@ -1474,7 +1474,7 @@ impl Vm {
                 }
             }
             PathAction::MakeRef | PathAction::FetchW => {
-                let v = match self.native_dim(o, key, ObjAccess::Read)? {
+                let v = match self.native_dim(o, key, ObjAccess::Fetch)? {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };

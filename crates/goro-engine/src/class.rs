@@ -344,6 +344,9 @@ pub struct NativeHooks {
 #[derive(Clone, Debug)]
 pub enum ObjAccess {
     Read,
+    /// A read for a nested write (`$o[k]['x'] = 1`, `$o[k]->p = 1`): the
+    /// hook may create what is missing; otherwise like `Read`.
+    Fetch,
     /// `isset()`.
     Isset,
     /// `empty()`.

@@ -31,6 +31,7 @@ pub mod pcre;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod simplexml;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
@@ -92,5 +93,6 @@ pub fn modules() -> Vec<&'static Module> {
         &xml::MODULE,
         &xmlwriter::MODULE,
         &xmlreader::MODULE,
+        &simplexml::MODULE,
     ]
 }
