@@ -15,6 +15,7 @@ members = [
     "crates/goro-ext-bcmath",
     "crates/goro-ext-random",
     "crates/goro-ext-filter",
+    "crates/goro-ext-gmp",
 ]
 
 [workspace.package]
