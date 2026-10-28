@@ -829,7 +829,12 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             Type::Static(sp) => {
-                if !is_return {
+                // test Zend/tests/type_declarations/static_type_outside_class
+                if !is_return
+                    || (self.class.is_none()
+                        && !self.file.is_empty()
+                        && self.f.flags & fflags::CLOSURE == 0)
+                {
                     return self.err(
                         "Cannot use \"static\" when no class scope is active",
                         sp.line,
@@ -1291,8 +1296,27 @@ impl<'a> Compiler<'a> {
                             c.span.line,
                         );
                     }
+                    // tests Zend/tests/type_declarations/typed_class_constants_type_error4-6
+                    if let Some(Type::Named(n)) = &c.ty
+                        && n.kind == NameKind::Unqualified
+                        && matches!(
+                            &n.name.to_ascii_lowercase()[..],
+                            b"callable" | b"void" | b"never"
+                        )
+                    {
+                        return self.err(
+                            format!(
+                                "Class constant {}::{} cannot have type {}",
+                                cn,
+                                String::from_utf8_lossy(c.items[0].name.name),
+                                String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                            ),
+                            c.span.line,
+                        );
+                    }
+                    // (static is a valid constant type)
                     let ty = match &c.ty {
-                        Some(t) => Some(self.type_hint(t, false)?),
+                        Some(t) => Some(self.type_hint(t, true)?),
                         None => None,
                     };
                     let attrs = self.attributes(c.attrs)?;
@@ -1318,7 +1342,32 @@ impl<'a> Compiler<'a> {
                             );
                         }
                         self.member_init_checks(&item.value)?;
-                        let value = self.const_expr(&item.value)?;
+                        let mut value = self.const_expr(&item.value)?;
+                        // A literal of the wrong type; int widens to float
+                        // (tests typed_class_constants_type_error1,
+                        // multiple_constants, type_success1).
+                        if let (Some(t), ConstExpr::Value(v)) = (&ty, &value) {
+                            if let Value::Int(i) = v
+                                && t.mask & tmask::FLOAT != 0
+                                && t.mask & tmask::INT == 0
+                            {
+                                value = ConstExpr::Value(Value::Float(*i as f64));
+                            } else if t.classes.is_empty()
+                                && t.mask & tmask::STATIC == 0
+                                && !const_fits_type(t, v)
+                            {
+                                return self.err(
+                                    format!(
+                                        "Cannot use {} as value for class constant {}::{} of type {}",
+                                        type_word(v),
+                                        cn,
+                                        String::from_utf8_lossy(item.name.name),
+                                        t.display()
+                                    ),
+                                    item.span.line,
+                                );
+                            }
+                        }
                         consts.push(ConstDecl {
                             name: PhpStr::intern(item.name.name),
                             value,
@@ -1421,6 +1470,21 @@ impl<'a> Compiler<'a> {
                             return self.err("Property hook list must not be empty", it.span.line);
                         }
                     }
+                    // tests typed_properties_017, typed_properties_109
+                    if let Some(Type::Named(n)) = &p.ty
+                        && n.kind == NameKind::Unqualified
+                        && matches!(&n.name.to_ascii_lowercase()[..], b"void" | b"never")
+                    {
+                        return self.err(
+                            format!(
+                                "Property {}::${} cannot have type {}",
+                                cn,
+                                String::from_utf8_lossy(p.props[0].name.name),
+                                String::from_utf8_lossy(&n.name.to_ascii_lowercase())
+                            ),
+                            p.span.line,
+                        );
+                    }
                     let ty = match &p.ty {
                         Some(t) => {
                             let th = self.type_hint(t, false)?;
@@ -1487,6 +1551,20 @@ impl<'a> Compiler<'a> {
                                 }
                                 self.member_init_checks(d)?;
                                 let ce = self.const_expr(d)?;
+                                if let (Some(t), ConstExpr::Value(Value::Null)) = (&ty, &ce)
+                                    && !t.allows_null()
+                                    && !t.classes.iter().any(|g| g.len() > 1)
+                                {
+                                    // tests typed_properties_015, 049
+                                    return self.err(
+                                        format!(
+                                            "Default value for property of type {} may not be null. Use the nullable type ?{} to allow null default value",
+                                            t.display(),
+                                            t.display()
+                                        ),
+                                        it.span.line,
+                                    );
+                                }
                                 if let (Some(t), ConstExpr::Value(v)) = (&ty, &ce)
                                     && !const_fits_type(t, v)
                                 {
