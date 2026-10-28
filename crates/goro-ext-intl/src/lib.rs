@@ -10,9 +10,13 @@
 //! units (as ICU counts them) are converted where the PHP API exposes
 //! them.
 
+pub mod calendar;
 pub mod collator;
+pub mod datefmt;
+pub mod dtpg;
 pub mod error;
 pub mod locale;
 pub mod msgfmt;
 pub mod numfmt;
+pub mod timezone;
 pub mod utf16;

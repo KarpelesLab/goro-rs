@@ -26,14 +26,28 @@ use crate::func::Args;
 use crate::registry::{ConstVal, Module};
 use crate::vm::{R, Vm};
 
+mod calendar;
 mod collator;
+mod datefmt;
 mod datehook;
+mod dtpg;
 mod locale;
 mod msgfmt;
 mod numfmt;
+mod timezone;
 
 /// Every module of the extension (all named "intl").
-pub static MODULES: &[&Module] = &[&MODULE, &locale::MODULE, &collator::MODULE, &numfmt::MODULE, &msgfmt::MODULE];
+pub static MODULES: &[&Module] = &[
+    &MODULE,
+    &locale::MODULE,
+    &collator::MODULE,
+    &numfmt::MODULE,
+    &msgfmt::MODULE,
+    &timezone::MODULE,
+    &calendar::MODULE,
+    &datefmt::MODULE,
+    &dtpg::MODULE,
+];
 
 pub static MODULE: Module = Module {
     name: "intl",
@@ -261,7 +275,10 @@ impl<T: 'static> goro_runtime::NativeData for IntlObj<T> {}
 
 /// Runs `f` on the native value of type `T` of `o` (None when the object
 /// holds none: not constructed).
-pub(crate) fn with_obj<T: 'static, U>(o: &ObjRef, f: impl FnOnce(&mut IntlObj<T>) -> U) -> Option<U> {
+pub(crate) fn with_obj<T: 'static, U>(
+    o: &ObjRef,
+    f: impl FnOnce(&mut IntlObj<T>) -> U,
+) -> Option<U> {
     let mut n = o.obj().native.borrow_mut();
     let b = n.as_mut()?;
     let any: &mut dyn std::any::Any = &mut **b;
