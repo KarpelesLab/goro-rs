@@ -52,6 +52,7 @@ pub mod streams;
 pub mod string;
 pub mod strmisc;
 pub mod tokenizer;
+pub mod sysv;
 pub mod uri;
 pub mod userstream;
 pub mod var;
@@ -107,6 +108,11 @@ pub fn modules() -> Vec<&'static Module> {
         &tokenizer::MODULE,
         &gettext::MODULE,
         &readline::MODULE,
+        &sysv::SHMOP,
+        &sysv::SYSVSEM,
+        &sysv::SYSVSHM,
+        &sysv::SYSVMSG,
+        &sysv::FTOK,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
