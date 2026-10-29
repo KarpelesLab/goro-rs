@@ -106,6 +106,11 @@ impl Image {
                     for (i, &k) in row.iter().enumerate() {
                         let xv = (x - 1 + i as i32).clamp(0, w - 1);
                         let p = at(xv, yv);
+                        // Transparent pixels add nothing (bug47946:
+                        // transparent white around a shape blurs to
+                        // the offset only).
+                        let op = (ALPHA_MAX - tc_a(p)) as f64 / ALPHA_MAX as f64;
+                        let k = k * op;
                         nr += tc_r(p) as f64 * k;
                         ng += tc_g(p) as f64 * k;
                         nb += tc_b(p) as f64 * k;
