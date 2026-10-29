@@ -239,6 +239,8 @@ pub struct ForeachStmt<'a> {
     pub value: Expr<'a>,
     /// `as &$v`
     pub by_ref: bool,
+    /// `as &$k => $v`: the grammar accepts it; the compiler rejects it.
+    pub key_by_ref: bool,
     pub body: Block<'a>,
     pub alt_syntax: bool,
 }

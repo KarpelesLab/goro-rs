@@ -706,11 +706,9 @@ impl<'a> Parser<'a> {
         let expr = self.expr()?;
         self.expect(T::As, &[])?;
         let (first, first_ref) = self.foreach_target()?;
+        let mut key_by_ref = false;
         let (key, value, by_ref) = if self.eat(T::DoubleArrow) {
-            // Test tests/lang/foreachLoop.006.
-            if first_ref {
-                return Err(self.fatal("Key element cannot be a reference".to_string(), first.span));
-            }
+            key_by_ref = first_ref;
             let (v, r) = self.foreach_target()?;
             (Some(first), v, r)
         } else {
@@ -731,6 +729,7 @@ impl<'a> Parser<'a> {
                 key,
                 value,
                 by_ref,
+                key_by_ref,
                 body,
                 alt_syntax: alt,
             })),
