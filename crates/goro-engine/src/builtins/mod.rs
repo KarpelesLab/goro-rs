@@ -7,6 +7,7 @@ pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
 pub mod date;
+pub mod dir;
 pub mod dom;
 pub mod enums;
 pub mod exec;
@@ -88,6 +89,7 @@ pub fn modules() -> Vec<&'static Module> {
         &image::MODULE,
         &mail::MODULE,
         &net::MODULE,
+        &dir::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,

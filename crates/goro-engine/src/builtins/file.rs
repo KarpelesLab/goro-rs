@@ -157,11 +157,19 @@ pub static MODULE: Module = Module {
         ),
         (
             "function chown(string $filename, string|int $user): bool",
-            ret_true,
+            chown,
         ),
         (
             "function chgrp(string $filename, string|int $group): bool",
-            ret_true,
+            chgrp,
+        ),
+        (
+            "function lchown(string $filename, string|int $user): bool",
+            lchown,
+        ),
+        (
+            "function lchgrp(string $filename, string|int $group): bool",
+            lchgrp,
         ),
         ("function stat(string $filename): array|false", stat),
         ("function lstat(string $filename): array|false", lstat),
@@ -225,6 +233,10 @@ pub static MODULE: Module = Module {
         ),
         (
             "function disk_total_space(string $directory): float|false",
+            disk_total_space,
+        ),
+        (
+            "function diskfreespace(string $directory): float|false",
             disk_free_space,
         ),
         (
@@ -687,7 +699,10 @@ pub fn with_stream<T>(
         return vm.fthrow(
             a,
             "TypeError",
-            "supplied resource is not a valid stream resource",
+            &format!(
+                "Argument #{} ($stream) must be an open stream resource",
+                i + 1
+            ),
         );
     };
     let Some(cell) = d.downcast_ref::<std::cell::RefCell<Stream>>() else {
@@ -751,6 +766,9 @@ pub fn open_stream(
     quiet: bool,
 ) -> R<Option<Stream>> {
     let fname = a.fname();
+    if filename.is_empty() {
+        return vm.throw("ValueError", "Path must not be empty");
+    }
     if let Some(cls) = super::userstream::wrapper_for(vm, filename) {
         return super::userstream::open(vm, a, &cls, filename, mode, quiet);
     }
@@ -950,9 +968,6 @@ pub fn open_stream(
 fn fopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
     let m = a.str(1);
-    if f.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
-    }
     match open_stream(vm, a, &f, &m, false)? {
         Some(s) => Ok(Value::Resource(new_stream_res(s))),
         None => Ok(Value::Bool(false)),
@@ -975,7 +990,7 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(
             a,
             "TypeError",
-            "supplied resource is not a valid stream resource",
+            "Argument #1 ($stream) must be an open stream resource",
         );
     }
     let is_std = [
@@ -1698,9 +1713,6 @@ pub fn stat_from_user(st: &PhpArray) -> PhpArray {
 
 fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
-    if f.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
-    }
     let off = a.int_or(3, 0);
     let len = a.opt_int(4);
     if let Some(l) = len
@@ -1785,9 +1797,6 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
     let flags = a.int_or(1, 0);
-    if f.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
-    }
     if !(0..=31).contains(&flags) {
         return vm.fthrow(
             a,
@@ -1845,14 +1854,43 @@ fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
-    vm.fwarn(
-        a,
-        &format!("{}: {}", String::from_utf8_lossy(what), io_err_msg(e)),
-    )?;
+    pwarn(vm, a, what, io_err_msg(e))?;
     Ok(Value::Bool(false))
 }
 
+/// A warning naming the path: `"f(path): msg"`.
+fn pwarn(vm: &mut Vm, a: &Args, path: &[u8], msg: &str) -> R<()> {
+    vm.warn(&format!(
+        "{}({}): {}",
+        a.fname(),
+        String::from_utf8_lossy(path),
+        msg
+    ))
+}
+
+/// ValueError for a path argument holding a NUL byte.
+pub(crate) fn nul_arg(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<bool> {
+    if a.get(i)
+        .is_some_and(|v| matches!(v.deref(), Value::Str(s) if s.contains(&0)))
+    {
+        vm.fthrow::<()>(
+            a,
+            "ValueError",
+            &format!(
+                "Argument #{} (${}) must not contain any null bytes",
+                i + 1,
+                name
+            ),
+        )?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "filename")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -1862,7 +1900,7 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let p = vm.fs_path(&f);
     if p.is_dir() {
-        vm.fwarn(a, &format!("{}: Is a directory", f.to_string_lossy()))?;
+        pwarn(vm, a, &f, "Is a directory")?;
         return Ok(Value::Bool(false));
     }
     match std::fs::remove_file(&p) {
@@ -1872,6 +1910,12 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "from")? {
+        return Ok(Value::Null);
+    }
+    if !nul_arg(vm, a, 1, "to")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
         return Ok(Value::Bool(false));
     }
@@ -1889,21 +1933,22 @@ fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match std::fs::rename(vm.fs_path(&from), vm.fs_path(&to)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => {
-            vm.fwarn(
-                a,
-                &format!(
-                    "{},{}: {}",
-                    from.to_string_lossy(),
-                    to.to_string_lossy(),
-                    io_err_msg(&e)
-                ),
-            )?;
+            let mut both = from.to_vec();
+            both.push(b',');
+            both.extend_from_slice(&to);
+            pwarn(vm, a, &both, io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
 }
 
 fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "from")? {
+        return Ok(Value::Null);
+    }
+    if !nul_arg(vm, a, 1, "to")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
         return Ok(Value::Bool(false));
     }
@@ -1938,6 +1983,9 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -1988,6 +2036,9 @@ fn current_umask() -> u32 {
 }
 
 fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -2107,6 +2158,14 @@ fn is_executable(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn stat_fail(vm: &mut Vm, a: &Args, what: &str) -> R<Value> {
+    let f = a.str(0);
+    if f.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    if f.contains(&0) {
+        vm.fwarn(a, "Filename contains null byte")?;
+        return Ok(Value::Bool(false));
+    }
     vm.fwarn(
         a,
         &format!("{} failed for {}", what, a.str(0).to_string_lossy()),
@@ -2184,10 +2243,16 @@ fn filetype(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "filename")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
     let f = a.str(0);
+    if f.is_empty() {
+        return Ok(Value::Bool(false));
+    }
     if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
         let times = match (a.opt_int(1), a.opt_int(2)) {
             (None, _) => PhpArray::new(),
@@ -2234,6 +2299,9 @@ fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "filename")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -2301,6 +2369,9 @@ fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "path")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -2536,7 +2607,13 @@ pub fn fnmatch(pat: &[u8], s: &[u8], flags: i64) -> bool {
     rec(pat, s, pathname, noescape, period, casefold, true)
 }
 
-fn fnmatch_fn(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn fnmatch_fn(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "pattern")? {
+        return Ok(Value::Null);
+    }
+    if !nul_arg(vm, a, 1, "filename")? {
+        return Ok(Value::Null);
+    }
     Ok(Value::Bool(fnmatch(&a.str(0), &a.str(1), a.int_or(2, 0))))
 }
 
@@ -2653,6 +2730,9 @@ fn glob_one(vm: &Vm, pat: &[u8], flags: i64, out: &mut Vec<Vec<u8>>) {
 }
 
 fn glob(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "pattern")? {
+        return Ok(Value::Null);
+    }
     let pat = a.str(0);
     let flags = a.int_or(1, 0);
     let pats = if flags & 1024 != 0 {
@@ -2693,12 +2773,19 @@ fn list_dir(vm: &Vm, d: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
 }
 
 fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
     let d = a.str(0);
     if d.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($directory) cannot be empty");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($directory) must not be empty",
+        );
     }
     let order = a.int_or(1, 0);
     let listed = match super::userstream::wrapper_for(vm, &d) {
@@ -2710,26 +2797,26 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     match listed {
         Ok(mut names) => {
+            // SCANDIR_SORT_NONE (2) keeps the directory order, any other
+            // non-zero value sorts descending (test scandir_variation9)
             match order {
                 0 => names.sort(),
-                1 => {
+                2 => {}
+                _ => {
                     names.sort();
                     names.reverse();
                 }
-                _ => {}
             }
             Ok(Value::Array(PhpArray::from_values(
                 names.into_iter().map(|s| Value::Str(PhpStr::from(s))),
             )))
         }
         Err(e) => {
-            vm.fwarn(
+            pwarn(
+                vm,
                 a,
-                &format!(
-                    "{}: Failed to open directory: {}",
-                    d.to_string_lossy(),
-                    io_err_msg(&e)
-                ),
+                &d,
+                &format!("Failed to open directory: {}", io_err_msg(&e)),
             )?;
             vm.fwarn(a, "(errno 2): No such file or directory")?;
             Ok(Value::Bool(false))
@@ -2737,18 +2824,23 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
-fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+pub(crate) fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
-        vm.fwarn(
+        pwarn(
+            vm,
             a,
-            &format!(
-                "{}: Failed to open directory: Operation not permitted",
-                a.str(0).to_string_lossy()
-            ),
+            &a.str(0),
+            "Failed to open directory: Operation not permitted",
         )?;
         return Ok(Value::Bool(false));
     }
     let d = a.str(0);
+    if d.is_empty() {
+        return Ok(Value::Bool(false));
+    }
     if let Some(cls) = super::userstream::wrapper_for(vm, &d) {
         return Ok(match super::userstream::opendir(vm, a, &cls, &d)? {
             Some(r) => {
@@ -2772,30 +2864,63 @@ fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Ok(Value::Resource(r))
         }
         Err(e) => {
-            vm.fwarn(
+            pwarn(
+                vm,
                 a,
-                &format!(
-                    "{}: Failed to open directory: {}",
-                    d.to_string_lossy(),
-                    io_err_msg(&e)
-                ),
+                &d,
+                &format!("Failed to open directory: {}", io_err_msg(&e)),
             )?;
             Ok(Value::Bool(false))
         }
     }
 }
 
-fn dir_arg(vm: &mut Vm, a: &Args) -> Option<ResRef> {
-    match a.val(0) {
-        Value::Resource(r) => Some(r),
-        _ => vm.last_dir.clone(),
+/// The directory handle argument: the last opened directory when null
+/// (deprecated), TypeErrors for closed or non-directory resources
+/// (observed on PHP 8.5).
+fn dir_arg(vm: &mut Vm, a: &Args) -> R<ResRef> {
+    let r = match a.val(0) {
+        Value::Resource(r) => r,
+        _ => {
+            vm.fdeprecated(
+                a,
+                "Passing null is deprecated, instead the last opened directory stream should be provided",
+            )?;
+            match vm.last_dir.clone() {
+                Some(r) => r,
+                None => return vm.throw("TypeError", "No resource supplied"),
+            }
+        }
+    };
+    if r.is_closed() {
+        return vm.fthrow(
+            a,
+            "TypeError",
+            "Argument #1 ($dir_handle) must be an open stream resource",
+        );
     }
+    let is_dir = {
+        let data = r.res().data.borrow();
+        data.as_ref()
+            .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+            .is_some_and(|c| {
+                c.try_borrow().is_ok_and(|s| {
+                    matches!(s.backing, Backing::Dir { .. } | Backing::UserDir { .. })
+                })
+            })
+    };
+    if !is_dir {
+        return vm.fthrow(
+            a,
+            "TypeError",
+            "Argument #1 ($dir_handle) must be a valid Directory resource",
+        );
+    }
+    Ok(r)
 }
 
-fn readdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(r) = dir_arg(vm, a) else {
-        return Ok(Value::Bool(false));
-    };
+pub(crate) fn readdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let r = dir_arg(vm, a)?;
     let mut tmp = vec![Value::Resource(r)];
     let args = Args {
         this: None,
@@ -2825,10 +2950,8 @@ fn readdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn rewinddir(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(r) = dir_arg(vm, a) else {
-        return Ok(Value::Null);
-    };
+pub(crate) fn rewinddir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let r = dir_arg(vm, a)?;
     let mut tmp = vec![Value::Resource(r)];
     let args = Args {
         this: None,
@@ -2849,8 +2972,9 @@ fn rewinddir(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn closedir(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    if let Some(r) = dir_arg(vm, a) {
+pub(crate) fn closedir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    {
+        let r = dir_arg(vm, a)?;
         let user = {
             let data = r.res().data.borrow();
             data.as_ref()
@@ -2869,6 +2993,12 @@ fn closedir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
+    if !nul_arg(vm, a, 1, "prefix")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -2880,7 +3010,7 @@ fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
     } else {
         vm.fs_path(&d)
     };
-    if !dir.is_dir() {
+    if !d.is_empty() && !dir.is_dir() {
         vm.notice_msg("tempnam(): file created in the system's temporary directory")?;
         dir = PathBuf::from("/tmp");
     }
@@ -2943,6 +3073,9 @@ fn getcwd(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 
 fn chdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -2973,6 +3106,9 @@ fn umask(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn readlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "path")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -2987,6 +3123,12 @@ fn readlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn symlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "target")? {
+        return Ok(Value::Null);
+    }
+    if !nul_arg(vm, a, 1, "link")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
         return Ok(Value::Bool(false));
     }
@@ -3002,6 +3144,12 @@ fn symlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn link(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "target")? {
+        return Ok(Value::Null);
+    }
+    if !nul_arg(vm, a, 1, "link")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? || !basedir_check(vm, a, 1)? {
         return Ok(Value::Bool(false));
     }
@@ -3017,6 +3165,9 @@ fn link(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn linkinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if !nul_arg(vm, a, 0, "path")? {
+        return Ok(Value::Null);
+    }
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
@@ -3030,8 +3181,125 @@ fn linkinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
-fn disk_free_space(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Float(1e12))
+fn disk_space(vm: &mut Vm, a: &mut Args, total: bool) -> R<Value> {
+    if !nul_arg(vm, a, 0, "directory")? {
+        return Ok(Value::Null);
+    }
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
+    let d = a.str(0);
+    if d.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+    let p = vm.fs_path(&d);
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return Ok(Value::Bool(false));
+    };
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        let e = std::io::Error::last_os_error();
+        vm.fwarn(a, io_err_msg(&e))?;
+        return Ok(Value::Bool(false));
+    }
+    let blocks = if total { st.f_blocks } else { st.f_bavail };
+    Ok(Value::Float(blocks as f64 * st.f_frsize as f64))
+}
+
+fn disk_free_space(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    disk_space(vm, a, false)
+}
+
+fn disk_total_space(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    disk_space(vm, a, true)
+}
+
+/// chown(), chgrp(), lchown(), lchgrp(): a user or group name or id.
+fn change_owner(vm: &mut Vm, a: &mut Args, group: bool, link: bool) -> R<Value> {
+    if !nul_arg(vm, a, 0, "filename")? {
+        return Ok(Value::Null);
+    }
+    if !basedir_check(vm, a, 0)? {
+        return Ok(Value::Bool(false));
+    }
+    let f = a.str(0);
+    if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
+        let opt = match (group, a.val(1)) {
+            (false, Value::Int(_)) => 3,
+            (false, _) => 2,
+            (true, Value::Int(_)) => 5,
+            (true, _) => 4,
+        };
+        return super::userstream::path_op(
+            vm,
+            a,
+            &cls,
+            "stream_metadata",
+            vec![Value::Str(f), Value::Int(opt), a.val(1)],
+        );
+    }
+    let id: u32 = match a.val(1) {
+        Value::Int(n) => n as u32,
+        v => {
+            let name = vm.to_php_str(&v)?;
+            let Ok(cn) = std::ffi::CString::new(name.to_vec()) else {
+                return Ok(Value::Bool(false));
+            };
+            let found = if group {
+                let g = unsafe { libc::getgrnam(cn.as_ptr()) };
+                (!g.is_null()).then(|| unsafe { (*g).gr_gid })
+            } else {
+                let u = unsafe { libc::getpwnam(cn.as_ptr()) };
+                (!u.is_null()).then(|| unsafe { (*u).pw_uid })
+            };
+            match found {
+                Some(id) => id,
+                None => {
+                    let what = if group { "group" } else { "user" };
+                    vm.fwarn(
+                        a,
+                        &format!("Unable to find {what} ID for {}", name.to_string_lossy()),
+                    )?;
+                    return Ok(Value::Bool(false));
+                }
+            }
+        }
+    };
+    let p = vm.fs_path(&f);
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return Ok(Value::Bool(false));
+    };
+    let (uid, gid) = if group {
+        (u32::MAX, id)
+    } else {
+        (id, u32::MAX)
+    };
+    let rc = unsafe {
+        if link {
+            libc::lchown(c.as_ptr(), uid, gid)
+        } else {
+            libc::chown(c.as_ptr(), uid, gid)
+        }
+    };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        vm.fwarn(a, io_err_msg(&e))?;
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(true))
+}
+
+fn chown(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    change_owner(vm, a, false, false)
+}
+fn chgrp(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    change_owner(vm, a, true, false)
+}
+fn lchown(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    change_owner(vm, a, false, true)
+}
+fn lchgrp(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    change_owner(vm, a, true, true)
 }
 
 // ---------------------------------------------------------------- CSV
