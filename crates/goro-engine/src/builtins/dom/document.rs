@@ -478,7 +478,17 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
     };
+    // A legacy document needs its document element (observed on PHP 8.5).
+    if !modern && with_arena(|ar| ar.document_element(d).is_none()) {
+        vm.fwarn(a, "Document Missing Root Element")?;
+        return Ok(Value::Bool(false));
+    }
     let mut q = q;
+    // The XML namespace always goes with the "xml" prefix (observed on
+    // PHP 8.5; test gh12870_b.phpt).
+    if !modern && q.ns.as_deref() == Some(XML_NS) {
+        q.prefix = Some("xml".into());
+    }
     if !modern && q.ns.is_some() && q.prefix.is_none() && q.ns.as_deref() != Some(XMLNS_NS) {
         // A namespaced attribute needs a prefix in libxml's model: PHP
         // finds or declares one on the document element (observed on PHP
@@ -495,6 +505,25 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     }
                 };
                 q.prefix = Some(p);
+            }
+        });
+    }
+    // A prefix the document element binds to another namespace is
+    // replaced by a made-up one (observed on PHP 8.5; tests
+    // createAttributeNS_prefix_conflicts/*.phpt).
+    if !modern
+        && let (Some(p), Some(ns)) = (q.prefix.clone(), q.ns.clone())
+        && &*p != "xml"
+        && &*p != "xmlns"
+    {
+        with_arena(|ar| {
+            if let Some(de) = ar.document_element(d)
+                && ar.lookup_ns(de, Some(&p)).is_some_and(|u| u != ns)
+            {
+                q.prefix = Some(match ar.lookup_prefix(de, &ns) {
+                    Some(x) => x,
+                    None => super::element::generated_prefix(ar, de).as_str().into(),
+                });
             }
         });
     }
@@ -571,7 +600,6 @@ fn import_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Ok(c) => {
             if !modern {
                 with_arena(|ar| super::element::reconcile_imported(ar, c, d));
-                super::element::mark_imported(c);
             }
             wrap_node(vm, c)
         }

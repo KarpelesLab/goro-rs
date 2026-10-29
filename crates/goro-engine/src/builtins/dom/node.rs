@@ -146,12 +146,13 @@ pub(crate) fn legacy_insert(
             child = a.next_sibling(node);
         }
         let old_root = a.root(node);
+        let from_fragment = matches!(a.data(node), NodeData::Fragment);
         let inserted = a.insert_unchecked(parent, node, child);
         if old_root != node && old_root != a.doc_of(old_root) {
             s.free_if_unheld(old_root);
         }
         for &n in &inserted {
-            super::element::reconcile_after_insert(&mut s.arena, n);
+            super::element::reconcile_after_insert(&mut s.arena, n, from_fragment);
         }
         s.collect();
         Ok(inserted)
@@ -403,12 +404,13 @@ fn replace_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         let old_root = ar.root(node);
+        let from_fragment = matches!(ar.data(node), NodeData::Fragment);
         let r = ar.replace_child(parent, node, child)?;
         if old_root != node && !matches!(ar.data(old_root), NodeData::Document(_)) {
             s.free_if_unheld(old_root);
         }
         if !modern {
-            super::element::reconcile_after_insert(&mut s.arena, node);
+            super::element::reconcile_after_insert(&mut s.arena, node, from_fragment);
         }
         s.collect();
         Ok(r)

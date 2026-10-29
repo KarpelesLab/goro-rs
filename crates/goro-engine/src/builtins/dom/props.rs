@@ -395,6 +395,9 @@ fn compute(a: &mut goro_xml::Arena, n: NodeId, name: &str, modern: bool) -> PV {
         },
         // Attr.
         "name" => match a.data(n) {
+            // Legacy DOMAttr::$name is the local name (observed on PHP 8.5;
+            // test gh17224.phpt).
+            NodeData::Attribute(at) if !a.is_modern(a.doc_of(n)) => PV::S(at.name.local.to_string()),
             NodeData::Attribute(at) => PV::S(at.name.qualified()),
             NodeData::Doctype(d) => PV::S(d.name.to_string()),
             _ => PV::S(a.node_name(n)),
