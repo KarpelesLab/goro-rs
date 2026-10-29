@@ -469,6 +469,42 @@ impl Vm {
         self.magic_get(o, cls, name)
     }
 
+    /// The reference a by-reference `__get` returns for a write fetch
+    /// (`&$o->p`, `$o->p[] = v`; test Zend/tests/magic_methods/bug39449).
+    fn magic_get_ref(&mut self, o: &ObjRef, name: &PhpStr) -> R<Option<PhpRef>> {
+        let cls = self.class_of(o);
+        let get = cls.magic.borrow().get.clone();
+        let Some(f) = get else { return Ok(None) };
+        if !f
+            .code()
+            .is_some_and(|c| c.flags & crate::bytecode::fflags::BY_REF != 0)
+            || self.guarded(o, name, 0)
+        {
+            return Ok(None);
+        }
+        if !matches!(
+            self.lookup_prop(&cls, name, self.scope_ptr()),
+            PropLookup::Dynamic | PropLookup::Hidden(_)
+        ) {
+            return Ok(None);
+        }
+        self.prop_guards.push((o.handle(), name.clone(), 0));
+        let c = super::calls::Callee {
+            func: f.clone(),
+            this: Some(o.clone()),
+            static_class: self.class_ptr_of(o),
+            scope: f.scope.get(),
+            closure: None,
+            magic_name: None,
+        };
+        let r = self.call_callee_raw(c, vec![Value::Str(name.clone())]);
+        self.prop_guards.pop();
+        Ok(match r? {
+            Value::Ref(r) => Some(r),
+            _ => None,
+        })
+    }
+
     fn magic_get(&mut self, o: &ObjRef, cls: &Class, name: &PhpStr) -> R<Value> {
         let f = cls.magic.borrow().get.clone().unwrap();
         self.prop_guards.push((o.handle(), name.clone(), 0));
@@ -1366,8 +1402,11 @@ impl Vm {
                     Ok(Value::Ref(r))
                 }
                 None => {
-                    let v = self.read_prop(o, name, true, None)?;
+                    if let Some(r) = self.magic_get_ref(o, name)? {
+                        return Ok(Value::Ref(r));
+                    }
                     let cls = self.class_of(o);
+                    let v = self.read_prop(o, name, true, None)?;
                     // Natively overloaded properties hand out a detached
                     // reference silently (observed on PHP 8.5; test
                     // ext/simplexml gh17736).
@@ -1701,6 +1740,13 @@ impl Vm {
         match self.prop_ptr(o, name, false)? {
             Some(p) => Ok(Some(super::dims::Place::Ptr(p))),
             None => {
+                if cls.native.prop.is_none()
+                    && let Some(r) = self.magic_get_ref(o, name)?
+                {
+                    // Writes go through the reference (the place keeps it
+                    // alive).
+                    return Ok(Some(super::dims::Place::Temp(Box::new(Value::Ref(r)))));
+                }
                 // Through __get or a hook: a temporary (objects are handles,
                 // so nested property writes still reach them). Overloaded
                 // properties are fetched as such (they may be created).
