@@ -12,7 +12,6 @@ use goro_runtime::{Key, PhpArray, PhpStr, Value};
 use super::Config;
 use super::http1::Request;
 use crate::Vm;
-use crate::builtins::string::{parse_query, register_variable};
 use crate::vm::sapi::{Conn, Transport, http_date, now};
 
 /// Methods php -S knows; others get 501 (tests sapi/cli/tests/bug61679,
@@ -352,117 +351,17 @@ fn server_vars(c: &Ctx, script_name: &[u8], filename: &[u8], path_info: &[u8]) -
     a
 }
 
-/// Sets the superglobals of the request (PHP manual: Predefined
-/// Variables, variables_order, request_order).
+/// Sets the superglobals of the request.
 fn set_globals(vm: &mut Vm, c: &Ctx, server: PhpArray) {
-    let seps = vm
-        .get_ini(b"arg_separator.input")
-        .map(|v| v.to_vec())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| b"&".to_vec());
-    let get = c
-        .query
-        .as_ref()
-        .map(|q| parse_query(q, &seps))
-        .unwrap_or_default();
-    let mut post = PhpArray::new();
-    let mut files = PhpArray::new();
-    let reading = vm.get_ini(b"enable_post_data_reading").is_none_or(|v| {
-        !matches!(
-            &v.to_ascii_lowercase()[..],
-            b"0" | b"off" | b"" | b"false" | b"no"
-        )
-    });
-    if c.req.method == b"POST" && reading {
-        let ct = c.req.header(b"content-type").unwrap_or(b"").to_vec();
-        let base = ct
-            .split(|&b| b == b';')
-            .next()
-            .unwrap_or(b"")
-            .trim_ascii()
-            .to_ascii_lowercase();
-        let max = vm
-            .get_ini(b"post_max_size")
-            .map(|v| crate::vm::setup::parse_size(&v))
-            .unwrap_or(8 << 20);
-        if max > 0 && c.req.body.len() as i64 > max {
-            let msg = format!(
-                "PHP Request Startup: POST Content-Length of {} bytes exceeds the limit of {} bytes",
-                c.req.body.len(),
-                max
-            );
-            let _ = vm.raise_at(
-                crate::vm::errors::E_WARNING,
-                &msg,
-                PhpStr::from("Unknown"),
-                0,
-            );
-        } else if base == b"application/x-www-form-urlencoded" {
-            post = parse_query(&c.req.body, &seps);
-        } else if base == b"multipart/form-data"
-            && let Some(b) = super::upload::boundary(&ct)
-        {
-            super::upload::parse(vm, &c.req.body, &b, &mut post, &mut files);
-        }
-    }
-    let mut cookie = PhpArray::new();
-    if let Some(ck) = c.req.header(b"cookie") {
-        for part in ck.split(|&b| b == b';') {
-            let part = part.trim_ascii();
-            if part.is_empty() {
-                continue;
-            }
-            let (n, v) = match part.iter().position(|&b| b == b'=') {
-                Some(p) => (&part[..p], &part[p + 1..]),
-                None => (part, &b""[..]),
-            };
-            let n = goro_ext_standard::url::urldecode(n);
-            // The first cookie of a name wins.
-            if cookie.get(Key::from_bytes(&n).as_ref()).is_some() {
-                continue;
-            }
-            let v = goro_ext_standard::url::urldecode(v);
-            register_variable(&mut cookie, &n, Value::Str(PhpStr::from(v)));
-        }
-    }
-    let order = vm
-        .get_ini(b"request_order")
-        .filter(|v| !v.is_empty())
-        .or_else(|| vm.get_ini(b"variables_order"))
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| b"GPC".to_vec());
-    let mut request = PhpArray::new();
-    for ch in order.to_ascii_uppercase() {
-        let src = match ch {
-            b'G' => &get,
-            b'P' => &post,
-            b'C' => &cookie,
-            _ => continue,
-        };
-        for (k, v) in src.iter() {
-            request.insert(k.to_owned(), v.clone());
-        }
-    }
-    let mut env = PhpArray::new();
-    if vm
-        .get_ini(b"variables_order")
-        .is_none_or(|o| o.iter().any(|c| c.eq_ignore_ascii_case(&b'E')))
-    {
-        for (k, v) in std::env::vars_os() {
-            env.insert(
-                Key::from_bytes(k.as_bytes()),
-                Value::Str(PhpStr::new(v.as_bytes())),
-            );
-        }
-    }
-    let g = &mut vm.globals.dyn_vars;
-    g.insert(Key::from("_GET"), Value::Array(get));
-    g.insert(Key::from("_POST"), Value::Array(post));
-    g.insert(Key::from("_COOKIE"), Value::Array(cookie));
-    g.insert(Key::from("_FILES"), Value::Array(files));
-    g.insert(Key::from("_SERVER"), Value::Array(server));
-    g.insert(Key::from("_REQUEST"), Value::Array(request));
-    g.insert(Key::from("_ENV"), Value::Array(env));
+    let data = crate::request_vars::RequestData {
+        method: &c.req.method,
+        query: c.query.as_deref(),
+        content_type: c.req.header(b"content-type"),
+        content_length: None,
+        body: &c.req.body,
+        cookie: c.req.header(b"cookie"),
+    };
+    crate::request_vars::set_globals(vm, &data, server);
 }
 
 /// Updates `$_SERVER` for the script a router passed the request to.

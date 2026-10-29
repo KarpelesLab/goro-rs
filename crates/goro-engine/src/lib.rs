@@ -25,6 +25,7 @@ pub mod cli_server;
 pub mod compiler;
 pub mod func;
 pub mod registry;
+pub mod request_vars;
 pub mod vm;
 
 pub use func::{Args, Func, NativeFn};
