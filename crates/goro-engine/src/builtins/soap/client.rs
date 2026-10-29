@@ -153,6 +153,11 @@ fn fetch(vm: &mut Vm, a: &Args, u: &str) -> Result<Vec<u8>, String> {
         return std::fs::read(&path)
             .map_err(|_| format!("failed to load \"{u}\": No such file or directory"));
     }
+    if let Some(url) = super::http::parse_url(u)
+        && super::http::refuse_remote(&url.host)
+    {
+        return Err(format!("failed to load external entity \"{u}\""));
+    }
     match super::super::file::open_stream(vm, a, u.as_bytes(), b"rb", true) {
         Ok(Some(mut s)) => Ok(super::super::file::read_rest(vm, &mut s)),
         _ => Err(format!("failed to load external entity \"{u}\"")),

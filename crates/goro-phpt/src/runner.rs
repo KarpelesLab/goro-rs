@@ -125,6 +125,9 @@ pub const ONLINE_TESTS: &[&str] = &[
     "ext/curl/tests/bug71523.phpt",
     "ext/curl/tests/curl_basic_008.phpt",
     "ext/curl/tests/curl_basic_010.phpt",
+    // WSDLs from unknown hosts ("i_dont_exist.com")
+    "ext/soap/tests/bugs/bug34657.phpt",
+    "ext/soap/tests/bugs/bug70469.phpt",
     "ext/standard/tests/file/file_get_contents_error002.phpt",
     "ext/standard/tests/file/file_get_contents_with_custom_uri_parser.phpt",
     "ext/standard/tests/network/gethostbyname_basic001.phpt",

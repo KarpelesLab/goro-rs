@@ -469,6 +469,13 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if top {
             self.sdl.target_ns = self.d(di).attr(root, "targetNamespace").unwrap_or_default();
         }
+        // Character data in <definitions> (observed on PHP 8.5; test
+        // bugs/bug80672.phpt).
+        for c in self.d(di).all_kids(root) {
+            if self.d(di).arena.node_type(c) == goro_xml::NodeType::CData {
+                return err("Unexpected WSDL element <>");
+            }
+        }
         for c in self.d(di).kids(root) {
             let (ns, local) = {
                 let d = self.d(di);
@@ -547,25 +554,22 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if !self.d(di).is(port, NS_WSDL, "port") {
                     continue;
                 }
-                // The address says which binding kind it is.
+                // The address (any namespace: soap, soap12, http...).
                 let mut addr = None;
                 let mut version = 0;
                 for a in self.d(di).kids(port) {
                     let d = self.d(di);
                     if d.local(a) == "address" {
+                        addr = Some(a);
                         if d.ns(a) == NS_WSDL_SOAP11 {
                             version = 1;
-                            addr = Some(a);
-                            break;
                         } else if d.ns(a) == NS_WSDL_SOAP12 {
                             version = 2;
-                            addr = Some(a);
-                            break;
                         }
+                        break;
                     }
                 }
                 let Some(addr) = addr else {
-                    // Not a SOAP port (HTTP or unknown binding).
                     continue;
                 };
                 let Some(location) = self.d(di).attr(addr, "location") else {
@@ -578,36 +582,46 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 let Some(&(bdi, bnode)) = self.bindings.get(&bname) else {
                     return err(format!("No <binding> element with name '{bname}'"));
                 };
-                // The binding must be a SOAP binding of that version.
+                // A SOAP binding (its version from the address, else from
+                // the soap:binding element); other transports are skipped
+                // (observed on PHP 8.5; tests bugs/bug50698_*.phpt).
+                let mut style_rpc = false;
+                let mut soap_binding = None;
+                for b in self.d(bdi).kids(bnode) {
+                    let d = self.d(bdi);
+                    if d.local(b) == "binding"
+                        && (d.ns(b) == NS_WSDL_SOAP11 || d.ns(b) == NS_WSDL_SOAP12)
+                    {
+                        soap_binding = Some(b);
+                        break;
+                    }
+                }
+                if let Some(b) = soap_binding {
+                    let d = self.d(bdi);
+                    if version == 0 {
+                        version = if d.ns(b) == NS_WSDL_SOAP12 { 2 } else { 1 };
+                    }
+                    style_rpc = d.attr(b, "style").as_deref() == Some("rpc");
+                    if let Some(t) = d.attr(b, "transport")
+                        && t != "http://schemas.xmlsoap.org/soap/http"
+                    {
+                        continue;
+                    }
+                }
+                if version == 0 {
+                    continue;
+                }
                 let soap_ns = if version == 2 {
                     NS_WSDL_SOAP12
                 } else {
                     NS_WSDL_SOAP11
                 };
-                let mut style_rpc = false;
-                let mut is_soap = false;
-                for b in self.d(bdi).kids(bnode) {
-                    if self.d(bdi).is(b, soap_ns, "binding") {
-                        is_soap = true;
-                        style_rpc = self.d(bdi).attr(b, "style").as_deref() == Some("rpc");
-                        if let Some(t) = self.d(bdi).attr(b, "transport")
-                            && t != "http://schemas.xmlsoap.org/soap/http"
-                        {
-                            return err(format!(
-                                "PHP-SOAP doesn't support transport '{t}'"
-                            ));
-                        }
-                    }
-                }
-                if !is_soap {
-                    continue;
-                }
                 found_port = true;
                 self.bind_operations(bdi, bnode, soap_ns, style_rpc, version, &location)?;
             }
         }
         if !found_port {
-            if any_service || !self.bindings.is_empty() {
+            if any_service {
                 return err("Could not find any usable binding services in WSDL.");
             }
             return err("Couldn't bind to service");
@@ -892,6 +906,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
             match local.as_str() {
                 "import" => {
                     let ns = self.d(di).attr(c, "namespace");
+                    // The XML namespace is built in.
+                    if ns.as_deref() == Some(NS_XML) {
+                        continue;
+                    }
                     if let Some(loc) = self.d(di).attr(c, "schemaLocation") {
                         if ns.as_deref() == Some(tns) && !tns.is_empty() {
                             return schema_err(format!(

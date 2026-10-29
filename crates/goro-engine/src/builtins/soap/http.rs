@@ -83,6 +83,22 @@ pub fn parse_url(s: &str) -> Option<Url> {
     })
 }
 
+/// While developing: refuses (and logs) hosts other than loopback ones.
+pub fn refuse_remote(host: &str) -> bool {
+    if !DEV_REFUSE_REMOTE || is_loopback(host) {
+        return false;
+    }
+    let script = std::env::args().collect::<Vec<_>>().join(" ");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/claude-1000/goro-work/soap/remote.log")
+    {
+        let _ = writeln!(f, "{} {}", host, script);
+    }
+    true
+}
+
 fn is_loopback(host: &str) -> bool {
     host == "localhost"
         || host
@@ -110,15 +126,7 @@ pub fn send(
         if url.scheme == "https" {
             return Ok(Err(("HTTP", "SSL support is not available in this build".into())));
         }
-        if DEV_REFUSE_REMOTE && !is_loopback(&url.host) {
-            let script = std::env::args().collect::<Vec<_>>().join(" ");
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/claude-1000/goro-work/soap/remote.log")
-            {
-                let _ = writeln!(f, "{} {}", url.host, script);
-            }
+        if refuse_remote(&url.host) {
             return Ok(Err(("HTTP", "Could not connect to host".into())));
         }
         let head = request_head(vm, client, &url, request.len(), action, version);

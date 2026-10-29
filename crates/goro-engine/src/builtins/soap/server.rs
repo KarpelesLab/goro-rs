@@ -126,12 +126,20 @@ fn send_doc(vm: &mut Vm, version: i64, xml: &[u8], fault: bool) {
     } else {
         b"Content-Type: text/xml; charset=utf-8"
     };
-    if fault {
-        let _ = super::super::headers::add_header(vm, b"HTTP/1.1 500 Internal Server Error", true, 0);
+    // Headers only while they can still be sent (no warning otherwise).
+    if !super::super::headers::sent(vm) {
+        if fault {
+            let _ = super::super::headers::add_header(
+                vm,
+                b"HTTP/1.1 500 Internal Server Error",
+                true,
+                0,
+            );
+        }
+        let _ = super::super::headers::add_header(vm, ct, true, 0);
+        let cl = format!("Content-Length: {}", xml.len());
+        let _ = super::super::headers::add_header(vm, cl.as_bytes(), true, 0);
     }
-    let _ = super::super::headers::add_header(vm, ct, true, 0);
-    let cl = format!("Content-Length: {}", xml.len());
-    let _ = super::super::headers::add_header(vm, cl.as_bytes(), true, 0);
     vm.echo(xml);
 }
 
@@ -764,12 +772,14 @@ fn wsdl_output(vm: &mut Vm, this: &ObjRef, version: i64) -> R<Value> {
             let path = vm.fs_path(w.as_bytes());
             match std::fs::read(&path) {
                 Ok(b) if vm.functions.contains_key(&crate::class::lower(b"readfile")) => {
-                    let _ = super::super::headers::add_header(
-                        vm,
-                        b"Content-Type: text/xml; charset=utf-8",
-                        true,
-                        0,
-                    );
+                    if !super::super::headers::sent(vm) {
+                        let _ = super::super::headers::add_header(
+                            vm,
+                            b"Content-Type: text/xml; charset=utf-8",
+                            true,
+                            0,
+                        );
+                    }
                     vm.echo(&b);
                 }
                 _ => {
@@ -878,18 +888,23 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
         (_, None) => (None, None),
         (Some(s), Some(c)) => {
             let local = doc.local(c).to_string();
-            let by_name = s.find_function(&local).cloned();
-            let f = by_name.or_else(|| {
-                s.functions
-                    .iter()
-                    .find(|f| {
+            // rpc operations by name, document ones by their first part
+            // (its element, or its name for a type part).
+            let f = s
+                .functions
+                .iter()
+                .find(|f| f.rpc && f.name.eq_ignore_ascii_case(&local))
+                .or_else(|| {
+                    s.functions.iter().find(|f| {
                         !f.rpc
-                            && f.input.parts.first().is_some_and(|p| {
-                                p.element.as_ref().is_some_and(|(_, n)| n == &local)
+                            && f.input.parts.first().is_some_and(|p| match &p.element {
+                                Some((_, n)) => n == &local,
+                                None => p.name == local,
                             })
                     })
-                    .cloned()
-            });
+                })
+                .or_else(|| s.find_function(&local))
+                .cloned();
             match f {
                 Some(f) => (Some(f.name.clone()), Some(f)),
                 None => (Some(local), None),

@@ -319,6 +319,19 @@ pub fn to_xml(
         }
         cx.refs.push((addr, el, None));
     }
+    // An object whose class the classmap gives a (derived) WSDL type is
+    // written as that type (test classmap003.phpt).
+    let mut enc = enc;
+    if let Value::Object(o) = &v
+        && let Some(Enc::Type(t)) = enc
+        && let Some(sdl) = cx.sdl.clone()
+        && let Some((ns, n)) = classmap_type(vm, cx, o)
+        && let Some(Enc::Type(t2)) = sdl.find_type(&ns, &n)
+        && t2 != t
+        && sdl.types[t2].kind == Kind::Complex
+    {
+        enc = Some(Enc::Type(t2));
+    }
     cx.depth += 1;
     let r = match enc {
         None => guess_to_xml(vm, cx, &v, el, literal),
@@ -1474,14 +1487,9 @@ fn element_to_xml(
                 to_xml(vm, cx, enc, &Value::Str(PhpStr::from(d)), c, literal)?;
                 return Ok(true);
             }
-            let what = if matches!(v, Value::Object(_)) {
-                "object"
-            } else {
-                "array"
-            };
             Err(soap_error(
                 vm,
-                &format!("Encoding: {what} has no '{name}' property"),
+                &format!("Encoding: object has no '{name}' property"),
             ))
         }
         Some(Value::Null) if !nillable && min == 0 => Ok(true),
