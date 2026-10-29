@@ -301,7 +301,19 @@ impl Driver for SqliteDriver {
         match attr {
             // PDO::ATTR_TIMEOUT: seconds of busy timeout.
             2 => {
-                let s = vm.to_int(v)?;
+                let s = match v {
+                    Value::Int(i) => *i,
+                    Value::Bool(b) => *b as i64,
+                    Value::Str(s) if goro_runtime::numeric::is_numeric_str(s.as_bytes()) => {
+                        vm.to_int(v)?
+                    }
+                    other => {
+                        return vm.type_error(&format!(
+                            "Attribute value must be of type int for selected attribute, {} given",
+                            Vm::type_name_given(other)
+                        ));
+                    }
+                };
                 self.conn
                     .borrow_mut()
                     .db
@@ -413,14 +425,12 @@ fn bind_value(vm: &mut Vm, v: &Value, ptype: i64) -> R<SqlValue> {
                 SqlValue::Blob(s.as_bytes().to_vec())
             }
         },
-        _ => match &v {
-            Value::Int(i) => SqlValue::Integer(*i),
-            Value::Float(f) => SqlValue::Real(*f),
-            _ => {
-                let s = vm.to_php_str(&v)?;
-                sc::text(s.as_bytes())
-            }
-        },
+        // PARAM_STR: always text, so `'1' = ?` with 1 matches (test
+        // pdo_sqlite_parser.phpt); column affinity converts on insert.
+        _ => {
+            let s = vm.to_php_str(&v)?;
+            sc::text(s.as_bytes())
+        }
     })
 }
 

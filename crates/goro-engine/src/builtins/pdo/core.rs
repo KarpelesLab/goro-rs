@@ -280,6 +280,10 @@ fn parse_dsn(vm: &mut Vm, fname: &str, dsn: &[u8]) -> R<(Vec<u8>, Vec<u8>)> {
         }
     }
     if let Some(rest) = dsn.strip_prefix(b"uri:") {
+        // PHP 8.5 (test pdo_sqlite___construct_uri.phpt).
+        vm.deprecated(
+            "Looking up the DSN from a URI is deprecated due to possible security concerns with DSNs coming from remote URIs",
+        )?;
         let path = String::from_utf8_lossy(rest).into_owned();
         let data = std::fs::read(&path).ok();
         match data {
@@ -426,10 +430,27 @@ fn init_connection(vm: &mut Vm, o: &ObjRef, fname: &str, a: &Args, from_connect:
                     .get_ini(b"open_basedir")
                     .map(|v| v.to_string_lossy())
                     .unwrap_or_default();
-                let w = format!(
-                    "{fname}(): open_basedir restriction in effect. File({fpath}) is not within the allowed path(s): ({bd})"
+                // A plain path gets open_basedir's warning (thrown during
+                // the constructor) chained before PDO's own exception; a URI
+                // only the latter (tests pdo_sqlite_open_basedir.phpt,
+                // pdo_sqlite_open_basedir_uri.phpt, open_basedir.phpt).
+                let outer = pdo_exception(
+                    vm,
+                    &format!("open_basedir prohibits opening {pstr}"),
+                    None,
+                    "",
                 );
-                return Err(pdo_exception(vm, &w, None, ""));
+                if !pstr.starts_with("file:")
+                    && let Unwind::Throw(o) = &outer
+                {
+                    let w = format!(
+                        "{fname}(): open_basedir restriction in effect. File({fpath}) is not within the allowed path(s): ({bd})"
+                    );
+                    if let Unwind::Throw(inner) = pdo_exception(vm, &w, None, "") {
+                        vm.set_prop_raw(o, b"previous", Value::Object(inner));
+                    }
+                }
+                return Err(outer);
             }
         }
         match SqliteDriver::open(vm, &path, flags) {

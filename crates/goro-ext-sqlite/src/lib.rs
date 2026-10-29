@@ -223,6 +223,9 @@ pub struct Stmt {
     /// when it is an expression (a parameter...). PHP refuses to attach
     /// files outside open_basedir and unknown ones (test gh9032.phpt).
     pub attach: Option<Option<String>>,
+    /// Double-quoted names taken as string literals: (literal, quoted
+    /// name), to give result columns the names SQLite would.
+    pub dqs: Vec<(String, String)>,
 }
 
 impl Stmt {
@@ -439,12 +442,14 @@ impl Db {
         }
         let mut owned = sql[start..end].to_string();
         let mut tries = 0;
+        let mut dqs = Vec::new();
         let ast = loop {
             let ast = graphitesql::sql::parse_one(&owned).map_err(|e| SqlError::from_engine(&e))?;
             match self.check(&ast, &owned) {
                 Ok(()) => break ast,
                 Err(e) => match dqs_rewrite(&owned, &e) {
                     Some(s) if tries < 32 => {
+                        dqs.extend(dqs_pair(&e));
                         owned = s;
                         tries += 1;
                     }
@@ -471,6 +476,7 @@ impl Db {
                 readonly,
                 explain,
                 attach,
+                dqs,
             }),
             tail,
         ))
@@ -540,6 +546,7 @@ impl Db {
         }
         let mut sql = std::borrow::Cow::Borrowed(st.sql.as_str());
         let mut tries = 0;
+        let mut dqs = st.dqs.clone();
         loop {
             Self::set_dry_budget(&sql);
             let r = match st.kind {
@@ -558,11 +565,21 @@ impl Db {
             };
             DRY_BUDGET.with(|b| b.borrow_mut().clear());
             match r {
-                Ok(rows) => return Ok(rows),
+                Ok(mut rows) => {
+                    for c in rows.columns.iter_mut() {
+                        for (lit, ident) in &dqs {
+                            if c.contains(lit.as_str()) {
+                                *c = c.replace(lit.as_str(), ident);
+                            }
+                        }
+                    }
+                    return Ok(rows);
+                }
                 Err(e) => {
                     let mut e = SqlError::from_engine(&e);
                     match dqs_rewrite(&sql, &e) {
                         Some(s) if tries < 32 => {
+                            dqs.extend(dqs_pair(&e));
                             sql = std::borrow::Cow::Owned(s);
                             tries += 1;
                         }
@@ -871,6 +888,15 @@ impl Db {
 /// quoted String Literals Are Accepted"): a `"name"` that names no column
 /// is a string. graphitesql reports such names as an error; the query is
 /// rewritten with that name as a `'…'` literal and tried again.
+fn dqs_pair(e: &SqlError) -> Option<(String, String)> {
+    let rest = e.msg.strip_prefix("no such column: \"")?;
+    let name = rest.strip_suffix("\" - should this be a string literal in single-quotes?")?;
+    Some((
+        format!("'{}'", name.replace('\'', "''")),
+        format!("\"{}\"", name.replace('"', "\"\"")),
+    ))
+}
+
 fn dqs_rewrite(sql: &str, e: &SqlError) -> Option<String> {
     let rest = e.msg.strip_prefix("no such column: \"")?;
     let name = rest.strip_suffix("\" - should this be a string literal in single-quotes?")?;
