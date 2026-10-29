@@ -682,6 +682,16 @@ impl Vm {
         }
         let r = self.run();
         let _ = what;
+        // Code that declares no function, closure or class is referenced by
+        // nothing once it ran: free it (an include or eval run many times
+        // would otherwise keep every compiled copy; test Zend/tests/
+        // runtime_compile_time_binary_operands runs 60k evals).
+        if main.children.is_empty()
+            && main.classes.is_empty()
+            && let Some(i) = self.units.iter().rposition(|u| Rc::ptr_eq(u, &main))
+        {
+            self.units.swap_remove(i);
+        }
         r
     }
 
