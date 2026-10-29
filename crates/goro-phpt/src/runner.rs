@@ -107,6 +107,10 @@ pub struct Config {
     pub online: bool,
     /// How to run the CGI SAPI; none: tests needing it are skipped.
     pub cgi: Option<CgiCommand>,
+    /// For the FPM tests: a `bin/php` path whose `../sbin/php-fpm` is the
+    /// FPM binary, given to them as TEST_PHP_EXECUTABLE (where
+    /// sapi/fpm/tests/tester.inc looks for php-fpm).
+    pub fpm_php: Option<PathBuf>,
 }
 
 /// The CGI SAPI binary and the arguments that come first (`goro --cgi`).
@@ -458,6 +462,11 @@ fn prepare(
         push(k, v);
     }
     let mut env = base_env(cfg);
+    if let Some(p) = &cfg.fpm_php
+        && dir.ends_with("sapi/fpm/tests")
+    {
+        env.push(("TEST_PHP_EXECUTABLE".into(), p.clone().into_os_string()));
+    }
     env.extend(extra_env.iter().cloned());
     for line in phpt.get_list("ENV", false) {
         let (k, v) = line.split_once('=').unwrap_or((&line, ""));

@@ -23,6 +23,7 @@ pub mod bytecode;
 pub mod cgi;
 pub mod class;
 pub mod cli_server;
+pub mod fpm;
 pub mod compiler;
 pub mod func;
 pub mod registry;

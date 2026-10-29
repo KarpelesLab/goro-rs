@@ -308,6 +308,11 @@ fn ob_implicit_flush(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn flush(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     if vm.out.buffers.is_empty() {
         vm.out.flush();
+        // FPM sends the headers on flush() even without output (test
+        // sapi/fpm/tests/gh12385.phpt).
+        if vm.out.sapi.fpm {
+            vm.out.sapi.send_head();
+        }
     }
     Ok(Value::Null)
 }
