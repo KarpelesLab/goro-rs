@@ -53,8 +53,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **92.8%** overall
-(16,626 passing, 1,282 failing, 3,717 skipped), as of 2026-10-29. The
+php-src test suite (8.5.4), share of the tests that run: **93.2%** overall
+(16,888 passing, 1,231 failing, 3,454 skipped), as of 2026-10-30. The
 ext/opcache tests now run (goro has no optimizer or JIT, so tests that dump
 opcodes fail where they used to be skipped).
 The extension libraries below are wired into the engine; ext/random,
@@ -64,7 +64,10 @@ the XML extensions each pass 87-100% of their tests that run.
 - `goro-engine` and the `goro` binary: compiler and VM running PHP 8.5
   scripts (classes, enums, closures, generators, fibers, attributes,
   references, exceptions, output buffering, streams, SPL, Reflection,
-  serialization). Speed is currently 1.3–4.7x PHP's time on benchmarks.
+  serialization). On the `bench/` scripts (`bench/run.sh -p <php>`) goro
+  takes 1.2–5.8x PHP 8.5's time (arrays 1.2x, loops and float math
+  1.6–1.7x, strings and templates 2.5x, function calls 5.8x), as of
+  2026-10-30.
 - `goro-runtime`: PHP values (16-byte `Value`, byte strings, copy-on-write
   ordered arrays, references, objects, destructor queue, cycle collector),
   conversions, comparisons and arithmetic, checked against PHP 8.5 output.

@@ -7,7 +7,7 @@
 use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
-use goro_runtime::{Key, ObjRef, PhpArray, PhpRef, PhpStr, Value};
+use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, PhpStr, Value};
 
 use super::{R, Vm};
 use crate::bytecode::*;
@@ -61,20 +61,37 @@ impl Vm {
     // ------------------------------------------------------------ reads
 
     pub(crate) fn op_fetch_dim(&mut self, dst: Reg, base: Reg, key: Reg, mode: DimMode) -> R<()> {
-        // Fast path: array[int|string].
-        if let Some(Value::Array(a)) = self.peek(base) {
-            let found = match self.peek(key) {
-                Some(Value::Int(i)) => Some(a.get_int(*i).cloned()),
-                Some(Value::Str(s)) => Some(a.get_str(s).cloned()),
+        // Fast path: array[int|string], the array possibly behind a
+        // reference (a by-reference parameter).
+        #[inline(always)]
+        fn lookup(a: &PhpArray, k: Option<&Value>) -> Option<Value> {
+            match k {
+                Some(Value::Int(i)) => a.get_int(*i).map(Value::deref),
+                Some(Value::Str(s)) => a.get_str(s).map(Value::deref),
                 _ => None,
-            };
-            if let Some(Some(v)) = found {
-                let v = v.into_deref();
-                self.drop_tmp(key);
-                self.drop_tmp(base);
-                self.put(dst, v);
-                return Ok(());
             }
+        }
+        let found = match self.peek(base) {
+            Some(Value::Array(a)) => lookup(a, self.peek(key)),
+            Some(Value::Ref(r)) => match &*r.borrow() {
+                Value::Array(a) => lookup(a, self.peek(key)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(v) = found {
+            self.drop_tmp(key);
+            self.drop_tmp(base);
+            match v {
+                Value::Int(i) => self.put_int(dst, i),
+                Value::Float(f) => {
+                    if let Err(v) = self.try_put_scalar(dst, Value::Float(f)) {
+                        self.put(dst, v);
+                    }
+                }
+                v => self.put(dst, v),
+            }
+            return Ok(());
         }
         let b = if mode == DimMode::Read {
             self.get(base)?
@@ -548,9 +565,11 @@ impl Vm {
     }
 
     pub(crate) fn op_write(&mut self, path: u32, res: Reg) -> R<()> {
-        let code = self.code_ref();
-        let p = code.paths[path as usize].clone();
-        self.run_path(&p, res)
+        let p: *const WritePath = &self.code_ref().paths[path as usize];
+        // SAFETY: the path belongs to the running frame's code, which the
+        // frame keeps alive (it holds the function) until the instruction
+        // completes, whatever user code the walk runs; no copy needed.
+        self.run_path(unsafe { &*p }, res)
     }
 
     /// Pointer to a variable's value for writing (creating it as null).
@@ -586,15 +605,15 @@ impl Vm {
         if o.is_lazy() {
             return Ok(false);
         }
-        let mut c = self.code_ref().caches[cache as usize].get();
         let cp = self.class_ptr_of(&o) as usize;
+        let mut c = self.code_ref().caches[cache as usize].get().way(cp);
         if c.key != cp {
             let name = match self.peek(n) {
                 Some(Value::Str(s)) => s.clone(),
                 _ => return Ok(false),
             };
             self.prop_ic_fill(&o, &name, cache);
-            c = self.code_ref().caches[cache as usize].get();
+            c = self.code_ref().caches[cache as usize].get().way(cp);
             if c.key != cp {
                 return Ok(false);
             }
@@ -651,7 +670,170 @@ impl Vm {
         Ok(true)
     }
 
+    /// `$v[k1]...[kn] = x`, `op= x`, `++`/`--` when every container is an
+    /// array, the keys are ints or strings, the intermediate elements exist
+    /// and nothing on the way is a reference (but the variable): the walk
+    /// without the general machinery, which it would mirror exactly. False
+    /// (nothing visible done) when the general walk is needed.
+    fn dim_path_fast(&mut self, path: &WritePath, res: Reg) -> R<bool> {
+        const MAX: usize = 4;
+        let PathBase::Var(var) = path.base else {
+            return Ok(false);
+        };
+        let n = path.elems.len();
+        if n > MAX {
+            return Ok(false);
+        }
+        // The keys, borrowed from their operands (which nothing below
+        // writes before the end): ints, or strings normalised as array
+        // keys are.
+        let mut keys: [KeyRef<'static>; MAX] = [KeyRef::Int(0); MAX];
+        for (i, e) in path.elems.iter().enumerate() {
+            let PathElem::Dim(k) = *e else {
+                return Ok(false);
+            };
+            let v: *const Value = match self.peek(k) {
+                Some(v) => v,
+                None => return Ok(false),
+            };
+            // SAFETY: see above; the operand outlives the walk.
+            keys[i] = match unsafe { &*v } {
+                Value::Int(i) => KeyRef::Int(*i),
+                Value::Str(s) => match goro_runtime::array::canonical_int(s) {
+                    Some(i) => KeyRef::Int(i),
+                    None => KeyRef::Str(s),
+                },
+                _ => return Ok(false),
+            };
+        }
+        // The operand of the action, checked before anything is written.
+        match path.action {
+            // `$a[..] = $a` reads the variable after the walk separated it.
+            PathAction::Assign(v) if v & (CONST | TMP) == 0 && slot_of(v) == slot_of(var) => {
+                return Ok(false);
+            }
+            PathAction::Assign(v) if v & (CONST | TMP) == 0 && self.peek(v).is_none() => {
+                return Ok(false);
+            }
+            PathAction::Assign(_) | PathAction::IncDec(_) => {}
+            PathAction::AssignOp(op, v) => match self.peek(v) {
+                Some(Value::Int(_) | Value::Float(_)) if op != Bin::Concat => {}
+                Some(Value::Str(_)) if op == Bin::Concat => {}
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        }
+        let p = self.slot_ptr(var);
+        // SAFETY: the variable's slot, or the cell of the reference it
+        // holds; no user code runs before the pointers are dropped.
+        let mut cur: *mut Value = match unsafe { &mut *p } {
+            Some(Value::Ref(rf)) => rf.as_ptr(),
+            Some(v) => v as *mut Value,
+            None => return Ok(false),
+        };
+        for &k in keys.iter().take(n - 1) {
+            let Value::Array(a) = (unsafe { &mut *cur }) else {
+                return Ok(false);
+            };
+            if !matches!(a.get(k), Some(Value::Array(_))) {
+                return Ok(false);
+            }
+            // Separating a shared array is invisible to PHP code.
+            cur = a.make_mut().get_mut(k).unwrap() as *mut Value;
+        }
+        let Value::Array(a) = (unsafe { &mut *cur }) else {
+            return Ok(false);
+        };
+        let key = keys[n - 1];
+        match path.action {
+            PathAction::Assign(v) => {
+                if matches!(a.get(key), Some(Value::Ref(_))) {
+                    return Ok(false);
+                }
+                let val = self.get(v)?;
+                if res != NONE {
+                    self.put(res, val.clone());
+                }
+                // `cur` and the keys are still valid: reading the operand
+                // ran no code and wrote no other slot.
+                let Value::Array(a) = (unsafe { &mut *cur }) else {
+                    unreachable!()
+                };
+                let old = a.make_mut().assign(key.to_owned(), val);
+                drop(old);
+            }
+            PathAction::AssignOp(op, v) => {
+                let d = a.make_mut();
+                let Some(slot) = d.get_mut(key) else {
+                    return Ok(false);
+                };
+                if op == Bin::Concat {
+                    let Value::Str(s) = slot else {
+                        return Ok(false);
+                    };
+                    let Some(Value::Str(y)) = self.peek(v) else {
+                        unreachable!()
+                    };
+                    s.push_bytes(y);
+                    let r = if res != NONE {
+                        Some(Value::Str(s.clone()))
+                    } else {
+                        None
+                    };
+                    self.drop_tmp(v);
+                    if let Some(r) = r {
+                        self.put(res, r);
+                    }
+                } else {
+                    let Some(y) = self.peek(v) else {
+                        unreachable!()
+                    };
+                    let Some(r) = super::exec::fast_arith(op, slot, y) else {
+                        return Ok(false);
+                    };
+                    // The old value is a number: nothing to drop.
+                    unsafe { std::ptr::write(slot, r) };
+                    if res != NONE {
+                        let r = slot.clone();
+                        self.put(res, r);
+                    }
+                }
+            }
+            PathAction::IncDec(op) => {
+                let d = a.make_mut();
+                let Some(Value::Int(x)) = d.get_mut(key) else {
+                    return Ok(false);
+                };
+                let old = *x;
+                let Some(nv) = (if op.is_inc() {
+                    old.checked_add(1)
+                } else {
+                    old.checked_sub(1)
+                }) else {
+                    return Ok(false);
+                };
+                *x = nv;
+                if res != NONE {
+                    self.put(res, Value::Int(if op.is_post() { old } else { nv }));
+                }
+            }
+            _ => unreachable!(),
+        }
+        for e in path.elems.iter() {
+            if let PathElem::Dim(k) = *e {
+                self.drop_tmp(k);
+            }
+        }
+        Ok(true)
+    }
+
     fn run_path(&mut self, path: &WritePath, res: Reg) -> R<()> {
+        if matches!(path.base, PathBase::Var(_))
+            && matches!(path.elems.first(), Some(PathElem::Dim(_)))
+            && self.dim_path_fast(path, res)?
+        {
+            return Ok(());
+        }
         if path.elems.len() == 1
             && let PathElem::Prop(n, cache) = path.elems[0]
             && n & CONST != 0

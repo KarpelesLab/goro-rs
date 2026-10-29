@@ -1134,6 +1134,52 @@ pub struct Cache {
     pub key: usize,
     pub a: usize,
     pub b: u32,
+    /// Second way of class-keyed caches (property and method sites that
+    /// see two classes, as polymorphic calls do): filled by
+    /// [`Cache::store_class`], read by [`Cache::way`].
+    pub b2: u32,
+    pub key2: usize,
+    pub a2: usize,
+}
+
+impl Cache {
+    /// The way of a class-keyed cache holding `key`, as a one-way entry
+    /// (`key` 0 when neither way holds it).
+    #[inline(always)]
+    pub fn way(self, key: usize) -> Cache {
+        if self.key == key {
+            self
+        } else if self.key2 == key {
+            Cache {
+                key: self.key2,
+                a: self.a2,
+                b: self.b2,
+                ..Cache::default()
+            }
+        } else {
+            Cache::default()
+        }
+    }
+
+    /// Stores a class-keyed entry; the previous first way (another class)
+    /// becomes the second.
+    #[inline]
+    pub fn store_class(cell: &Cell<Cache>, key: usize, a: usize, b: u32) {
+        let old = cell.get();
+        let (key2, a2, b2) = if old.key == key {
+            (old.key2, old.a2, old.b2)
+        } else {
+            (old.key, old.a, old.b)
+        };
+        cell.set(Cache {
+            key,
+            a,
+            b,
+            key2,
+            a2,
+            b2,
+        });
+    }
 }
 
 /// The by-reference argument mask of a parameter list (see

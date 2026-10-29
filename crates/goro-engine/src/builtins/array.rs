@@ -1824,6 +1824,35 @@ fn do_sort(
     let mut cb = PreparedCall::new(if user { a.val(1) } else { Value::Null });
     let mut items = entries(&arr);
     drop(arr);
+    // All-int sort keys under the regular or numeric flags compare as
+    // integers: the same stable order without converting each pair.
+    if !user && (flags == SORT_REGULAR || flags == SORT_NUMERIC) {
+        let int_key = |x: &(Key, Value)| match by {
+            SortBy::Key => match x.0 {
+                Key::Int(i) => Some(i),
+                Key::Str(_) => None,
+            },
+            SortBy::Value => match x.1 {
+                Value::Int(i) => Some(i),
+                _ => None,
+            },
+        };
+        if items.iter().all(|x| int_key(x).is_some()) {
+            let k = |x: &(Key, Value)| int_key(x).unwrap_or(0);
+            if reverse {
+                items.sort_by_key(|x| std::cmp::Reverse(k(x)));
+            } else {
+                items.sort_by_key(k);
+            }
+            let out = if keep_keys {
+                PhpArray::from_pairs(items)
+            } else {
+                list_of(items.into_iter().map(|(_, v)| v))
+            };
+            r.set(Value::Array(out));
+            return Ok(Value::Bool(true));
+        }
+    }
     let mut warned = false;
     sort_items(vm, &mut items, |vm, x, y| {
         let (pv, qv) = match by {

@@ -1581,7 +1581,11 @@ fn default_html_charset(vm: &Vm) -> PhpStr {
 
 fn charset_arg(vm: &mut Vm, a: &Args, i: usize) -> R<std_ext::html::Charset> {
     let name = a.opt_str(i);
-    let default = default_html_charset(vm);
+    // The ini default matters only without a name (or an empty one).
+    let default = match &name {
+        Some(n) if n.first().is_some_and(|&b| b != 0) => PhpStr::empty(),
+        _ => default_html_charset(vm),
+    };
     let mut d = Vec::new();
     let cs = std_ext::html::resolve_charset(name.as_ref().map(|n| n.as_bytes()), &default, &mut d);
     diags(vm, a, d)?;
