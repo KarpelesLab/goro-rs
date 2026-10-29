@@ -300,15 +300,17 @@ pub fn open_named(
         ],
     )?;
     let ok = match r {
+        // a single warning on PHP 8.5 (test ext/zip/tests/bug53603.phpt)
         None => {
             if !quiet {
                 vm.warn(&format!(
-                    "{}(): {}::stream_open is not implemented!",
+                    "{}({}): Failed to open stream: \"{}::stream_open\" is not implemented",
                     fname,
+                    String::from_utf8_lossy(path),
                     class.dname()
                 ))?;
             }
-            false
+            return Ok(None);
         }
         Some(v) => vm.to_bool(&v),
     };

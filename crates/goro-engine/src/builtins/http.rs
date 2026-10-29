@@ -58,7 +58,7 @@ pub static MODULE: Module = Module {
     ..Module::EMPTY
 };
 
-static WRAPPER: NativeWrapper = NativeWrapper { open: wrapper_open };
+static WRAPPER: NativeWrapper = NativeWrapper::new(wrapper_open);
 
 fn init(vm: &mut Vm) {
     register_wrapper(vm, "http", &WRAPPER);

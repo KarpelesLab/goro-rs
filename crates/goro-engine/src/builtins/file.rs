@@ -479,6 +479,9 @@ impl Stream {
             Backing::File(f) => f.read(buf),
             Backing::Memory { data, pos } => {
                 let n = buf.len().min(data.len().saturating_sub(*pos));
+                if n == 0 {
+                    return Ok(0);
+                }
                 buf[..n].copy_from_slice(&data[*pos..*pos + n]);
                 *pos += n;
                 Ok(n)
@@ -751,6 +754,9 @@ pub fn open_stream(
     quiet: bool,
 ) -> R<Option<Stream>> {
     let fname = a.fname();
+    if let Some(p) = super::streams::rewrite_path(vm, filename) {
+        return open_stream(vm, a, &p, mode, quiet);
+    }
     if let Some(cls) = super::userstream::wrapper_for(vm, filename) {
         return super::userstream::open(vm, a, &cls, filename, mode, quiet);
     }
@@ -900,20 +906,27 @@ pub fn open_stream(
         .filter(|&&c| c != b'b' && c != b't')
         .copied()
         .collect::<Vec<u8>>();
+    // The first character decides, a '+' anywhere adds the other
+    // direction, the rest is ignored ("rw", "r+w"...); another first
+    // character is an invalid mode (observed on PHP 8.5).
     let mut o = std::fs::OpenOptions::new();
-    match &m[..] {
-        b"r" => o.read(true),
-        b"r+" => o.read(true).write(true),
-        b"w" => o.write(true).create(true).truncate(true),
-        b"w+" => o.read(true).write(true).create(true).truncate(true),
-        b"a" => o.append(true).create(true),
-        b"a+" => o.read(true).append(true).create(true),
-        b"x" => o.write(true).create_new(true),
-        b"x+" => o.read(true).write(true).create_new(true),
-        b"c" => o.write(true).create(true),
-        b"c+" => o.read(true).write(true).create(true),
+    let plus = m.contains(&b'+');
+    match mode.first() {
+        Some(b'r') => o.read(true).write(plus),
+        Some(b'w') => o.write(true).read(plus).create(true).truncate(true),
+        Some(b'a') => o.append(true).read(plus).create(true),
+        Some(b'x') => o.write(true).read(plus).create_new(true),
+        Some(b'c') => o.write(true).read(plus).create(true),
         _ => {
-            return vm.fthrow(a, "ValueError", "Argument #2 ($mode) must be a valid mode");
+            if !quiet {
+                vm.warn(&format!(
+                    "{}({}): Failed to open stream: `{}' is not a valid mode for fopen",
+                    fname,
+                    String::from_utf8_lossy(filename),
+                    String::from_utf8_lossy(mode)
+                ))?;
+            }
+            return Ok(None);
         }
     };
     let p = vm.fs_path(path);
@@ -947,12 +960,44 @@ pub fn open_stream(
     }
 }
 
+/// A relative path found on include_path in a stream wrapper's directory
+/// (`phar://...` entries; PHP manual: fopen, use_include_path).
+fn wrapper_include_path(vm: &mut Vm, f: &[u8]) -> Option<PhpStr> {
+    if f.starts_with(b"/") || f.windows(3).any(|w| w == b"://") {
+        return None;
+    }
+    let ip = vm.ini.include_path.to_vec();
+    for d in super::streams::split_include_path(&ip) {
+        if !d.windows(3).any(|w| w == b"://") {
+            continue;
+        }
+        let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.url_stat) else {
+            continue;
+        };
+        let mut c = d.clone();
+        c.push(b'/');
+        c.extend_from_slice(f.strip_prefix(b"./").unwrap_or(f));
+        if matches!(op(vm, &c, 2), Ok(Some(_))) {
+            return Some(PhpStr::from(c));
+        }
+    }
+    None
+}
+
 fn fopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
     let m = a.str(1);
     if f.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
     }
+    let f = match a
+        .bool_or(2, false)
+        .then(|| wrapper_include_path(vm, &f))
+        .flatten()
+    {
+        Some(p) if !vm.fs_path(&f).exists() => p,
+        _ => f,
+    };
     match open_stream(vm, a, &f, &m, false)? {
         Some(s) => Ok(Value::Resource(new_stream_res(s))),
         None => Ok(Value::Bool(false)),
@@ -1391,6 +1436,11 @@ fn stat_array(m: &std::fs::Metadata) -> PhpArray {
 
 fn fstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |vm, s| {
+        if let Backing::Native(n) = &s.backing
+            && let Some(st) = n.stat()
+        {
+            return Ok(Value::Array(stat_from_user(&st)));
+        }
         if matches!(s.backing, Backing::User { .. }) {
             return Ok(
                 match super::userstream::simple(vm, s, b"stream_stat", Vec::new())? {
@@ -1701,6 +1751,14 @@ fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if f.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
     }
+    let f = match a
+        .bool_or(1, false)
+        .then(|| wrapper_include_path(vm, &f))
+        .flatten()
+    {
+        Some(p) if !vm.fs_path(&f).exists() => p,
+        _ => f,
+    };
     let off = a.int_or(3, 0);
     let len = a.opt_int(4);
     if let Some(l) = len
@@ -1823,6 +1881,14 @@ fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
+    let f = match a
+        .bool_or(1, false)
+        .then(|| wrapper_include_path(vm, &f))
+        .flatten()
+    {
+        Some(p) if !vm.fs_path(&f).exists() => p,
+        _ => f,
+    };
     let Some(mut s) = open_stream(vm, a, &f, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
@@ -1860,6 +1926,9 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(cls) = super::userstream::wrapper_for(vm, &f) {
         return super::userstream::path_op(vm, a, &cls, "unlink", vec![Value::Str(f)]);
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.unlink) {
+        return Ok(Value::Bool(op(vm, a, &f)?));
+    }
     let p = vm.fs_path(&f);
     if p.is_dir() {
         vm.fwarn(a, &format!("{}: Is a directory", f.to_string_lossy()))?;
@@ -1885,6 +1954,9 @@ fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "rename",
             vec![Value::Str(from), Value::Str(to)],
         );
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &from).and_then(|w| w.rename) {
+        return Ok(Value::Bool(op(vm, a, &from, &to)?));
     }
     match std::fs::rename(vm.fs_path(&from), vm.fs_path(&to)) {
         Ok(()) => Ok(Value::Bool(true)),
@@ -1954,6 +2026,9 @@ fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             vec![Value::Str(d), Value::Int(perms), Value::Int(opts)],
         );
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.mkdir) {
+        return Ok(Value::Bool(op(vm, a, &d, perms, rec as i64)?));
+    }
     let p = vm.fs_path(&d);
     let r = if rec {
         if p.is_dir() {
@@ -2001,6 +2076,9 @@ fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             vec![Value::Str(d), Value::Int(8)],
         );
     }
+    if let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.rmdir) {
+        return Ok(Value::Bool(op(vm, a, &d)?));
+    }
     match std::fs::remove_dir(vm.fs_path(&d)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => fs_warn(vm, a, &d, &e),
@@ -2011,12 +2089,33 @@ fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// when the wrapper reports no file.
 fn user_stat(vm: &mut Vm, a: &Args, flags: i64) -> R<Option<Option<PhpArray>>> {
     let f = a.str(0);
+    let f = match super::streams::rewrite_path(vm, &f) {
+        Some(p) => PhpStr::from(p),
+        None => f,
+    };
     let Some(cls) = super::userstream::wrapper_for(vm, &f) else {
+        if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.url_stat) {
+            return Ok(Some(op(vm, &f, flags)?.map(|st| stat_from_user(&st))));
+        }
         return Ok(None);
     };
     Ok(Some(
         super::userstream::url_stat(vm, &cls, &f, flags)?.map(|st| stat_from_user(&st)),
     ))
+}
+
+/// url_stat() through a native wrapper with one (is_readable(),
+/// is_writable() read the mode bits, as for user wrappers).
+fn native_stat(vm: &mut Vm, a: &Args) -> R<Option<Option<PhpArray>>> {
+    let f = a.str(0);
+    let f = match super::streams::rewrite_path(vm, &f) {
+        Some(p) => PhpStr::from(p),
+        None => f,
+    };
+    match super::streams::wrapper_for(vm, &f).and_then(|w| w.url_stat) {
+        Some(op) => Ok(Some(op(vm, &f, 2)?.map(|st| stat_from_user(&st)))),
+        None => Ok(None),
+    }
 }
 
 fn user_mode(st: &PhpArray) -> u32 {
@@ -2089,17 +2188,32 @@ fn is_readable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    if let Some(st) = native_stat(vm, a)? {
+        return Ok(Value::Bool(
+            st.is_some_and(|st| user_mode(&st) & 0o444 != 0),
+        ));
+    }
     Ok(Value::Bool(access(vm, a, libc::R_OK)))
 }
 fn is_writable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    if let Some(st) = native_stat(vm, a)? {
+        return Ok(Value::Bool(
+            st.is_some_and(|st| user_mode(&st) & 0o222 != 0),
+        ));
+    }
     Ok(Value::Bool(access(vm, a, libc::W_OK)))
 }
 fn is_executable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
+    }
+    if let Some(st) = native_stat(vm, a)? {
+        return Ok(Value::Bool(
+            st.is_some_and(|st| user_mode(&st) & 0o111 != 0),
+        ));
     }
     Ok(Value::Bool(
         meta(vm, a).is_some_and(|m| m.is_file()) && access(vm, a, libc::X_OK),
@@ -2157,6 +2271,17 @@ fn filetype(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    if let Some(st) = user_stat(vm, a, 1)? {
+        return match st {
+            Some(st) => Ok(Value::from(match user_mode(&st) & 0o170000 {
+                0o040000 => "dir",
+                0o120000 => "link",
+                0o100000 => "file",
+                _ => "unknown",
+            })),
+            None => stat_fail(vm, a, "Lstat"),
+        };
+    }
     let f = a.str(0);
     match std::fs::symlink_metadata(vm.fs_path(&f)) {
         Ok(m) => {
@@ -2200,6 +2325,13 @@ fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "stream_metadata",
             vec![Value::Str(f), Value::Int(1), Value::Array(times)],
         );
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.metadata) {
+        let times = match (a.opt_int(1), a.opt_int(2)) {
+            (None, _) => PhpArray::new(),
+            (Some(m), at) => PhpArray::from_values([Value::Int(m), Value::Int(at.unwrap_or(m))]),
+        };
+        return Ok(Value::Bool(op(vm, a, &f, 1, &Value::Array(times))?));
     }
     let p = vm.fs_path(&f);
     if !p.exists() && std::fs::File::create(&p).is_err() {
@@ -2247,6 +2379,9 @@ fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "stream_metadata",
             vec![Value::Str(f), Value::Int(6), Value::Int(m)],
         );
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &f).and_then(|w| w.metadata) {
+        return Ok(Value::Bool(op(vm, a, &f, 6, &Value::Int(m))?));
     }
     match std::fs::set_permissions(vm.fs_path(&f), std::fs::Permissions::from_mode(m as u32)) {
         Ok(()) => Ok(Value::Bool(true)),
@@ -2701,12 +2836,19 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(a, "ValueError", "Argument #1 ($directory) cannot be empty");
     }
     let order = a.int_or(1, 0);
+    let native = super::streams::wrapper_for(vm, &d).and_then(|w| w.opendir);
     let listed = match super::userstream::wrapper_for(vm, &d) {
         Some(cls) => match super::userstream::list(vm, a, &cls, &d)? {
             Some(n) => Ok(n),
             None => return Ok(Value::Bool(false)),
         },
-        None => list_dir(vm, &d),
+        None => match native {
+            Some(op) => match op(vm, a, &d)? {
+                Some(n) => Ok(n),
+                None => return Ok(Value::Bool(false)),
+            },
+            None => list_dir(vm, &d),
+        },
     };
     match listed {
         Ok(mut names) => {
@@ -2757,6 +2899,15 @@ fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             None => Value::Bool(false),
         });
+    }
+    if let Some(op) = super::streams::wrapper_for(vm, &d).and_then(|w| w.opendir) {
+        let Some(entries) = op(vm, a, &d)? else {
+            return Ok(Value::Bool(false));
+        };
+        let s = Stream::new(Backing::Dir { entries, pos: 0 }, b"r", &d, "", "dir");
+        let r = new_stream_res(s);
+        vm.last_dir = Some(r.clone());
+        return Ok(Value::Resource(r));
     }
     match list_dir(vm, &d) {
         Ok(entries) => {

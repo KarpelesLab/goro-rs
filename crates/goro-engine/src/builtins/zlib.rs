@@ -170,7 +170,7 @@ const fn consts() -> [(&'static str, ConstVal); 27] {
 
 static CONSTANTS: [(&str, ConstVal); 27] = consts();
 
-static WRAPPER: NativeWrapper = NativeWrapper { open: wrapper_open };
+static WRAPPER: NativeWrapper = NativeWrapper::new(wrapper_open);
 
 fn init(vm: &mut Vm) {
     register_filter(vm, "zlib.*", zlib_filter);
@@ -934,7 +934,10 @@ fn zlib_get_coding_type(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 
 // ---------------------------------------------------------------- filters
 
-struct DeflateF(goro_ext_zlib::filter::DeflateFilter);
+/// The deflate filter and whether data went in: a flush before any (a
+/// seek right after the filter is attached) writes nothing, so it can't
+/// leave a header where the data then goes (test bug75273.phpt).
+struct DeflateF(goro_ext_zlib::filter::DeflateFilter, bool);
 struct InflateF(goro_ext_zlib::filter::InflateFilter);
 
 impl StreamFilter for DeflateF {
@@ -944,11 +947,14 @@ impl StreamFilter for DeflateF {
         } else {
             goro_ext_zlib::filter::FilterFlush::None
         };
+        self.1 |= !input.is_empty();
         out.extend(self.0.filter(input, fl));
         Ok(true)
     }
     fn flush(&mut self, _vm: &mut Vm, out: &mut Vec<u8>) -> R<bool> {
-        out.extend(self.0.filter(&[], goro_ext_zlib::filter::FilterFlush::Inc));
+        if self.1 {
+            out.extend(self.0.filter(&[], goro_ext_zlib::filter::FilterFlush::Inc));
+        }
         Ok(true)
     }
 }
@@ -1003,7 +1009,7 @@ fn zlib_filter(
     let mut diags = Vec::new();
     let f: Option<Box<dyn StreamFilter>> = match &lname[..] {
         b"zlib.deflate" => goro_ext_zlib::filter::deflate_filter(&params, &mut diags)
-            .map(|f| Box::new(DeflateF(f)) as Box<dyn StreamFilter>),
+            .map(|f| Box::new(DeflateF(f, false)) as Box<dyn StreamFilter>),
         b"zlib.inflate" => goro_ext_zlib::filter::inflate_filter(&params, &mut diags)
             .map(|f| Box::new(InflateF(f)) as Box<dyn StreamFilter>),
         _ => None,

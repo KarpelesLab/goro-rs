@@ -116,7 +116,7 @@ fn abc_open(
     )))
 }
 
-static ABC: NativeWrapper = NativeWrapper { open: abc_open };
+static ABC: NativeWrapper = NativeWrapper::new(abc_open);
 
 /// Doubles every byte.
 struct Double;

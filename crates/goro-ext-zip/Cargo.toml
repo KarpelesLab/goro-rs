@@ -1,0 +1,27 @@
+[package]
+name = "goro-ext-zip"
+description = "ZIP archive format on bytes for PHP's zip and phar extensions: reading, writing, compression, PKWARE and WinZip AES encryption"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Raw deflate (ZIP method 8), byte-identical to zlib.
+goro-ext-zlib = { path = "../goro-ext-zlib" }
+# The maintainer's codec crate: bzip2 (method 12), deflate64 (9), LZMA (14),
+# zstd (93), xz (95) and the legacy shrink/reduce/implode decoders.
+compcol = { version = "0.7", default-features = false, features = [
+    "alloc",
+    "std",
+    "bzip2",
+    "deflate64",
+    "lzma",
+    "xz",
+    "zstd",
+    "zip_implode",
+    "zip_shrink",
+    "zip_reduce",
+] }
+# The maintainer's crypto crate: AES, HMAC-SHA1, PBKDF2 and OS entropy for
+# WinZip AES (AE-1/AE-2) and the PKWARE encryption header.
+purecrypto = { version = "0.10", default-features = false, features = ["std", "cipher", "hash", "kdf", "rng"] }
