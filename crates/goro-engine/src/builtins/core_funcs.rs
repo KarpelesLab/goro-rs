@@ -1115,8 +1115,13 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let m = lower(&a.str(1));
     Ok(Value::Bool(match c {
         Some(c) => {
-            c.find_method_str(&m).is_some()
-                || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
+            // A parent's private static method is not the child's (tests
+            // Zend/tests/method_exists_002, inheritance/bug50810).
+            c.find_method_str(&m).is_some_and(|f| {
+                use crate::class::mflags::{PRIVATE, STATIC};
+                f.flags & (PRIVATE | STATIC) != (PRIVATE | STATIC)
+                    || std::ptr::eq(f.scope.get(), &*c)
+            }) || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
         }
         None => false,
     }))
@@ -1835,6 +1840,15 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Value::Bool(false));
         }
     }
+    // zend.assertions can't switch to or from -1 at run time (tests
+    // Zend/tests/assert/expect_016.phpt, expect_017.phpt).
+    if k.as_bytes() == b"zend.assertions" {
+        let to = goro_runtime::convert::str_to_int(&v) == -1;
+        if to != (goro_runtime::convert::str_to_int(&old) == -1) {
+            vm.warn("zend.assertions may be completely enabled or disabled only in php.ini")?;
+            return Ok(Value::Bool(false));
+        }
+    }
     // max_memory_limit is a startup-only setting; memory_limit is a
     // quantity capped by it, and can't go below the memory in use (tests
     // tests/basic/gh17951_runtime_change_*; observed on PHP 8.5).
@@ -2479,6 +2493,15 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn setlocale(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let r = setlocale_value(vm, a)?;
+    // ext/gettext looks translations up in the locale set here.
+    if let Value::Str(name) = &r {
+        super::gettext::note_setlocale(a.int(0), name);
+    }
+    Ok(r)
+}
+
+fn setlocale_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // The candidates in order: strings, arrays of them, null (test
     // strings/gh18823_*.phpt for the argument types).
     let mut cands: Vec<PhpStr> = Vec::new();
@@ -2614,6 +2637,8 @@ impl Vm {
     /// Op::Tick: every `every` statements the tick functions run (PHP
     /// manual: declare, ticks).
     pub(crate) fn tick(&mut self, every: u32) -> R<()> {
+        // ext/pcntl delivers queued signals on ticks.
+        crate::builtins::pcntl::on_tick(self)?;
         self.tick_count += 1;
         if self.tick_funcs.is_empty()
             || self.in_tick

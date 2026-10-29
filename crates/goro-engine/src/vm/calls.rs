@@ -1056,6 +1056,12 @@ impl Vm {
                 magic_name: Some(PhpStr::new(name)),
             });
         }
+        if cls.lname.as_bytes() == b"__php_incomplete_class" {
+            return self.throw(
+                "Error",
+                &crate::builtins::serialize::incomplete_msg("call a method", o),
+            );
+        }
         self.throw(
             "Error",
             &format!(
@@ -2225,6 +2231,13 @@ impl Vm {
             (Ok(_), true) if self.err.defer_depth == 0 => Err(self.err.deferred.take().unwrap()),
             (r, _) => r,
         };
+        // ext/pcntl: signals queued while async delivery is on run here,
+        // with the call still on the stack (test Zend/tests/fibers/
+        // signal-async.phpt).
+        let r = match r {
+            Ok(v) => crate::builtins::pcntl::after_native_call(self).map(|_| v),
+            e => e,
+        };
         self.ex.native_calls.pop();
         self.give_args_vec(args);
         r
@@ -2748,10 +2761,16 @@ impl Vm {
             self.raise_func_deprecation(code, what, func, magic.as_ref())?;
         }
         if code.flags & fflags::ABSTRACT != 0 {
-            return self.throw(
-                "Error",
-                &format!("Cannot call abstract method {}()", func.display_name()),
-            );
+            // Through __call()/__callStatic(): the name called (tests
+            // Zend/tests/gh_17718_*).
+            let shown = match (
+                self.magic_call_name.clone().filter(|_| is_magic_call(func)),
+                func.scope(),
+            ) {
+                (Some(n), Some(c)) => format!("{}::{}", c.name.dname(), n.to_string_lossy()),
+                _ => func.display_name(),
+            };
+            return self.throw("Error", &format!("Cannot call abstract method {}()", shown));
         }
         if code.flags & fflags::NODISCARD != 0 && self.caller_discards_result() {
             let what = if func.scope().is_some() {

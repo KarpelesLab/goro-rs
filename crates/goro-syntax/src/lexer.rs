@@ -1066,7 +1066,18 @@ impl<'a> Lexer<'a> {
             if digits.iter().any(|&c| c == b'8' || c == b'9') {
                 let l = self.line;
                 self.set_error("Invalid numeric literal", l, start);
-                return self.tok(T::LNumber, start, 0);
+                // One too long for an integer is still a T_DNUMBER (test
+                // ext/tokenizer/tests/invalid_octal_dnumber.phpt).
+                let capped: Vec<u8> = digits[1..]
+                    .iter()
+                    .map(|&c| if c == b'8' || c == b'9' { b'7' } else { c })
+                    .collect();
+                let kind = if fits_i64_radix(&capped, 8) {
+                    T::LNumber
+                } else {
+                    T::DNumber
+                };
+                return self.tok(kind, start, 0);
             }
             let kind = if fits_i64_radix(&digits[1..], 8) {
                 T::LNumber

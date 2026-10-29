@@ -991,6 +991,8 @@ pub struct AttrInfo {
     pub name: PhpStr,
     /// Arguments: (name or None, constant-expression code).
     pub args: Vec<(Option<PhpStr>, ConstExpr)>,
+    /// The arguments exported as code, for `ReflectionAttribute::__toString`.
+    pub arg_texts: Vec<String>,
     pub line: u32,
 }
 

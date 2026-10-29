@@ -192,6 +192,10 @@ fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     out.push_str(&format!("\n{name}\n\n"));
                     out.push_str(&f(vm));
                 }
+                // ext/gettext's line (test gettext_phpinfo.phpt).
+                None if *name == "gettext" => {
+                    out.push_str(&format!("\n{name}\n\nGetText Support => enabled\n"))
+                }
                 None => out.push_str(&format!("\n{name}\n\n{name} support => enabled\n")),
             }
             directives(vm, inis, &mut out);

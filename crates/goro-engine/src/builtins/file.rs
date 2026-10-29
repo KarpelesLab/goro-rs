@@ -68,10 +68,6 @@ pub static MODULE: Module = Module {
             stream_get_meta_data,
         ),
         ("function stream_isatty($stream): bool", stream_isatty),
-        (
-            "function posix_isatty($file_descriptor): bool",
-            stream_isatty,
-        ),
         // stream_set_blocking() and the stream_context_*() functions are in
         // builtins/sockets.rs.
         (
@@ -2387,6 +2383,8 @@ fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(total as i64))
 }
 
+/// "unlink(path): No such file or directory" (tests
+/// ext/standard/tests/file/unlink_variation*.phpt).
 fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
     pwarn(vm, a, what, &io_err_msg(e))?;
     Ok(Value::Bool(false))

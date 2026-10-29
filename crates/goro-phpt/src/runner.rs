@@ -100,7 +100,26 @@ pub struct Config {
     pub mem_limit: Option<u64>,
     /// Run tests needing large resources (see [`HEAVY_TESTS`]).
     pub heavy: bool,
+    /// Run tests reaching hosts on the Internet (see [`ONLINE_TESTS`]).
+    pub online: bool,
 }
+
+/// Tests that reach hosts on the Internet without checking
+/// SKIP_ONLINE_TESTS (connections, DNS lookups of real or `.invalid`
+/// names, in their SKIPIF or FILE sections): skipped unless asked for
+/// (`--online`).
+pub const ONLINE_TESTS: &[&str] = &[
+    "ext/curl/tests/bug52202.phpt",
+    "ext/curl/tests/bug71523.phpt",
+    "ext/curl/tests/curl_basic_008.phpt",
+    "ext/curl/tests/curl_basic_010.phpt",
+    "ext/standard/tests/file/file_get_contents_error002.phpt",
+    "ext/standard/tests/file/file_get_contents_with_custom_uri_parser.phpt",
+    "ext/standard/tests/network/gethostbyname_basic001.phpt",
+    // DNS queries for unknown names ("asdfasdf", ".toto.toto.toto")
+    "ext/standard/tests/network/gethostbyname_error003.phpt",
+    "ext/standard/tests/network/gethostbyname_error006.phpt",
+];
 
 /// Tests that need several gigabytes of memory or disk: skipped unless
 /// asked for (`--heavy`).
@@ -565,6 +584,14 @@ fn run_single_inner(
             &title,
             Status::Skip,
             "needs large resources (run with --heavy)",
+        );
+    }
+    if !cfg.online && ONLINE_TESTS.contains(&name) {
+        return result(
+            name,
+            &title,
+            Status::Skip,
+            "reaches the Internet (run with --online)",
         );
     }
     if let Some(sec) = phpt.cgi_section() {

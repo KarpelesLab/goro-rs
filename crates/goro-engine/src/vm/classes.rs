@@ -2565,7 +2565,9 @@ impl Vm {
         // through a hidden `__h_call` (SPL's iterators forward them to
         // the inner iterator; test RecursiveDirectoryIterator_getSubPath_basic).
         m.call = get(b"__call").or_else(|| get(b"__h_call"));
-        m.call_static = get(b"__callstatic");
+        // An abstract __callStatic() still traps calls, which then fail
+        // (test Zend/tests/gh_17718_002).
+        m.call_static = cls.find_method(b"__callstatic");
         m.to_string = get(b"__tostring");
         m.invoke = get(b"__invoke");
         m.clone = get(b"__clone");

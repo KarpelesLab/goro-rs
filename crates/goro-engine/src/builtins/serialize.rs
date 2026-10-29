@@ -25,9 +25,65 @@ pub static MODULE: Module = Module {
         "__php_incomplete_class",
         "<?php #[AllowDynamicProperties] final class __PHP_Incomplete_Class {}",
     )],
+    hooks: &[("__php_incomplete_class", incomplete_hooks)],
     listed: false,
     ..Module::EMPTY
 };
+
+/// The class an incomplete object stands for ("unknown" without one).
+pub(crate) fn incomplete_class_name(o: &ObjRef) -> String {
+    match o
+        .obj()
+        .props
+        .borrow()
+        .get_str(&PhpStr::from("__PHP_Incomplete_Class_Name"))
+    {
+        Some(Value::Str(s)) => s.to_string_lossy(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// The message about an operation on an incomplete object (observed on
+/// PHP 8.5; tests ext/standard/tests/serialize/incomplete_class,
+/// serialization_objects_005).
+pub(crate) fn incomplete_msg(what: &str, o: &ObjRef) -> String {
+    format!(
+        "The script tried to {} on an incomplete object. Please ensure that the class definition \"{}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition",
+        what,
+        incomplete_class_name(o)
+    )
+}
+
+/// Property access on __PHP_Incomplete_Class objects: reads warn and give
+/// null, writes fail.
+fn incomplete_hooks() -> crate::class::NativeHooks {
+    crate::class::NativeHooks {
+        prop: Some(|vm, o, name, acc| {
+            use crate::class::ObjAccess;
+            if name.as_bytes() == b"__PHP_Incomplete_Class_Name" {
+                return None;
+            }
+            Some(match acc {
+                ObjAccess::Write(_) | ObjAccess::Unset => {
+                    vm.throw("Error", &incomplete_msg("modify a property", o))
+                }
+                acc => {
+                    let f = vm.active_function_name();
+                    let msg = format!("{}(): {}", f, incomplete_msg("access a property", o));
+                    match vm.warn(&msg) {
+                        Err(e) => Err(e),
+                        Ok(()) => Ok(match acc {
+                            ObjAccess::Isset => Value::Bool(false),
+                            ObjAccess::Empty => Value::Bool(true),
+                            _ => Value::Null,
+                        }),
+                    }
+                }
+            })
+        }),
+        ..Default::default()
+    }
+}
 
 #[derive(Default)]
 struct Ser {
@@ -1560,6 +1616,72 @@ impl Vm {
             Err(UErr::At(off)) => Ok(Err(off.min(data.len()))),
             Err(UErr::Php(e)) => Err(e),
         }
+    }
+
+    /// A sequence of named values in one value table, as the session
+    /// serializers store variables (PHP manual: session_decode(); `R:`
+    /// and `r:` reach the earlier variables). `name_at(data, pos)` reads
+    /// the name of the variable at `pos`: `Ok(None)` at the end,
+    /// `Ok(Some((name, start)))` with the offset of its value, or
+    /// `Err(())` for malformed data. Values keep the references they
+    /// share; `Ok(None)` is malformed data.
+    #[allow(clippy::type_complexity)]
+    pub fn unserialize_vars(
+        &mut self,
+        data: &[u8],
+        who: &'static str,
+        name_at: &mut dyn FnMut(&[u8], usize) -> Result<Option<(Vec<u8>, usize)>, ()>,
+    ) -> R<Option<Vec<(Vec<u8>, Value)>>> {
+        let depth = self
+            .get_ini(b"unserialize_max_depth")
+            .map(|s| goro_runtime::convert::str_to_int(&s))
+            .unwrap_or(4096);
+        let mut u = Unser::new(data, None, depth);
+        u.who = who;
+        let mut raw = Vec::new();
+        let mut failed = false;
+        loop {
+            match name_at(data, u.pos) {
+                Ok(None) => break,
+                Ok(Some((name, start))) => {
+                    u.pos = start;
+                    match self.unser_elem(&mut u) {
+                        Ok(v) => raw.push((name, v)),
+                        Err(UErr::At(_)) => {
+                            failed = true;
+                            break;
+                        }
+                        Err(UErr::Php(e)) => return Err(e),
+                    }
+                }
+                Err(()) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let vals: Vec<(Vec<u8>, Value)> = raw
+            .into_iter()
+            .map(|(n, v)| (n, self.unser_finish(v, &u.t.shared, &mut seen)))
+            .collect();
+        let deferred: Vec<(ObjRef, Option<Value>)> = std::mem::take(&mut u.deferred)
+            .into_iter()
+            .map(|(o, d)| {
+                let d = d.map(|d| self.unser_finish(Value::Array(d), &u.t.shared, &mut seen));
+                (o, d)
+            })
+            .collect();
+        if failed {
+            for c in &u.t.vals {
+                if let Value::Object(o) = c.get() {
+                    o.mark_destructor_called();
+                }
+            }
+            return Ok(None);
+        }
+        self.unser_calls(deferred)?;
+        Ok(Some(vals))
     }
 
     /// The whole of `data` as one serialized value.
