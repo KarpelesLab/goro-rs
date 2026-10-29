@@ -461,6 +461,37 @@ pub fn simple(vm: &mut Vm, s: &Stream, method: &[u8], args: Vec<Value>) -> R<Opt
     call(vm, &o, method, args)
 }
 
+/// stream_set_option() of a user stream: None when the stream isn't one;
+/// a missing method warns and fails (test file/userstreams_003.phpt).
+pub fn set_option(
+    vm: &mut Vm,
+    s: &Stream,
+    fname: &str,
+    option: i64,
+    value: i64,
+    ptr: Value,
+) -> R<Option<bool>> {
+    let Backing::User { obj } = &s.backing else {
+        return Ok(None);
+    };
+    let o = obj.clone();
+    match call(
+        vm,
+        &o,
+        b"stream_set_option",
+        vec![Value::Int(option), Value::Int(value), ptr],
+    )? {
+        Some(v) => Ok(Some(vm.to_bool(&v))),
+        None => {
+            let c = class_of_stream(vm, s);
+            vm.warn(&format!(
+                "{fname}(): {c}::stream_set_option is not implemented!"
+            ))?;
+            Ok(Some(false))
+        }
+    }
+}
+
 /// url_stat() of a user wrapper URL.
 pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Option<PhpArray>> {
     // the last result is cached until clearstatcache() or a change made

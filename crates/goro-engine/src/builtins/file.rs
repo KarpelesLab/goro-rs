@@ -76,15 +76,15 @@ pub static MODULE: Module = Module {
         // builtins/sockets.rs.
         (
             "function stream_set_write_buffer($stream, int $size): int",
-            ret_zero,
+            set_buffer,
         ),
         (
             "function stream_set_read_buffer($stream, int $size): int",
-            ret_zero,
+            set_buffer,
         ),
         (
             "function set_file_buffer($stream, int $size): int",
-            ret_zero,
+            set_buffer,
         ),
         ("function stream_get_wrappers(): array", stream_get_wrappers),
         ("function stream_is_local($stream): bool", ret_true),
@@ -2800,8 +2800,26 @@ fn clearstatcache(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
 }
-fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Int(0))
+/// stream_set_write_buffer() & co: buffering is not emulated, user
+/// streams get the option (STREAM_BUFFER_NONE or STREAM_BUFFER_FULL with
+/// the size).
+fn set_buffer(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let size = a.int(1);
+    let fname = a.fname();
+    let option = if fname == "stream_set_read_buffer" {
+        2
+    } else {
+        3
+    };
+    with_stream(vm, a, 0, |vm, s| {
+        let (value, ptr) = if size == 0 { (0, 8192) } else { (2, size) };
+        Ok(Value::Int(
+            match super::userstream::set_option(vm, s, &fname, option, value, Value::Int(ptr))? {
+                Some(true) | None => 0,
+                Some(false) => -1,
+            },
+        ))
+    })
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
