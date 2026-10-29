@@ -2538,7 +2538,23 @@ impl Vm {
                     // PHP 8.5: "must be a valid callback or null, function
                     // \"x\" not found or invalid function name"), after the
                     // relative-callable deprecation.
-                    if matches!(args[i], Value::Str(_) | Value::Array(_)) {
+                    let relative = |v: &Value| {
+                        let c = match v.deref() {
+                            Value::Str(s) => match find_double_colon(&s) {
+                                Some(p) => s[..p].to_ascii_lowercase(),
+                                None => return false,
+                            },
+                            Value::Array(a) if a.len() == 2 => {
+                                match a.get_int(0).map(|x| x.deref()) {
+                                    Some(Value::Str(c)) => c.to_ascii_lowercase(),
+                                    _ => return false,
+                                }
+                            }
+                            _ => return false,
+                        };
+                        matches!(&c[..], b"self" | b"parent" | b"static")
+                    };
+                    if relative(&args[i]) {
                         self.callable_deprecation(&args[i])?;
                     }
                     let why = self.callable_error(&args[i]);
