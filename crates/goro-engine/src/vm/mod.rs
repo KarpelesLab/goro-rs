@@ -34,6 +34,7 @@ pub mod iter;
 pub mod lazy;
 pub mod objects;
 pub mod output;
+pub mod sapi;
 pub mod setup;
 pub mod types;
 pub mod variance;

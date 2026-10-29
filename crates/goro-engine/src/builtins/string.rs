@@ -503,6 +503,7 @@ fn str_repeat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     if times > 0 {
         alloc_check(vm, s.len() as u128 * times as u128)?;
+        return Ok(Value::Str(PhpStr::repeat(&s, times as usize)));
     }
     let r = std_ext::strings::str_repeat(&s, times);
     Ok(sv(sr(vm, r)?))
@@ -1921,15 +1922,37 @@ fn md5(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn sha1(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(sv(std_ext::encoding::sha1(a.bytes(0), a.bool_or(1, false))))
 }
-/// The contents of a file for md5_file()/sha1_file() (PHP manual; the
-/// messages observed on PHP 8.5).
-fn hash_file_data(vm: &mut Vm, a: &Args) -> R<Option<Vec<u8>>> {
+/// The digest of a file for md5_file()/sha1_file(), read in chunks (the
+/// file may be larger than memory_limit: test ext/standard/tests/file/
+/// bug22414); PHP manual; the messages observed on PHP 8.5.
+fn hash_file_digest(vm: &mut Vm, a: &Args, algo: &[u8]) -> R<Option<Vec<u8>>> {
+    use std::io::Read;
     let f = a.str(0);
     if f.is_empty() {
         return vm.value_error("Path must not be empty");
     }
-    match std::fs::read(vm.fs_path(&f)) {
-        Ok(d) => Ok(Some(d)),
+    let file = std::fs::File::open(vm.fs_path(&f)).and_then(|fh| {
+        if fh.metadata()?.is_dir() {
+            Err(std::io::Error::from_raw_os_error(libc::EISDIR))
+        } else {
+            Ok(fh)
+        }
+    });
+    match file {
+        Ok(mut fh) => {
+            let alg = goro_ext_hash::lookup(algo).expect("built-in algorithm");
+            let mut h = goro_ext_hash::Hasher::plain(alg);
+            let mut buf = vec![0u8; 64 << 10];
+            loop {
+                match fh.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => h.update(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            Ok(Some(h.finish()))
+        }
         Err(e) => {
             let msg = e.to_string();
             let msg = match msg.rfind(" (os error") {
@@ -1946,15 +1969,29 @@ fn hash_file_data(vm: &mut Vm, a: &Args) -> R<Option<Vec<u8>>> {
         }
     }
 }
+
+fn digest_value(d: Vec<u8>, raw: bool) -> Value {
+    if raw {
+        return sv(d);
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(d.len() * 2);
+    for b in d {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 15) as usize]);
+    }
+    sv(out)
+}
+
 fn md5_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(match hash_file_data(vm, a)? {
-        Some(d) => sv(std_ext::encoding::md5(&d, a.bool_or(1, false))),
+    Ok(match hash_file_digest(vm, a, b"md5")? {
+        Some(d) => digest_value(d, a.bool_or(1, false)),
         None => Value::Bool(false),
     })
 }
 fn sha1_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    Ok(match hash_file_data(vm, a)? {
-        Some(d) => sv(std_ext::encoding::sha1(&d, a.bool_or(1, false))),
+    Ok(match hash_file_digest(vm, a, b"sha1")? {
+        Some(d) => digest_value(d, a.bool_or(1, false)),
         None => Value::Bool(false),
     })
 }

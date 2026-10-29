@@ -1033,7 +1033,11 @@ fn transport_method(t: &str, server: bool) -> i64 {
 }
 
 /// Resolves `host:port` (getaddrinfo), or the getaddrinfo message.
-fn resolve(host: &[u8], port: u16, dgram: bool) -> Result<Vec<std::net::SocketAddr>, String> {
+pub(crate) fn resolve(
+    host: &[u8],
+    port: u16,
+    dgram: bool,
+) -> Result<Vec<std::net::SocketAddr>, String> {
     use std::ffi::CString;
     let h = CString::new(host.to_vec())
         .map_err(|_| "The hostname must not contain null bytes".to_string())?;

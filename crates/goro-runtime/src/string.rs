@@ -204,6 +204,29 @@ impl PhpStr {
         }
     }
 
+    /// `b` repeated `times` times, built in place (no intermediate copy:
+    /// memory_limit counts the peak).
+    pub fn repeat(b: &[u8], times: usize) -> PhpStr {
+        let n = b.len().checked_mul(times).expect("string too large");
+        if n <= 1 || b.len() == n {
+            return Self::new(if times == 0 { b"" } else { b });
+        }
+        let s = Self::alloc_block(n, n);
+        let p = s.data_ptr();
+        // SAFETY: the block has room for n bytes; each copy reads bytes
+        // already written, from a range disjoint from the destination.
+        unsafe {
+            std::ptr::copy_nonoverlapping(b.as_ptr(), p, b.len());
+            let mut done = b.len();
+            while done < n {
+                let k = done.min(n - done);
+                std::ptr::copy_nonoverlapping(p, p.add(done), k);
+                done += k;
+            }
+        }
+        s
+    }
+
     /// Concatenation `a . b` into a new string.
     pub fn concat(a: &[u8], b: &[u8]) -> PhpStr {
         let n = a.len() + b.len();

@@ -17,6 +17,7 @@ pub mod filter;
 pub mod gd;
 pub mod gmp;
 pub mod hash;
+pub mod headers;
 pub mod highlight;
 pub mod http;
 pub mod iconv;
@@ -62,6 +63,7 @@ use crate::registry::Module;
 pub fn modules() -> Vec<&'static Module> {
     let mut v = vec![
         &core_funcs::MODULE,
+        &headers::MODULE,
         &core_classes::MODULE,
         &var::MODULE,
         &output::MODULE,

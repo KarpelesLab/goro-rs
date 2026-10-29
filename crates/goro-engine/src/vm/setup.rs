@@ -525,6 +525,7 @@ impl Vm {
         use std::sync::atomic::Ordering::Relaxed;
         MEM_VM.store(self as *mut Vm, Relaxed);
         MEM_BASE.store(goro_runtime::mem::used(), Relaxed);
+        goro_runtime::mem::reset_peak();
         goro_runtime::mem::set_hook(memory_hook);
         self.apply_memory_limit();
     }
@@ -553,6 +554,12 @@ impl Vm {
             .effective_memory_limit()
             .map(|l| base.saturating_add(l as usize));
         goro_runtime::mem::set_limit(lim);
+    }
+
+    /// The highest heap use of the script (counted from its start).
+    pub fn memory_peak(&self) -> usize {
+        goro_runtime::mem::peak()
+            .saturating_sub(MEM_BASE.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Heap bytes the script uses (counted from its start).
