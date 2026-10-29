@@ -35,18 +35,24 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
         (Int(a), Int(b)) => {
             let (a, b) = (*a, *b);
             Some(match op {
-                Bin::Add => a
-                    .checked_add(b)
-                    .map(Int)
-                    .unwrap_or(Float(a as f64 + b as f64)),
-                Bin::Sub => a
-                    .checked_sub(b)
-                    .map(Int)
-                    .unwrap_or(Float(a as f64 - b as f64)),
-                Bin::Mul => a
-                    .checked_mul(b)
-                    .map(Int)
-                    .unwrap_or(Float(a as f64 * b as f64)),
+                // (a match, not `unwrap_or`: the unused default would go
+                // through the drop glue)
+                Bin::Add => match a.checked_add(b) {
+                    Some(r) => Int(r),
+                    None => Float(a as f64 + b as f64),
+                },
+                // (a match, not `unwrap_or`: the unused default would go
+                // through the drop glue)
+                Bin::Sub => match a.checked_sub(b) {
+                    Some(r) => Int(r),
+                    None => Float(a as f64 - b as f64),
+                },
+                // (a match, not `unwrap_or`: the unused default would go
+                // through the drop glue)
+                Bin::Mul => match a.checked_mul(b) {
+                    Some(r) => Int(r),
+                    None => Float(a as f64 * b as f64),
+                },
                 Bin::Div => {
                     if b == 0 || (a == i64::MIN && b == -1) {
                         return None;
@@ -103,6 +109,19 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// [`fast_arith`] for the comparison operators: the bool result.
+#[inline(always)]
+pub(crate) fn fast_cmp(op: Bin, x: &Value, y: &Value) -> Option<bool> {
+    let r = fast_arith(op, x, y);
+    let b = match &r {
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    // fast_arith gives scalars only: nothing to drop (and no drop glue).
+    std::mem::forget(r);
+    b
 }
 
 /// `x === null` on defined values (PHP manual, Comparison Operators: same
@@ -361,6 +380,7 @@ impl Vm {
     pub(crate) fn try_put_scalar(&mut self, dst: Reg, v: Value) -> Result<(), Value> {
         debug_assert!(!needs_drop_value(&v));
         if dst == NONE {
+            std::mem::forget(v);
             return Ok(());
         }
         let p = self.slot_ptr(dst);
@@ -384,15 +404,20 @@ impl Vm {
                     if !ok {
                         return Err(v);
                     }
-                    match v {
-                        Value::Int(i) => std::ptr::write(p, Some(Value::Int(i))),
-                        Value::Float(f) => std::ptr::write(p, Some(Value::Float(f))),
-                        Value::Bool(b) => std::ptr::write(p, Some(Value::Bool(b))),
-                        v => std::ptr::write(p, Some(v)),
+                    match &v {
+                        Value::Int(i) => std::ptr::write(p, Some(Value::Int(*i))),
+                        Value::Float(f) => std::ptr::write(p, Some(Value::Float(*f))),
+                        Value::Bool(b) => std::ptr::write(p, Some(Value::Bool(*b))),
+                        _ => {
+                            std::ptr::write(p, Some(v));
+                            return Ok(());
+                        }
                     }
                 }
             }
         }
+        // The scalar was copied: no drop glue for it.
+        std::mem::forget(v);
         Ok(())
     }
 
@@ -479,8 +504,22 @@ impl Vm {
             match *op {
                 Op::Nop | Op::Ticks => {}
                 Op::Assign { dst, src } => {
-                    let v = self.get_hot(src)?;
-                    self.assign_var(dst, v)?;
+                    // A scalar over a scalar: in place, nothing released.
+                    let scalar = match self.peek(src) {
+                        Some(Value::Int(i)) => Some(Value::Int(*i)),
+                        Some(Value::Float(f)) => Some(Value::Float(*f)),
+                        Some(Value::Bool(b)) => Some(Value::Bool(*b)),
+                        _ => None,
+                    };
+                    if let Some(v) = scalar {
+                        match self.try_put_scalar(dst, v) {
+                            Ok(()) => continue,
+                            Err(v) => self.assign_var(dst, v)?,
+                        }
+                    } else {
+                        let v = self.get_hot(src)?;
+                        self.assign_var(dst, v)?;
+                    }
                 }
                 Op::AssignRes { dst, src, res } => {
                     let v = self.get(src)?;
@@ -564,7 +603,7 @@ impl Vm {
                 Op::Concat { dst, a, b } => self.op_concat(dst, a, b)?,
                 Op::Lt { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Lt, x, y)
+                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
                     {
                         if self.try_put_bool(dst, r) {
                             continue;
@@ -576,7 +615,7 @@ impl Vm {
                 }
                 Op::Le { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Le, x, y)
+                        && let Some(r) = fast_cmp(Bin::Le, x, y)
                     {
                         if self.try_put_bool(dst, r) {
                             continue;
@@ -588,7 +627,7 @@ impl Vm {
                 }
                 Op::Eq { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Eq, x, y)
+                        && let Some(r) = fast_cmp(Bin::Eq, x, y)
                     {
                         if self.try_put_bool(dst, r) {
                             continue;
@@ -600,7 +639,7 @@ impl Vm {
                 }
                 Op::Identical { dst, a, b } => {
                     if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Identical, x, y)
+                        && let Some(r) = fast_cmp(Bin::Identical, x, y)
                     {
                         if self.try_put_bool(dst, r) {
                             continue;
@@ -714,7 +753,7 @@ impl Vm {
                         }
                         continue;
                     } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Lt, x, y)
+                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
                     {
                         if r {
                             self.ex.ip = t as usize;
