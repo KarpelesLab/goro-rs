@@ -691,8 +691,21 @@ fn run_redirect(cfg: &Config, path: &Path, name: &str, phpt: &Phpt) -> Vec<TestR
         }
     }
     let body = phpt.get("REDIRECTTEST").unwrap_or_default();
+    // The runner evaluates the code itself, so `__DIR__` is the suite root
+    // (ext/pdo_sqlite/tests/common.phpt: `__DIR__ . '/ext/pdo/tests'`).
+    let root_lit = {
+        let r = cfg
+            .root
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        format!("'{r}'")
+    };
+    let body = String::from_utf8_lossy(body)
+        .replace("__DIR__", &root_lit)
+        .into_bytes();
     let mut code = b"<?php\n$__redirect_config = (function () {\n".to_vec();
-    code.extend_from_slice(body);
+    code.extend_from_slice(&body);
     code.extend_from_slice(
         b"\n})();\necho \"TESTS=\", $__redirect_config['TESTS'] ?? '', \"\\n\";\n\
           foreach (($__redirect_config['ENV'] ?? []) as $__k => $__v) { echo \"ENV=\", $__k, \"=\", $__v, \"\\n\"; }\n",

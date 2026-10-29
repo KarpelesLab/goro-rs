@@ -42,16 +42,17 @@ pub mod output;
 pub mod password;
 pub mod pcntl;
 pub mod pcre;
+pub mod pdo;
 pub mod phar;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
 pub mod simplexml;
 pub mod sockets;
-pub mod sqlite_common;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
+pub mod sqlite_common;
 pub mod stdmisc;
 pub mod streams;
 pub mod string;
@@ -130,6 +131,8 @@ pub fn modules() -> Vec<&'static Module> {
         &gd::MODULE,
         &exif::MODULE,
         &curl::MODULE,
+        &pdo::MODULE,
+        &pdo::SQLITE_MODULE,
         &image::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);

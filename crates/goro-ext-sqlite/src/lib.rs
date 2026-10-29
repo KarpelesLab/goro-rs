@@ -213,6 +213,10 @@ pub struct Stmt {
     pub readonly: bool,
     /// `sqlite3_stmt_isexplain()`: 0, 1 (EXPLAIN) or 2 (EXPLAIN QUERY PLAN).
     pub explain: u8,
+    /// For `ATTACH`: the file when written as a string literal, `None`
+    /// when it is an expression (a parameter...). PHP refuses to attach
+    /// files outside open_basedir and unknown ones (test gh9032.phpt).
+    pub attach: Option<Option<String>>,
 }
 
 impl Stmt {
@@ -303,7 +307,8 @@ fn parse_uri(uri: &str, mut flags: i32) -> Result<Target, SqlError> {
         path_part
     };
     let path = pct_decode(path);
-    let mut memory = path == ":memory:";
+    // An empty path is a private temporary database (uri.html).
+    let mut memory = path == ":memory:" || path.is_empty();
     for kv in query.split('&') {
         let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
         let v = pct_decode(v);
@@ -420,10 +425,32 @@ impl Db {
         if start == end {
             return Ok((None, tail));
         }
-        let text = &sql[start..end];
-        let ast = graphitesql::sql::parse_one(text).map_err(|e| SqlError::from_engine(&e))?;
-        self.check(&ast, text)?;
+        let mut owned = sql[start..end].to_string();
+        let mut tries = 0;
+        let ast = loop {
+            let ast = graphitesql::sql::parse_one(&owned).map_err(|e| SqlError::from_engine(&e))?;
+            match self.check(&ast, &owned) {
+                Ok(()) => break ast,
+                Err(e) => match dqs_rewrite(&owned, &e) {
+                    Some(s) if tries < 32 => {
+                        owned = s;
+                        tries += 1;
+                    }
+                    _ => return Err(e),
+                },
+            }
+        };
+        let text = owned.as_str();
         let (kind, readonly, explain) = classify(&ast, text);
+        let attach = match &ast {
+            Statement::Attach { file, .. } => Some(match file {
+                graphitesql::sql::ast::Expr::Literal(graphitesql::sql::ast::Literal::Str(s)) => {
+                    Some(s.clone())
+                }
+                _ => None,
+            }),
+            _ => None,
+        };
         Ok((
             Some(Stmt {
                 sql: text.to_string(),
@@ -431,6 +458,7 @@ impl Db {
                 params: scan::scan_params(text),
                 readonly,
                 explain,
+                attach,
             }),
             tail,
         ))
@@ -498,21 +526,37 @@ impl Db {
                 }
             }
         }
-        let r = match st.kind {
-            Kind::Query => self.conn.query_params(&st.sql, &params).map(|q| Rows {
-                columns: q.columns,
-                rows: q.rows,
-            }),
-            Kind::Returning => self.conn.execute_returning(&st.sql, &params).map(|q| Rows {
-                columns: q.columns,
-                rows: q.rows,
-            }),
-            Kind::Exec => self
-                .conn
-                .execute_params(&st.sql, &params)
-                .map(|_| Rows::default()),
-        };
-        r.map_err(|e| SqlError::from_engine(&e))
+        let mut sql = std::borrow::Cow::Borrowed(st.sql.as_str());
+        let mut tries = 0;
+        loop {
+            let r = match st.kind {
+                Kind::Query => self.conn.query_params(&sql, &params).map(|q| Rows {
+                    columns: q.columns,
+                    rows: q.rows,
+                }),
+                Kind::Returning => self.conn.execute_returning(&sql, &params).map(|q| Rows {
+                    columns: q.columns,
+                    rows: q.rows,
+                }),
+                Kind::Exec => self
+                    .conn
+                    .execute_params(&sql, &params)
+                    .map(|_| Rows::default()),
+            };
+            match r {
+                Ok(rows) => return Ok(rows),
+                Err(e) => {
+                    let e = SqlError::from_engine(&e);
+                    match dqs_rewrite(&sql, &e) {
+                        Some(s) if tries < 32 => {
+                            sql = std::borrow::Cow::Owned(s);
+                            tries += 1;
+                        }
+                        _ => return Err(e),
+                    }
+                }
+            }
+        }
     }
 
     /// `sqlite3_exec()` without a callback: runs each statement of a
@@ -721,6 +765,72 @@ impl Db {
             })
             .collect()
     }
+}
+
+/// SQLite's double-quoted string literal fallback (quirks.html, "Double-
+/// quoted String Literals Are Accepted"): a `"name"` that names no column
+/// is a string. graphitesql reports such names as an error; the query is
+/// rewritten with that name as a `'…'` literal and tried again.
+fn dqs_rewrite(sql: &str, e: &SqlError) -> Option<String> {
+    let rest = e.msg.strip_prefix("no such column: \"")?;
+    let name = rest.strip_suffix("\" - should this be a string literal in single-quotes?")?;
+    let quoted_ident = format!("\"{}\"", name.replace('"', "\"\""));
+    let literal = format!("'{}'", name.replace('\'', "''"));
+    let b = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    let mut changed = false;
+    while i < b.len() {
+        match b[i] {
+            b'\'' | b'`' | b'[' => {
+                let close = if b[i] == b'[' { b']' } else { b[i] };
+                let mut j = i + 1;
+                while j < b.len() {
+                    if b[j] == close {
+                        if close != b']' && j + 1 < b.len() && b[j + 1] == close {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                let end = (j + 1).min(b.len());
+                out.push_str(&sql[i..end]);
+                i = end;
+            }
+            b'"' => {
+                let mut j = i + 1;
+                while j < b.len() {
+                    if b[j] == b'"' {
+                        if j + 1 < b.len() && b[j + 1] == b'"' {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                let end = (j + 1).min(b.len());
+                let tok = &sql[i..end];
+                // Not a qualified name (`t."c"`).
+                let qualified = out.ends_with('.');
+                if tok == quoted_ident && !qualified {
+                    out.push_str(&literal);
+                    changed = true;
+                } else {
+                    out.push_str(tok);
+                }
+                i = end;
+            }
+            _ => {
+                let ch = sql[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    changed.then_some(out)
 }
 
 fn decl(ty: &str) -> Option<String> {

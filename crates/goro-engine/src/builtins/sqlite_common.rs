@@ -15,6 +15,8 @@ use std::cmp::Ordering;
 use goro_ext_sqlite::graphitesql::{self, Value as SqlValue};
 use goro_runtime::{PhpStr, Value};
 
+use crate::class::TypeName;
+
 use crate::vm::{R, Unwind, Vm};
 
 thread_local! {
@@ -124,6 +126,17 @@ pub fn call(cb: &Value, args: Vec<Value>) -> Result<Value, graphitesql::Error> {
     }
 }
 
+/// A callable resolved where it is registered, as a Closure: a private
+/// method named by `[$this, 'm']` stays callable when SQLite calls it
+/// later from elsewhere (test ext/pdo_sqlite/tests/gh20095.phpt).
+pub fn bind_callable(vm: &mut Vm, cb: &Value) -> R<Value> {
+    if let Value::Object(_) = cb.deref() {
+        return Ok(cb.deref());
+    }
+    let c = vm.resolve_callable(cb, true)?;
+    Ok(Value::Object(vm.closure_from_callee(c)?))
+}
+
 /// A scalar user function: `cb(...$args)`. `argc` ≥ 0 is checked (the
 /// "wrong number of arguments" error of a function registered with a
 /// fixed arity).
@@ -173,14 +186,18 @@ impl graphitesql::AggregateFunction for Aggregate {
             )));
         }
         self.rows += 1;
-        let mut a = vec![std::mem::take(&mut self.context), Value::Int(self.rows)];
+        // The context goes by reference, so a step taking `&$context`
+        // works without a warning (test pdo_sqlite_createaggregate.phpt).
+        let ctx = goro_runtime::PhpRef::new(std::mem::take(&mut self.context));
+        let mut a = vec![Value::Ref(ctx), Value::Int(self.rows)];
         a.extend(args.iter().map(to_php));
         self.context = call(&self.step, a)?;
         Ok(())
     }
 
     fn finalize(&mut self) -> graphitesql::Result<SqlValue> {
-        let a = vec![std::mem::take(&mut self.context), Value::Int(self.rows)];
+        let ctx = goro_runtime::PhpRef::new(std::mem::take(&mut self.context));
+        let a = vec![Value::Ref(ctx), Value::Int(self.rows)];
         let v = call(&self.fin, a)?;
         match with_vm(|vm| from_php_result(vm, &v)) {
             Some(Ok(r)) => Ok(r),
@@ -213,17 +230,103 @@ pub fn aggregate(
     }
 }
 
-/// A user collation: `cb($a, $b)` returns <0, 0 or >0. An exception
-/// is kept pending (the comparison reads as equal).
+/// A user collation: `cb($a, $b)` returns <0, 0 or >0 (an int: other
+/// types are a TypeError, test pdo_sqlite_createcollation_wrong_callback).
+/// An exception is kept pending (the comparison reads as equal).
 pub fn collation(cb: Value) -> std::rc::Rc<dyn Fn(&str, &str) -> Ordering> {
     std::rc::Rc::new(move |a: &str, b: &str| {
         let args = vec![Value::Str(PhpStr::from(a)), Value::Str(PhpStr::from(b))];
         match call(&cb, args) {
-            Ok(v) => {
-                let n = with_vm(|vm| vm.to_int(&v)).and_then(|r| r.ok()).unwrap_or(0);
-                n.cmp(&0)
+            Ok(Value::Int(n)) => n.cmp(&0),
+            Ok(other) => {
+                let msg = format!(
+                    "{}Return value of the collation callback must be of type int, {} returned",
+                    caller_prefix(),
+                    other.tname()
+                );
+                if let Some(Err(u)) = with_vm(|vm| vm.type_error::<()>(&msg)) {
+                    set_pending(u);
+                }
+                Ordering::Equal
             }
             Err(_) => Ordering::Equal,
+        }
+    })
+}
+
+thread_local! {
+    /// The PHP function running the current database call ("PDO::query"),
+    /// for the messages of errors raised in callbacks.
+    static CALLER: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Restores the previous caller name when dropped.
+pub struct CallerGuard(String);
+
+impl Drop for CallerGuard {
+    fn drop(&mut self) {
+        let prev = std::mem::take(&mut self.0);
+        CALLER.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// Names the PHP function running database calls until the guard drops.
+pub fn set_caller(name: &str) -> CallerGuard {
+    let prev = CALLER.with(|c| std::mem::replace(&mut *c.borrow_mut(), name.to_string()));
+    CallerGuard(prev)
+}
+
+/// "PDO::query(): " (empty when no caller is set).
+pub fn caller_prefix() -> String {
+    CALLER.with(|c| {
+        let c = c.borrow();
+        if c.is_empty() {
+            String::new()
+        } else {
+            format!("{}(): ", c)
+        }
+    })
+}
+
+/// SQLITE_DENY: what an authorizer returns to refuse an action.
+pub const AUTH_DENY: i32 = 1;
+
+/// A user authorizer: `cb($action, $arg1, $arg2, $dbname, $trigger)`
+/// returns `<class>::OK`, `DENY` or `IGNORE` (PHP manual:
+/// SQLite3::setAuthorizer, Pdo\Sqlite::setAuthorizer). Other results
+/// are a TypeError/ValueError and deny the action.
+#[allow(clippy::type_complexity)]
+pub fn authorizer(
+    cb: Value,
+    class: &'static str,
+) -> Box<dyn FnMut(i32, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> i32> {
+    Box::new(move |action, a1, a2, db, trigger| {
+        let s = |x: Option<&str>| x.map_or(Value::Null, |v| Value::Str(PhpStr::from(v)));
+        let args = vec![Value::Int(action as i64), s(a1), s(a2), s(db), s(trigger)];
+        match call(&cb, args) {
+            Ok(Value::Int(n)) if (0..=2).contains(&n) => n as i32,
+            Ok(Value::Int(_)) => {
+                let msg = format!(
+                    "{}Return value of the authorizer callback must be one of {class}::OK, {class}::DENY, or {class}::IGNORE",
+                    caller_prefix()
+                );
+                if let Some(Err(u)) = with_vm(|vm| vm.value_error::<()>(&msg)) {
+                    set_pending(u);
+                }
+                AUTH_DENY
+            }
+            Ok(other) => {
+                let msg = format!(
+                    "{}Return value of the authorizer callback must be of type int, {} returned",
+                    caller_prefix(),
+                    other.tname()
+                );
+                if let Some(Err(u)) = with_vm(|vm| vm.type_error::<()>(&msg)) {
+                    set_pending(u);
+                }
+                AUTH_DENY
+            }
+            Err(_) => AUTH_DENY,
         }
     })
 }
