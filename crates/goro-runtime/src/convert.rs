@@ -58,15 +58,29 @@ pub fn int_to_string(i: i64) -> PhpStr {
 /// Writes the decimal form of `i` at the end of `buf`, returning it.
 #[inline]
 pub fn int_digits(i: i64, buf: &mut [u8; 20]) -> &[u8] {
+    // Two digits per division, from a table of "00".."99".
+    const PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
+2021222324252627282930313233343536373839\
+4041424344454647484950515253545556575859\
+6061626364656667686970717273747576777879\
+8081828384858687888990919293949596979899";
     let mut n = i.unsigned_abs();
     let mut p = buf.len();
-    loop {
+    while n >= 100 {
+        let d = (n % 100) as usize * 2;
+        n /= 100;
+        p -= 2;
+        buf[p] = PAIRS[d];
+        buf[p + 1] = PAIRS[d + 1];
+    }
+    if n >= 10 {
+        let d = n as usize * 2;
+        p -= 2;
+        buf[p] = PAIRS[d];
+        buf[p + 1] = PAIRS[d + 1];
+    } else {
         p -= 1;
-        buf[p] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
+        buf[p] = b'0' + n as u8;
     }
     if i < 0 {
         p -= 1;
