@@ -16,7 +16,8 @@ pub fn parse(d: &[u8]) -> Option<Vec<(String, Vec<Vec<u8>>)>> {
         if d[i] != 0x1C {
             break;
         }
-        if i + 4 >= d.len() {
+        // A dataset needs more than its 5-byte header (observed on PHP 8.5).
+        if i + 5 >= d.len() {
             break;
         }
         let rec = d[i + 1];
@@ -66,8 +67,9 @@ fn app13(iptc: &[u8]) -> Vec<u8> {
 }
 
 /// iptcembed(): `jpeg` with its APP13 segments replaced by one holding
-/// `iptc`, placed after SOI and a leading APP0. None when `jpeg` is not
-/// a JPEG file.
+/// `iptc`, placed after SOI and a leading APPn segment (observed on PHP
+/// 8.5: a file that ends before any segment gets none). None when `jpeg`
+/// is not a JPEG file.
 pub fn embed(iptc: &[u8], jpeg: &[u8]) -> Option<Vec<u8>> {
     if jpeg.len() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
         return None;
@@ -75,15 +77,20 @@ pub fn embed(iptc: &[u8], jpeg: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(jpeg.len() + iptc.len() + 32);
     out.extend_from_slice(&jpeg[..2]);
     let mut pos = 2;
+    let mut first = true;
     let mut done = false;
     loop {
-        // The next marker.
+        // The next marker (fill bytes skipped).
         let mut p = pos;
         while p < jpeg.len() && jpeg[p] == 0xFF {
             p += 1;
         }
-        if p >= jpeg.len() || p == pos {
-            // Not a marker: copy the rest.
+        if p >= jpeg.len() {
+            out.extend_from_slice(&jpeg[pos..]);
+            return Some(out);
+        }
+        if p == pos {
+            // Not a marker: copied as is.
             if !done {
                 out.extend_from_slice(&app13(iptc));
             }
@@ -93,36 +100,30 @@ pub fn embed(iptc: &[u8], jpeg: &[u8]) -> Option<Vec<u8>> {
         let m = jpeg[p];
         let seg_start = pos;
         let body = p + 1;
-        if m == 0xD9 || m == 0xDA || (0xD0..=0xD7).contains(&m) || m == 0x01 {
-            if !done {
-                out.extend_from_slice(&app13(iptc));
-            }
-            out.extend_from_slice(&jpeg[seg_start..]);
-            return Some(out);
+        let leading_app = first && (0xE0..=0xEF).contains(&m) && m != 0xED;
+        first = false;
+        if !done && !leading_app {
+            out.extend_from_slice(&app13(iptc));
+            done = true;
         }
-        if body + 2 > jpeg.len() {
-            if !done {
-                out.extend_from_slice(&app13(iptc));
-            }
+        // Markers without a length, and the scan: the rest is copied.
+        if m == 0xD9
+            || m == 0xDA
+            || (0xD0..=0xD7).contains(&m)
+            || m == 0x01
+            || body + 2 > jpeg.len()
+        {
             out.extend_from_slice(&jpeg[seg_start..]);
             return Some(out);
         }
         let len = u16::from_be_bytes([jpeg[body], jpeg[body + 1]]) as usize;
         let end = (body + len).min(jpeg.len());
-        match m {
-            0xE0 if !done && seg_start == 2 => {
-                out.extend_from_slice(&jpeg[seg_start..end]);
-                out.extend_from_slice(&app13(iptc));
-                done = true;
-            }
-            0xED => {}
-            _ => {
-                if !done {
-                    out.extend_from_slice(&app13(iptc));
-                    done = true;
-                }
-                out.extend_from_slice(&jpeg[seg_start..end]);
-            }
+        if m != 0xED {
+            out.extend_from_slice(&jpeg[seg_start..end]);
+        }
+        if leading_app {
+            out.extend_from_slice(&app13(iptc));
+            done = true;
         }
         pos = end;
     }

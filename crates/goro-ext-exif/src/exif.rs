@@ -938,8 +938,8 @@ impl<'a> Info<'a> {
         self.thumb.data = Some(self.file[s..s + self.thumb.size as usize].to_vec());
     }
 
-    /// The maker note at entry `e`: an IFD in one of the layouts the
-    /// makers use (see [`makernote`]).
+    /// The maker note `value` (a slice of the file): an IFD in one of the
+    /// layouts the makers use (see [`makernote`]).
     fn maker_note(&mut self, value: &'a [u8], base: usize, len: usize) -> Res<()> {
         let make = self.make.clone().unwrap_or_default();
         let Some(desc) = makernote::find(&make) else {
@@ -960,8 +960,7 @@ impl<'a> Info<'a> {
             ));
             return Ok(());
         }
-        let r = self.process_ifd(start + off, base, S_MAKERNOTE, Table::Maker(desc.maker));
-        r
+        self.process_ifd(start + off, base, S_MAKERNOTE, Table::Maker(desc.maker))
     }
 
     /// A TIFF header at absolute offset `t` (Exif in JPEG or HEIF).

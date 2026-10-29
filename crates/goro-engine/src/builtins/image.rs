@@ -175,9 +175,12 @@ fn iptcembed(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(out) = iptc::embed(data.as_bytes(), &d) else {
         return Ok(Value::Bool(false));
     };
-    // PHP manual: with $spool of 2 or more the JPEG is printed.
-    if spool >= 2 {
+    // PHP manual: with $spool of 1 or more the JPEG is printed, and from
+    // 2 it is not returned (observed on PHP 8.5).
+    if spool >= 1 {
         vm.echo(&out);
+    }
+    if spool >= 2 {
         return Ok(Value::Bool(true));
     }
     Ok(Value::Str(PhpStr::from(out)))
