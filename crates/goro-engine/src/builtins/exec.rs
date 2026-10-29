@@ -251,6 +251,63 @@ fn fd_stream(fd: OwnedFd, mode: &[u8]) -> ResRef {
 }
 
 /// The descriptor behind a stream resource, if it has one.
+/// The user-space stream object of a resource, if it is one.
+fn user_obj(r: &ResRef) -> Option<goro_runtime::ObjRef> {
+    let data = r.res().data.borrow();
+    let cell = data.as_ref()?.downcast_ref::<RefCell<Stream>>()?;
+    let s = cell.try_borrow().ok()?;
+    match &s.backing {
+        Backing::User { obj } => Some(obj.clone()),
+        _ => None,
+    }
+}
+
+/// stream_cast(STREAM_CAST_FOR_SELECT) of a user stream: its descriptor,
+/// None (after the warnings) when it has none (test
+/// file/userstreams_002.phpt).
+fn user_cast_fd(vm: &mut Vm, a: &Args, r: &ResRef, depth: u32) -> R<Option<RawFd>> {
+    let Some(obj) = user_obj(r) else {
+        return Ok(stream_fd(r).ok().flatten());
+    };
+    let class = vm.class_of(&obj).name.to_string_lossy();
+    let id = r.id();
+    super::file::busy_push(id);
+    let cast = super::userstream::call(vm, &obj, b"stream_cast", vec![Value::Int(3)]);
+    super::file::busy_pop(id);
+    let fd = match cast? {
+        None => {
+            vm.fwarn(a, &format!("{class}::stream_cast is not implemented!"))?;
+            None
+        }
+        Some(Value::Bool(false)) => None,
+        Some(Value::Resource(r2)) if ResRef::ptr_eq(&r2, r) => {
+            vm.fwarn(a, &format!("{class}::stream_cast must not return itself"))?;
+            None
+        }
+        Some(Value::Resource(r2)) if stream_fd(&r2).is_ok() => {
+            if user_obj(&r2).is_some() && depth < 8 {
+                user_cast_fd(vm, a, &r2, depth + 1)?
+            } else {
+                stream_fd(&r2).ok().flatten()
+            }
+        }
+        Some(_) => {
+            vm.fwarn(
+                a,
+                &format!("{class}::stream_cast must return a stream resource"),
+            )?;
+            None
+        }
+    };
+    if fd.is_none() {
+        vm.fwarn(
+            a,
+            "Cannot represent a stream of type user-space as a select()able descriptor",
+        )?;
+    }
+    Ok(fd)
+}
+
 fn stream_fd(r: &ResRef) -> Result<Option<RawFd>, &'static str> {
     let data = r.res().data.borrow();
     let Some(d) = data.as_ref() else {
@@ -1027,7 +1084,8 @@ fn popen(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     drop(child_end);
-    let r = fd_stream(parent_end, if read { b"r" } else { b"w" });
+    // popen() streams are binary (test stream_get_meta_data_process_basic.phpt)
+    let r = fd_stream(parent_end, if read { b"rb" } else { b"wb" });
     vm.ext::<PopenState>().pids.insert(r.id(), pid);
     Ok(Value::Resource(r))
 }
@@ -1075,7 +1133,7 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
         })
         .collect();
     if sets.iter().all(|s| s.is_none()) {
-        return vm.fthrow(a, "ValueError", "No stream arrays were passed");
+        return vm.throw("ValueError", "No stream arrays were passed");
     }
     let secs = a.opt_int(3);
     let usecs = a.opt_int(4).unwrap_or(0);
@@ -1125,6 +1183,12 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     })
                     .unwrap_or(false)
             };
+            if user_obj(&r).is_some() {
+                if let Some(fd) = user_cast_fd(vm, a, &r, 0)? {
+                    entries.push((si, key, Some(fd)));
+                }
+                continue;
+            }
             match stream_fd(&r) {
                 Ok(Some(fd)) if !ready_now => entries.push((si, key, Some(fd))),
                 Ok(_) => entries.push((si, key, None)),
@@ -1134,6 +1198,9 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }
         }
+    }
+    if entries.is_empty() && sets.iter().flatten().all(|s| !s.is_empty()) {
+        return vm.throw("ValueError", "No stream arrays were passed");
     }
     let mut pfds: Vec<libc::pollfd> = entries
         .iter()

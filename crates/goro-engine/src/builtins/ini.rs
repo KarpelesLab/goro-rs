@@ -146,15 +146,27 @@ fn parse_ini_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn parse_ini_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let name = a.str(0);
     if name.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
+        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) must not be empty");
+    }
+    if name.contains(&0) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($filename) must not contain any null bytes",
+        );
     }
     use std::os::unix::ffi::OsStrExt;
     let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&name));
-    let mut candidates = vec![if p.is_absolute() {
+    let mut candidates = Vec::new();
+    // include_path first (test parse_ini_file_variation3.phpt)
+    if let Some(found) = vm.resolve_include(&name) {
+        candidates.push(found);
+    }
+    candidates.push(if p.is_absolute() {
         p.to_path_buf()
     } else {
         vm.cwd.join(p)
-    }];
+    });
     if !p.is_absolute() {
         // Relative names are also looked up next to the running script
         // (test general_functions/bug49692.phpt).
@@ -163,6 +175,7 @@ fn parse_ini_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
             candidates.push(dir.join(p));
         }
     }
+    let candidates: Vec<std::path::PathBuf> = candidates;
     let Some(data) = candidates.iter().find_map(|c| std::fs::read(c).ok()) else {
         vm.warn(&format!(
             "parse_ini_file({}): Failed to open stream: No such file or directory",

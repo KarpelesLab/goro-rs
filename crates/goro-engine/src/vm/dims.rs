@@ -504,6 +504,10 @@ impl Vm {
                     }
                 }
                 Some(k) => {
+                    if matches!(a.get(k.as_ref()), Some(Value::Ref(r)) if r.is_typed()) {
+                        self.drop_tmp(key);
+                        return self.assign_dim_slow_value(var, Some(k), v, res);
+                    }
                     let old = a.assign(k, v);
                     drop(old);
                 }
@@ -746,6 +750,15 @@ impl Vm {
         }
         // The value.
         let (value, value_lazy) = match path.action {
+            // A variable is read after the keys (an undefined key variable
+            // warns first: test Zend/tests/bug79599).
+            PathAction::Assign(v) | PathAction::AssignOp(_, v)
+                if v & (CONST | TMP) == 0
+                    && !path.elems.is_empty()
+                    && matches!(path.base, PathBase::Var(b) if b != v) =>
+            {
+                (None, v)
+            }
             PathAction::Assign(v) | PathAction::AssignOp(_, v) => (Some(self.get(v)?), NONE),
             PathAction::BindRef(v) => (Some(self.get_raw(v)), NONE),
             _ => (None, NONE),
@@ -1086,14 +1099,16 @@ impl Vm {
         let cur = deref_ptr(place.ptr());
         match unsafe { &*cur } {
             Value::Array(_) | Value::Null | Value::Bool(false) => {}
-            Value::Str(s) => {
-                if for_unset {
+            // A nested write or unset through a string offset, even of an
+            // empty string (observed on PHP 8.5; tests Zend/tests/bug53432,
+            // bug70089).
+            Value::Str(_) => {
+                // unset() through a variable's string (test Zend/tests/unset/
+                // bug24773).
+                if for_unset && !matches!(place, Place::Temp(_)) {
                     return self.throw("Error", "Cannot unset string offsets");
                 }
-                if !s.is_empty() {
-                    return self.throw("Error", "Cannot use string offset as an array");
-                }
-                unsafe { *cur = Value::Array(PhpArray::new()) };
+                return self.throw("Error", "Cannot use string offset as an array");
             }
             Value::Object(o) => {
                 let o = o.clone();
@@ -1234,6 +1249,18 @@ impl Vm {
                         }
                     }
                     Some(k) => {
+                        // An element bound to a typed property: its type
+                        // applies, and the assignment gives the coerced
+                        // value (test Zend/tests/assign_typed_ref_result).
+                        if let Some(Value::Ref(r)) = a.get(k.as_ref())
+                            && r.is_typed()
+                        {
+                            let r = r.clone();
+                            let v = self.typed_ref_value(&r, v.into_deref())?;
+                            let old = r.set(v.clone());
+                            drop(old);
+                            return Ok(v);
+                        }
                         let old = a.assign(k, v.clone());
                         drop(old);
                     }
@@ -1346,7 +1373,14 @@ impl Vm {
             PathAction::MakeRef | PathAction::BindRef(_) => {
                 return self.throw("Error", "Cannot create references to/from string offsets");
             }
-            PathAction::AssignOp(..) | PathAction::IncDec(_) => {
+            // `$s[]--`, `$s[] .= x` (tests Zend/tests/bug69905, bug70182).
+            PathAction::AssignOp(..) | PathAction::IncDec(_) if key.is_none() => {
+                return self.throw("Error", "[] operator not supported for strings");
+            }
+            PathAction::IncDec(_) => {
+                return self.throw("Error", "Cannot increment/decrement string offsets");
+            }
+            PathAction::AssignOp(..) => {
                 return self.throw(
                     "Error",
                     "Cannot use assign-op operators with string offsets",

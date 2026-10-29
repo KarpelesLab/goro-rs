@@ -234,9 +234,19 @@ fn fiber_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return fiber_error(vm, "Cannot start a fiber that has already been started");
     }
     let args: Vec<Value> = a.vals.clone();
-    let size = match vm.get_ini(b"fiber.stack_size") {
-        Some(s) if !s.is_empty() => crate::vm::setup::parse_size(&s).max(64 * 1024) as usize,
-        _ => 8 << 20,
+    // Observed on PHP 8.5 (tests Zend/tests/fibers/gh10249, gh20483).
+    const MIN_STACK: i64 = 8192;
+    let size = match vm.ini.fiber_stack_size {
+        Some(n) if n < MIN_STACK => {
+            return vm.throw(
+                "Exception",
+                &format!(
+                    "Fiber stack size is too small, it needs to be at least {MIN_STACK} bytes"
+                ),
+            );
+        }
+        Some(n) => (n as usize).max(64 * 1024),
+        None => 8 << 20,
     };
     let stack = match DefaultStack::new(size) {
         Ok(s) => s,

@@ -3447,6 +3447,9 @@ fn c_new_no_ctor(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if c.has_flag(cflags::INTERNAL)
         && c.has_flag(cflags::FINAL)
         && c.lname.as_bytes() != b"stdclass"
+        // observed on PHP 8.5 (test
+        // DirectoryClass_reflection_create_instance_no_construct.phpt)
+        && c.lname.as_bytes() != b"directory"
     {
         return refl_error(
             vm,
@@ -4208,7 +4211,10 @@ fn p_has_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let p = pinfo(&c, &n).unwrap();
     Ok(Value::Bool(
-        p.default.is_some() || (p.ty.is_none() && p.flags & mflags::VIRTUAL == 0),
+        // Hooked properties have no implicit null default (observed on PHP
+        // 8.5; test Zend/tests/property_hooks/cpp).
+        p.default.is_some()
+            || (p.ty.is_none() && p.flags & mflags::VIRTUAL == 0 && p.has_hooks == (false, false)),
     ))
 }
 fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -4221,7 +4227,7 @@ fn p_default(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match p.default {
         Some(ce) => vm.eval_const_expr(&ce, p.class),
         None => {
-            if p.ty.is_some() || p.flags & mflags::VIRTUAL != 0 {
+            if p.ty.is_some() || p.flags & mflags::VIRTUAL != 0 || p.has_hooks != (false, false) {
                 vm.deprecated("ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists")?;
             }
             Ok(Value::Null)

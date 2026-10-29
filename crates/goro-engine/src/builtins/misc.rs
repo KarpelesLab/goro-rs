@@ -263,6 +263,21 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ),
         );
     }
+    let out = escape_cmd(s);
+    if out.len() > SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Escaped command exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
+    Ok(sv(out))
+}
+
+/// escapeshellcmd() of `s`.
+pub(crate) fn escape_cmd(s: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len() + 8);
     // Quotes are kept when they pair up (observed on PHP 8.5): the
     // position of the closing quote of an open pair.
@@ -305,16 +320,7 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => out.push(c),
         }
     }
-    if out.len() > SHELL_ARG_MAX {
-        return vm.throw(
-            "ValueError",
-            &format!(
-                "Escaped command exceeds the allowed length of {} bytes",
-                SHELL_ARG_MAX
-            ),
-        );
-    }
-    Ok(sv(out))
+    out
 }
 
 // ---------------------------------------------------------------- assertions
@@ -334,7 +340,7 @@ fn ini_flag(vm: &Vm, name: &[u8]) -> i64 {
 /// Whether setting `k` to `v` changes a deprecated assert.* setting from
 /// its default (observed on PHP 8.5: "assert.bail INI setting is
 /// deprecated" for `ini_set("assert.bail", "1")`, not for "0").
-fn assert_ini_truthy(v: &[u8]) -> bool {
+pub(crate) fn assert_ini_truthy(v: &[u8]) -> bool {
     let l = v.to_ascii_lowercase();
     match &l[..] {
         b"on" | b"yes" | b"true" => true,
@@ -426,6 +432,20 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
         let _ = vm.raise_at(
             crate::vm::errors::E_DEPRECATED,
             "Directive 'allow_url_include' is deprecated",
+            goro_runtime::PhpStr::from("Unknown"),
+            0,
+        );
+    }
+    // test ext/standard/tests/file/auto_detect_line_endings_1.phpt
+    if ini
+        .iter()
+        .rev()
+        .find(|(n, _)| n.as_slice() == b"auto_detect_line_endings")
+        .is_some_and(|(_, v)| assert_ini_truthy(v))
+    {
+        let _ = vm.raise_at(
+            crate::vm::errors::E_DEPRECATED,
+            "auto_detect_line_endings is deprecated",
             goro_runtime::PhpStr::from("Unknown"),
             0,
         );
@@ -738,7 +758,16 @@ fn services() -> Vec<(Vec<u8>, i64, Vec<u8>, Vec<Vec<u8>>)> {
     out
 }
 
-fn getservbyname(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn getservbyname(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    for (i, n) in [(0, "service"), (1, "protocol")] {
+        if a.bytes(i).contains(&0) {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                &format!("Argument #{} (${n}) must not contain any null bytes", i + 1),
+            );
+        }
+    }
     let (svc, proto) = (a.bytes(0).to_vec(), a.bytes(1).to_vec());
     for (name, port, p, aliases) in services() {
         if p == proto && (name == svc || aliases.contains(&svc)) {
@@ -748,7 +777,14 @@ fn getservbyname(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(false))
 }
 
-fn getservbyport(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn getservbyport(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if a.bytes(1).contains(&0) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($protocol) must not contain any null bytes",
+        );
+    }
     let (port, proto) = (a.int(0), a.bytes(1).to_vec());
     for (name, p, pr, _) in services() {
         if p == port && pr == proto {

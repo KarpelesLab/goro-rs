@@ -151,7 +151,7 @@ pub static MODULE: Module = Module {
             str_word_count,
         ),
         (
-            "function strtr(string $string, array|string $from, ?string $to = null): string",
+            "function strtr(string $string, array|string|null $from, ?string $to = null): string",
             strtr,
         ),
         ("function addslashes(string $string): string", addslashes),
@@ -962,10 +962,19 @@ fn strtr(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let from = a.val(1);
     if a.len() < 3 {
         let Value::Array(pairs) = from else {
+            // null is refused without the deprecation of a null string
+            // (test strings/strtr_variation8.phpt)
             return vm.fthrow(
                 a,
                 "TypeError",
-                "Argument #2 ($from) must be of type array, string given",
+                &format!(
+                    "Argument #2 ($from) must be of type array, {} given",
+                    if matches!(from, Value::Null) {
+                        "null"
+                    } else {
+                        "string"
+                    }
+                ),
             );
         };
         let mut list = Vec::with_capacity(pairs.len());
@@ -993,7 +1002,13 @@ fn strtr(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 "Argument #2 ($from) must be of type string, array given",
             );
         }
-        _ => unreachable!(),
+        _ => {
+            vm.fdeprecated(
+                a,
+                "Passing null to parameter #2 ($from) of type array|string is deprecated",
+            )?;
+            PhpStr::empty()
+        }
     };
     let to = match to {
         Value::Str(t) => t,
@@ -1719,6 +1734,22 @@ fn http_build_query(vm: &mut Vm, a: &mut Args) -> R<Value> {
             };
             match &v {
                 Value::Null => {}
+                // enums give their value (test http/gh15650.phpt)
+                Value::Object(o) if vm.class_of(o).is_enum() => {
+                    let cls = vm.class_of(o);
+                    if cls.enum_backing.is_none() {
+                        return vm.throw(
+                            "ValueError",
+                            &format!(
+                                "Unbacked enum {} cannot be converted to a string",
+                                cls.name.to_string_lossy()
+                            ),
+                        );
+                    }
+                    let bv = vm.get_prop_raw(o, b"value");
+                    let s = vm.to_php_str(&bv)?;
+                    qb.push(&name, &s);
+                }
                 Value::Array(_) | Value::Object(_) => {
                     walk(vm, qb, &v, Some(&name), prefix, depth + 1)?;
                 }
@@ -1731,6 +1762,16 @@ fn http_build_query(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         Ok(())
+    }
+    if let Value::Object(o) = &data
+        && vm.class_of(o).is_enum()
+    {
+        let n = vm.class_of(o).name.to_string_lossy();
+        return vm.fthrow(
+            a,
+            "TypeError",
+            &format!("Argument #1 ($data) must not be an enum, {n} given"),
+        );
     }
     walk(vm, &mut qb, &data, None, &prefix, 0)?;
     Ok(sv(qb.finish()))

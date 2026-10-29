@@ -2408,14 +2408,26 @@ impl<'a> Compiler<'a> {
             }
             let n = self.null_const();
             self.emit(Op::Return { src: n });
-            self.finish_func(
+            // The hook's attributes (test Zend/tests/property_hooks/attributes).
+            let attrs = self.attributes(spec.attrs)?;
+            self.check_internal_attrs(&attrs, 4, spec.span.line)?;
+            let mut c = self.finish_func(
                 spec.name.clone(),
                 params,
                 1,
                 None,
                 spec.span.line,
                 spec.span.end_line,
-            )
+            )?;
+            if attrs
+                .iter()
+                .any(|a| a.name.eq_ignore_ascii_case(b"Deprecated"))
+            {
+                c.flags |= fflags::DEPRECATED;
+            }
+            c.attrs = attrs;
+            c.doc_comment = spec.doc.map(PhpStr::new);
+            Ok(c)
         })();
         self.f = parent_f;
         let mut c = r?;

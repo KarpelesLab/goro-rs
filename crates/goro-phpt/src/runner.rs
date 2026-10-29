@@ -222,6 +222,16 @@ pub fn substitute(value: &str, pwd: &Path, tmp: &Path) -> String {
     let mut s = value
         .replace("{PWD}", &pwd.to_string_lossy())
         .replace("{TMP}", &tmp.to_string_lossy());
+    // `{MAIL:FILE}`: a sendmail_path storing the message in FILE (relative
+    // to the working directory, where ext/standard/tests/mail/*.phpt read
+    // it back)
+    while let Some(start) = s.find("{MAIL:") {
+        let Some(len) = s[start..].find('}') else {
+            break;
+        };
+        let quoted = s[start + 6..start + len].replace('\'', "'\\''");
+        s.replace_range(start..start + len + 1, &format!("cat > '{quoted}'"));
+    }
     while let Some(start) = s.find("{ENV:") {
         let Some(len) = s[start..].find('}') else {
             break;
@@ -339,6 +349,13 @@ pub fn base_env(cfg: &Config) -> Env {
             shell_quote(&php).into(),
         ),
         ("TEST_PHP_EXTRA_ARGS".into(), extra.join(" ").into()),
+        // Tests needing the internet skip themselves (run-tests' variable):
+        // runs here stay on the local machine, unless the environment
+        // already says otherwise.
+        (
+            "SKIP_ONLINE_TESTS".into(),
+            std::env::var_os("SKIP_ONLINE_TESTS").unwrap_or_else(|| "1".into()),
+        ),
     ]
 }
 

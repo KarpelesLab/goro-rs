@@ -169,8 +169,26 @@ impl Vm {
         }
         if self.ini.log_errors {
             let text = format!("PHP {}:  {} in {} on line {}\n", label, msg, file, line);
-            self.out.flush();
-            self.write_stderr(text.as_bytes());
+            // to the error_log file when one is set, time-stamped (PHP
+            // manual: error_log ini setting; test
+            // general_functions/bug60723.phpt)
+            let target = self.get_ini(b"error_log").unwrap_or_default();
+            if !target.is_empty() && target.as_bytes() != b"syslog" {
+                use std::io::Write;
+                use std::os::unix::ffi::OsStrExt;
+                let stamp = crate::builtins::date::log_timestamp(self);
+                let p = self.fs_path(&target);
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(std::path::Path::new(std::ffi::OsStr::from_bytes(
+                        p.as_os_str().as_bytes(),
+                    )))
+                    .and_then(|mut f| f.write_all(format!("[{stamp}] {text}").as_bytes()));
+            } else {
+                self.out.flush();
+                self.write_stderr(text.as_bytes());
+            }
         }
         match self.ini.display_errors {
             0 => {}
@@ -701,7 +719,15 @@ impl Vm {
             while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
                 let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
-                if direct_cuf(natives) || gen_dtor(natives) {
+                // A fiber destroyed (its function unwinding) is no frame
+                // either (tests Zend/tests/fibers/suspend-in-force-close-fiber,
+                // throw-during-fiber-destruct).
+                let fiber_dtor = nc.func.lname.as_bytes() == b"__destruct"
+                    && nc
+                        .func
+                        .scope()
+                        .is_some_and(|c| c.lname.as_bytes() == b"fiber");
+                if direct_cuf(natives) || gen_dtor(natives) || fiber_dtor {
                     continue;
                 }
                 let mut e = self.native_trace_frame(ex, nc, i, with_args);

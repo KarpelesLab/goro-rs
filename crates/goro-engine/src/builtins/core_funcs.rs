@@ -479,6 +479,7 @@ pub static MODULE: Module = Module {
         ("assert.bail", "0"),
         ("assert.callback", ""),
         ("memory_limit", "128M"),
+        ("fiber.stack_size", ""),
         ("include_path", ".:/usr/share/php"),
         ("ignore_user_abort", "0"),
         ("max_execution_time", "0"),
@@ -1694,7 +1695,7 @@ fn error_log(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&target));
                 let line = format!(
                     "[{}] {}\n",
-                    "01-Jan-1970 00:00:00 UTC",
+                    super::date::log_timestamp(vm),
                     msg.to_string_lossy()
                 );
                 let ok = std::fs::OpenOptions::new()
@@ -1838,6 +1839,11 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // quantity capped by it, and can't go below the memory in use (tests
     // tests/basic/gh17951_runtime_change_*; observed on PHP 8.5).
     if k.as_bytes() == b"max_memory_limit" {
+        return Ok(Value::Bool(false));
+    }
+    // Test Zend/tests/fibers/negative_stack_size.
+    if k.as_bytes() == b"fiber.stack_size" && crate::vm::setup::parse_size(&v) < 0 {
+        vm.warn("fiber.stack_size must be a positive number")?;
         return Ok(Value::Bool(false));
     }
     let mut v = v;
@@ -2234,8 +2240,39 @@ fn get_extension_funcs(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn dl(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    vm.warn("dl(): Dynamically loaded extensions aren't enabled")?;
+/// dl(): no extension can be loaded; the checks and messages are PHP's
+/// (observed on PHP 8.5; tests general_functions/dl-*.phpt).
+fn dl(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let on = vm
+        .get_ini(b"enable_dl")
+        .is_some_and(|v| super::misc::assert_ini_truthy(&v));
+    if !on {
+        vm.warn("dl(): Dynamically loaded extensions aren't enabled")?;
+        return Ok(Value::Bool(false));
+    }
+    let f = a.str(0);
+    if f.len() >= 4096 {
+        vm.fwarn(
+            a,
+            "Filename exceeds the maximum allowed length of 4096 characters",
+        )?;
+        return Ok(Value::Bool(false));
+    }
+    if f.contains(&b'/') {
+        vm.fwarn(a, "Temporary module name should contain only filename")?;
+        return Ok(Value::Bool(false));
+    }
+    let dir = vm
+        .get_ini(b"extension_dir")
+        .map(|d| d.to_string_lossy())
+        .unwrap_or_default();
+    let name = f.to_string_lossy();
+    vm.fwarn(
+        a,
+        &format!(
+            "Unable to load dynamic library '{name}' (tried: {dir}/{name} ({dir}/{name}: cannot open shared object file: No such file or directory), {dir}/{name}.so ({dir}/{name}.so: cannot open shared object file: No such file or directory))"
+        ),
+    )?;
     Ok(Value::Bool(false))
 }
 
@@ -2413,6 +2450,11 @@ fn time_nanosleep(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "time_nanosleep(): Argument #2 ($nanoseconds) must be greater than or equal to 0",
         );
     }
+    if ns > 999_999_999 {
+        return vm.value_error(
+            "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
+        );
+    }
     std::thread::sleep(std::time::Duration::new(s as u64, ns as u32));
     Ok(Value::Bool(true))
 }
@@ -2436,21 +2478,53 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(s)))
 }
 
-fn setlocale(_vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let l = a.val(1);
-    let s = match &l {
-        Value::Str(s) => s.clone(),
-        Value::Array(arr) => match arr.iter().next() {
-            Some((_, v)) => v.as_str().cloned().unwrap_or_default(),
-            None => PhpStr::empty(),
-        },
-        _ => PhpStr::empty(),
-    };
-    if s.is_empty() || s.as_bytes() == b"0" || s.as_bytes() == b"C" || s.as_bytes() == b"POSIX" {
-        return Ok(Value::Str(PhpStr::from("C")));
+fn setlocale(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // The candidates in order: strings, arrays of them, null (test
+    // strings/gh18823_*.phpt for the argument types).
+    let mut cands: Vec<PhpStr> = Vec::new();
+    for i in 1..a.len() {
+        let v = a.val(i).deref();
+        match &v {
+            Value::Array(arr) => {
+                for (_, e) in arr.iter() {
+                    cands.push(vm.to_php_str(&e.deref())?);
+                }
+            }
+            Value::Null => cands.push(PhpStr::empty()),
+            Value::Str(s) => cands.push(s.clone()),
+            Value::Object(_) => cands.push(vm.to_php_str(&v)?),
+            other => {
+                if vm.caller_strict() {
+                    let what = if i == 1 {
+                        "Argument #2 ($locales)".to_string()
+                    } else {
+                        format!("Argument #{}", i + 1)
+                    };
+                    return vm.fthrow(
+                        a,
+                        "TypeError",
+                        &format!(
+                            "{what} must be of type array|string|null, {} given",
+                            crate::vm::Vm::type_name_given(other)
+                        ),
+                    );
+                }
+                cands.push(vm.to_php_str(other)?);
+            }
+        }
     }
-    if s.as_bytes().starts_with(b"C.") || s.as_bytes() == b"en_US.UTF-8" {
-        return Ok(Value::Str(s));
+    for s in cands {
+        if s.len() >= 255 {
+            vm.fwarn(a, "Specified locale name is too long")?;
+            return Ok(Value::Bool(false));
+        }
+        if s.is_empty() || s.as_bytes() == b"0" || s.as_bytes() == b"C" || s.as_bytes() == b"POSIX"
+        {
+            return Ok(Value::Str(PhpStr::from("C")));
+        }
+        if s.as_bytes().starts_with(b"C.") || s.as_bytes() == b"en_US.UTF-8" {
+            return Ok(Value::Str(s));
+        }
     }
     Ok(Value::Bool(false))
 }

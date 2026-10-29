@@ -747,6 +747,8 @@ impl StreamFilter for Base64 {
 struct QuotedPrintable {
     encode: bool,
     binary: bool,
+    /// line-break-chars given: input line breaks stay line breaks
+    keep_breaks: bool,
     line_len: usize,
     line_break: Vec<u8>,
     col: usize,
@@ -757,10 +759,43 @@ impl StreamFilter for QuotedPrintable {
     fn filter(&mut self, vm: &mut Vm, input: &[u8], closing: bool, out: &mut Vec<u8>) -> R<bool> {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         if self.encode {
+            // Line breaks of the input (line-break-chars) stay line breaks
+            // and white space before them is encoded (tests
+            // streams/bug64166*.phpt); a tail that may continue in the next
+            // chunk is kept.
+            self.carry.extend_from_slice(input);
+            let input = std::mem::take(&mut self.carry);
+            let lb = self.line_break.clone();
             let mut i = 0;
             while i < input.len() {
                 let c = input[i];
-                let plain = ((33..=126).contains(&c) && c != b'=') || (c == b' ' && !self.binary);
+                if self.keep_breaks && !self.binary && !lb.is_empty() {
+                    let rest = &input[i..];
+                    if rest.starts_with(&lb) {
+                        out.extend_from_slice(&lb);
+                        self.col = 0;
+                        i += lb.len();
+                        continue;
+                    }
+                    if !closing && lb.starts_with(rest) {
+                        self.carry = rest.to_vec();
+                        return Ok(true);
+                    }
+                }
+                let mut trailing = false;
+                if (c == b' ' || c == b'\t') && !self.binary && self.keep_breaks {
+                    let mut j = i;
+                    while j < input.len() && (input[j] == b' ' || input[j] == b'\t') {
+                        j += 1;
+                    }
+                    if j == input.len() && !closing {
+                        self.carry = input[i..].to_vec();
+                        return Ok(true);
+                    }
+                    trailing = j == input.len() || input[j..].starts_with(&lb);
+                }
+                let plain = !trailing
+                    && (((33..=126).contains(&c) && c != b'=') || (c == b' ' && !self.binary));
                 let enc: Vec<u8> = if plain {
                     vec![c]
                 } else {
@@ -832,6 +867,7 @@ fn convert_filters(
         Some(v) => vm.to_int(&v)?.max(0) as usize,
         None => 0,
     };
+    let keep_breaks = matches!(opt(p, "line-break-chars"), Some(Value::Str(_)));
     let line_break = match opt(p, "line-break-chars") {
         Some(Value::Str(s)) => s.to_vec(),
         _ => b"\r\n".to_vec(),
@@ -855,6 +891,7 @@ fn convert_filters(
         b"convert.quoted-printable-encode" => Some(Box::new(QuotedPrintable {
             encode: true,
             binary,
+            keep_breaks,
             line_len,
             line_break,
             col: 0,
@@ -863,6 +900,7 @@ fn convert_filters(
         b"convert.quoted-printable-decode" => Some(Box::new(QuotedPrintable {
             encode: false,
             binary,
+            keep_breaks: false,
             line_len: 0,
             line_break: Vec::new(),
             col: 0,

@@ -395,6 +395,8 @@ pub struct Ini {
     pub serialize_precision: i32,
     pub assertions: i64,
     pub memory_limit: i64,
+    /// fiber.stack_size once set (`None`: the default size).
+    pub fiber_stack_size: Option<i64>,
     pub include_path: PhpStr,
     pub max_nesting: usize,
     /// Settings changed at run time, with their original values

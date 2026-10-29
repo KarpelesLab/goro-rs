@@ -5,6 +5,7 @@
 
 pub mod argon2;
 pub mod crypt;
+pub mod dns;
 pub mod encoding;
 pub mod error;
 pub mod float;

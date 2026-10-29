@@ -1197,6 +1197,27 @@ impl Vm {
                     return Err(self.throw_error_msg("UnhandledMatchError", &desc));
                 }
                 Op::Strlen { dst, src } => {
+                    // disable_functions=strlen: a user function of that name,
+                    // or none at all (tests Zend/tests/bug69315, bug79382).
+                    if !self.disabled_functions.is_empty()
+                        && self
+                            .disabled_functions
+                            .contains_key(&PhpStr::from("strlen"))
+                    {
+                        let v = self.get(src)?;
+                        let f = self.functions.get(&PhpStr::from("strlen")).cloned();
+                        let r = match f {
+                            Some(f) => self.call_func_this(&f, None, vec![v])?,
+                            None => {
+                                return Err(self.throw_error_msg(
+                                    "Error",
+                                    "Call to undefined function strlen()",
+                                ));
+                            }
+                        };
+                        self.put(dst, r);
+                        continue;
+                    }
                     if let Some(Value::Str(s)) = self.peek(src) {
                         let n = s.len() as i64;
                         self.drop_tmp(src);
