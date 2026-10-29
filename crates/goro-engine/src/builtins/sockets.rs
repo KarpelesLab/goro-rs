@@ -1724,6 +1724,25 @@ fn stream_socket_accept(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         // SAFETY: a fresh descriptor we own.
         let ofd = unsafe { OwnedFd::from_raw_fd(nfd) };
+        // The "socket" context's tcp_nodelay applies to accepted
+        // connections, not the listening socket (test streams/
+        // stream_context_tcp_nodelay_server.phpt).
+        if s.kind == Kind::Tcp
+            && let Some(c) = &s.ctx
+            && context_option(c, "socket", "tcp_nodelay").is_some_and(|v| qint(&v) != 0)
+        {
+            let one: libc::c_int = 1;
+            // SAFETY: setsockopt with an int.
+            unsafe {
+                libc::setsockopt(
+                    nfd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_NODELAY,
+                    (&one as *const libc::c_int).cast(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+        }
         let peer = sockaddr_to_std((&st as *const libc::sockaddr_storage).cast(), len)
             .map(|sa| addr_text(&sa).into_bytes())
             .or_else(|| sock_name(nfd, true));

@@ -53,8 +53,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **92.7%** overall
-(16,349 passing, 1,283 failing, 3,941 skipped), as of 2026-10-29. The
+php-src test suite (8.5.4), share of the tests that run: **92.8%** overall
+(16,626 passing, 1,282 failing, 3,717 skipped), as of 2026-10-29. The
 ext/opcache tests now run (goro has no optimizer or JIT, so tests that dump
 opcodes fail where they used to be skipped).
 The extension libraries below are wired into the engine; ext/random,
@@ -150,6 +150,27 @@ the XML extensions each pass 87-100% of their tests that run.
 - ext/bz2 (engine module on compcol's bzip2, byte-identical to libbzip2):
   `bz*` functions, `compress.bzip2://` and the `bzip2.*` filters
   (21 of 22 tests; the other needs a 4 GB string).
+- `goro-ext-fileinfo`: ext/fileinfo (`finfo`, `finfo_*`,
+  `mime_content_type`) on a magic(5) rule engine written from the
+  manual page (indirect/relative offsets, `name`/`use` with byte-order
+  swap, `default`/`clear`, search/regex, `!:mime`/`!:ext`/`!:apple`,
+  strength ordering), text and encoding classification, the built-in
+  JSON/CSV/CDF/tar/SIMH checks and goro's own default rules from format
+  specifications; it reads the magic files tests ship as PHP 8.5 does:
+  all 61 ext/fileinfo tests that run pass (including the 50 upstream
+  samples).
+- ext/sockets (engine module over the BSD socket calls): `Socket` and
+  `AddressInfo`, every socket_* function including sendmsg/recvmsg
+  with SCM_RIGHTS, SCM_CREDENTIALS and IPv6 packet-info control
+  messages, select, the socket(7)/ip(7)/ipv6(7)/tcp(7)/udp(7) option
+  tables (multicast groups, linger, timeouts, CBPF), stream
+  import/export and getaddrinfo lookups: all 88 ext/sockets tests that
+  run locally pass.
+- ext/ftp (engine module): an RFC 959 client with AUTH TLS (RFC 4217),
+  SIZE/MDTM/MLSD (RFC 3659), PORT and PASV data connections, ASCII
+  conversion, resumed and non-blocking transfers, and the ftp:// and
+  ftps:// stream wrappers: all 56 local ext/ftp tests and the 8 ftp
+  wrapper stream tests pass.
 - `goro-ext-zip`: the ZIP format (PKWARE APPNOTE) for ext/zip: reading
   with libzip's consistency checks and error codes, writing with ZIP64,
   store/deflate/bzip2/xz/zstd, traditional PKWARE and WinZip AES
