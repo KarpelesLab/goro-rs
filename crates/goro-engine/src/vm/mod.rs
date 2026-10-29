@@ -200,6 +200,9 @@ pub mod pending_flags {
     /// A user function that needs the general activation (attributes to
     /// act on, abstract, generator, variadic, internal class code).
     pub const SLOW: u32 = 32;
+    /// Called the way an internal function calls (`$closure->__invoke()`):
+    /// binding errors don't name the call site.
+    pub const INTERNAL_CALLER: u32 = 64;
 }
 
 /// A native call in progress (for backtraces).

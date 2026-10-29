@@ -75,6 +75,10 @@ pub static MODULE: Module = Module {
             ret_zero,
         ),
         (
+            "function stream_set_chunk_size($stream, int $size): int",
+            stream_set_chunk_size,
+        ),
+        (
             "function stream_set_read_buffer($stream, int $size): int",
             ret_zero,
         ),
@@ -1129,6 +1133,13 @@ fn fwrite(vm: &mut Vm, a: &mut Args) -> R<Value> {
         None => data.len(),
     };
     with_stream(vm, a, 0, |vm, s| {
+        // Directory handles (observed on PHP 8.5; test ext/phar/tests/027).
+        if matches!(s.backing, Backing::Dir { .. }) {
+            if s.wrapper == "plainfile" {
+                vm.notice_msg("fwrite(): Stream is not writable")?;
+            }
+            return Ok(Value::Bool(false));
+        }
         if !s.writable {
             vm.notice_msg(&format!(
                 "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
@@ -1275,6 +1286,11 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Backing::File(f) => Value::Int(f.stream_position().map(|p| p as i64).unwrap_or(0)),
             Backing::Memory { pos, .. } => Value::Int(*pos as i64),
             Backing::User { .. } => Value::Int(s.upos),
+            Backing::Dir { pos, .. } => Value::Int(if s.wrapper == "plainfile" {
+                0
+            } else {
+                *pos as i64
+            }),
             Backing::Native(n) => match n.tell() {
                 Some(p) => Value::Int(p as i64),
                 None => Value::Bool(false),
@@ -1284,7 +1300,28 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
+pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
+    // Directory handles: a plain directory only rewinds; a wrapper's
+    // listing (phar://) seeks among its entries (observed on PHP 8.5;
+    // test ext/phar/tests/027).
+    let plain = s.wrapper == "plainfile";
+    if let Backing::Dir { entries, pos } = &mut s.backing {
+        let base = match whence {
+            1 => *pos as i64,
+            2 => entries.len() as i64,
+            _ => 0,
+        };
+        let n = base.saturating_add(off);
+        if n < 0 {
+            return false;
+        }
+        if !plain {
+            *pos = (n as usize).min(entries.len());
+        } else if n == 0 {
+            *pos = 0;
+        }
+        return true;
+    }
     if matches!(s.backing, Backing::User { .. }) {
         return match super::userstream::seek(vm, s, off, whence) {
             Ok(b) => b,
@@ -2433,6 +2470,19 @@ fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 fn ret_zero(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Int(0))
+}
+
+/// stream_set_chunk_size(): the previous chunk size (PHP manual; reads
+/// are not chunked here, so it is always the default 8192).
+fn stream_set_chunk_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if a.int(1) <= 0 {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($size) must be greater than 0",
+        );
+    }
+    with_stream(vm, a, 0, |_vm, _s| Ok(Value::Int(8192)))
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {

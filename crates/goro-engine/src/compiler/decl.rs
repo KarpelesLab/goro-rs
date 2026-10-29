@@ -981,6 +981,13 @@ impl<'a> Compiler<'a> {
                     kind: CastKind::Unset,
                     ..
                 } => Some("The (unset) cast is no longer supported"),
+                // Tests Zend/tests/closures/closure_const_expr/disallows_*.
+                ExprKind::Closure(c) if !c.is_static => {
+                    Some("Closures in constant expressions must be static")
+                }
+                ExprKind::Closure(c) if !c.uses.is_empty() => {
+                    Some("Cannot use(...) variables in constant expression")
+                }
                 ExprKind::Array { items, .. } if items.iter().any(|i| i.is_none()) => {
                     Some("Cannot use empty array elements in arrays")
                 }

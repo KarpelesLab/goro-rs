@@ -685,12 +685,23 @@ impl Vm {
                 && !ex.frames[d - 1].code().in_namespace
                 && !(k > 0 && ex.native_calls[k - 1].depth as usize == d)
         };
+        // A generator destroyed (its `finally` running) is no frame of its
+        // own either (test Zend/tests/generators/errors/
+        // yield_in_force_closed_finally_error).
+        let gen_dtor = |k: usize| -> bool {
+            let nc = &ex.native_calls[k];
+            nc.func.lname.as_bytes() == b"__destruct"
+                && nc
+                    .func
+                    .scope()
+                    .is_some_and(|c| c.lname.as_bytes() == b"generator")
+        };
         loop {
             // Native calls made from frame i-1 (depth == i).
             while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
                 let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
-                if direct_cuf(natives) {
+                if direct_cuf(natives) || gen_dtor(natives) {
                     continue;
                 }
                 let mut e = self.native_trace_frame(ex, nc, i, with_args);
@@ -715,7 +726,10 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) = if called_from_native && direct_cuf(natives - 1) {
+            let (file, line) = if called_from_native
+                && (direct_cuf(natives - 1)
+                    || (gen_dtor(natives - 1) && i > 0 && !ex.frames[i - 1].code().file.is_empty()))
+            {
                 (
                     Some(ex.frames[i - 1].code().file.clone()),
                     ex.native_calls[natives - 1].line,
@@ -741,7 +755,10 @@ impl Vm {
                     5 => "eval",
                     _ => "include",
                 };
-                let args = if with_args && fname != "eval" {
+                // The innermost frame (code of the included file itself
+                // running) shows no argument (observed on PHP 8.5; test
+                // sapi/cli/tests/php_cli_server_015).
+                let args = if with_args && fname != "eval" && !out.is_empty() {
                     Some(vec![Value::Str(code.file.clone())])
                 } else if with_args {
                     Some(Vec::new())

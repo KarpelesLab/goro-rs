@@ -329,6 +329,27 @@ impl Vm {
                 self.ex.frames.clear();
                 self.ex.pending.clear();
                 self.ex.native_calls.clear();
+                // The main code's temporaries (a foreach's generator) go
+                // as the exception leaves it, before it is reported
+                // (observed on PHP 8.5; test Zend/tests/generators/bug69740).
+                let ncv = self.globals.code.as_ref().map_or(0, |c| c.num_cvs as usize);
+                let temps: Vec<Slot> = self
+                    .globals
+                    .slots
+                    .iter_mut()
+                    .skip(ncv)
+                    .map(|s| s.take())
+                    .collect();
+                drop(temps);
+                let r = self.run_pending_destructors();
+                if let Err(Unwind::Throw(e2)) = r {
+                    self.chain_previous(&e2, e.clone());
+                    self.ex.frames.clear();
+                    self.ex.pending.clear();
+                    self.ex.native_calls.clear();
+                    self.report_uncaught(e2);
+                    return;
+                }
                 self.report_uncaught(e);
             }
             Err(Unwind::Exit) | Err(Unwind::Fatal) => {
