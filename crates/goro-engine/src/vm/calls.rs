@@ -571,6 +571,7 @@ impl Vm {
                         key: 1,
                         a: Rc::as_ptr(&f) as usize,
                         b: 0,
+                        ..Cache::default()
                     });
                     f
                 }
@@ -1298,7 +1299,7 @@ impl Vm {
         // Inline cache: same class, constant name.
         let cls_ptr = self.class_ptr_of(&o);
         if is_const(name) {
-            let c = self.code_ref().caches[cache as usize].get();
+            let c = self.code_ref().caches[cache as usize].get().way(cls_ptr as usize);
             if c.key == cls_ptr as usize && c.key != 0 {
                 let fp = c.a as *const Func;
                 let f = unsafe {
@@ -1340,11 +1341,12 @@ impl Vm {
             crate::builtins::spl::check_init(self, &o, &cb.func)?;
         }
         if is_const(name) && cb.magic_name.is_none() && cb.closure.is_none() && !check_init {
-            self.code_ref().caches[cache as usize].set(Cache {
-                key: cls_ptr as usize,
-                a: Rc::as_ptr(&cb.func) as usize,
-                b: 0,
-            });
+            Cache::store_class(
+                &self.code_ref().caches[cache as usize],
+                cls_ptr as usize,
+                Rc::as_ptr(&cb.func) as usize,
+                0,
+            );
         }
         self.push_callee(cb, 0);
         Ok(())
@@ -1517,6 +1519,7 @@ impl Vm {
                 key: Rc::as_ptr(&cls) as usize,
                 a: Rc::as_ptr(&cb.func) as usize,
                 b: 0,
+                ..Cache::default()
             });
         }
         self.push_callee(cb, 0);

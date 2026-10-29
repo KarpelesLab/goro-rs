@@ -603,15 +603,15 @@ impl Vm {
         if o.is_lazy() {
             return Ok(false);
         }
-        let mut c = self.code_ref().caches[cache as usize].get();
         let cp = self.class_ptr_of(&o) as usize;
+        let mut c = self.code_ref().caches[cache as usize].get().way(cp);
         if c.key != cp {
             let name = match self.peek(n) {
                 Some(Value::Str(s)) => s.clone(),
                 _ => return Ok(false),
             };
             self.prop_ic_fill(&o, &name, cache);
-            c = self.code_ref().caches[cache as usize].get();
+            c = self.code_ref().caches[cache as usize].get().way(cp);
             if c.key != cp {
                 return Ok(false);
             }
