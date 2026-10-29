@@ -98,15 +98,25 @@ const CLASS_SIZE: [usize; NCLASS] = [
     16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512,
 ];
 
+/// Class of each 16-byte step of the size (index `(size + 15) / 16`).
+const CLASS_OF: [u8; SMALL_MAX / 16 + 1] = {
+    let mut t = [0u8; SMALL_MAX / 16 + 1];
+    let mut i = 0;
+    while i < t.len() {
+        let size = if i == 0 { 1 } else { i * 16 };
+        let mut c = 0;
+        while CLASS_SIZE[c] < size {
+            c += 1;
+        }
+        t[i] = c as u8;
+        i += 1;
+    }
+    t
+};
+
 #[inline(always)]
 fn class_of(size: usize) -> usize {
-    if size <= 128 {
-        size.max(1).div_ceil(16) - 1
-    } else if size <= 256 {
-        8 + (size - 129) / 32
-    } else {
-        12 + (size - 257) / 64
-    }
+    CLASS_OF[(size + 15) >> 4] as usize
 }
 
 #[inline(always)]
@@ -146,6 +156,7 @@ fn small_alloc(size: usize) -> *mut u8 {
     })
 }
 
+#[cold]
 #[inline(never)]
 fn carve(p: &mut Pool, sz: usize) -> *mut u8 {
     if (p.end as usize) - (p.bump as usize) < sz {
