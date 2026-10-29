@@ -59,7 +59,7 @@ fn base_name(n: &[u8]) -> (Vec<u8>, bool) {
 
 /// The Cookie header as $_COOKIE: `;`-separated pairs, the first cookie
 /// of a name wins.
-fn parse_cookies(ck: &[u8]) -> PhpArray {
+fn parse_cookies(ck: &[u8], max_depth: i64) -> PhpArray {
     let mut cookie = PhpArray::new();
     // Only the space before a name goes (test tests/basic/022.phpt keeps
     // "val1  ").
@@ -91,7 +91,7 @@ fn parse_cookies(ck: &[u8]) -> PhpArray {
         }
         // "+" stays (test tests/basic/bug78929.phpt).
         let v = goro_ext_standard::url::rawurldecode(v);
-        register_variable(&mut cookie, &n, Value::Str(PhpStr::from(v)));
+        register_variable(&mut cookie, &n, Value::Str(PhpStr::from(v)), max_depth);
     }
     cookie
 }
@@ -130,7 +130,7 @@ fn limit_vars(vm: &mut Vm, data: &[u8], seps: &[u8]) -> Vec<u8> {
 }
 
 /// A "PHP Request Startup" warning.
-fn startup_warning(vm: &mut Vm, msg: &str) {
+pub(crate) fn startup_warning(vm: &mut Vm, msg: &str) {
     let _ = vm.raise_at(
         crate::vm::errors::E_WARNING,
         &format!("PHP Request Startup: {msg}"),
@@ -150,12 +150,14 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
         .get_ini(b"variables_order")
         .map(|v| v.to_ascii_uppercase())
         .unwrap_or_else(|| b"EGPCS".to_vec());
+    let depth = crate::builtins::string::nesting_limit(vm);
     let get = match r.query {
-        Some(q) if vorder.contains(&b'G') => parse_query(&limit_vars(vm, q, &seps), &seps),
+        Some(q) if vorder.contains(&b'G') => parse_query(&limit_vars(vm, q, &seps), &seps, depth),
         _ => PhpArray::new(),
     };
     let mut post = PhpArray::new();
     let mut files = PhpArray::new();
+    let mut upload_log = None;
     if r.method == b"POST" && ini_on(vm, b"enable_post_data_reading") {
         let ct = r.content_type.unwrap_or(b"").to_vec();
         let base = ct
@@ -179,26 +181,42 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
             );
         } else if !vorder.contains(&b'P') {
         } else if base == b"application/x-www-form-urlencoded" {
-            post = parse_query(&limit_vars(vm, r.body, &seps), &seps);
+            post = parse_query(&limit_vars(vm, r.body, &seps), &seps, depth);
         } else if base == b"multipart/form-data" {
             // Problems are request startup warnings; what was parsed
             // stays (tests tests/basic/rfc1867_*.phpt).
-            let limits = crate::cli_server::upload::Limits::from_ini(vm);
-            let r = crate::cli_server::upload::boundary(&ct)
+            let mut limits = crate::cli_server::upload::Limits::from_ini(vm);
+            limits.mb_lead = crate::builtins::mbstring::translation_lead(vm);
+            let progress = crate::builtins::session::upload_progress_name(vm);
+            vm.ext::<crate::cli_server::upload::UploadLog>().armed = progress;
+            let res = crate::cli_server::upload::boundary(&ct)
                 .map_err(String::from)
                 .and_then(|b| {
                     crate::cli_server::upload::parse(vm, r.body, &b, limits, &mut post, &mut files)
                 });
-            if let Err(m) = r {
-                startup_warning(vm, &m);
+            if let Err(m) = &res {
+                startup_warning(vm, m);
+            }
+            let log = std::mem::take(vm.ext::<crate::cli_server::upload::UploadLog>());
+            // a body that could not be read records nothing (test
+            // ext/session/tests/bug79221.phpt)
+            if log.progress.is_some() && res.is_ok() {
+                upload_log = Some((log, len));
             }
         }
     }
     let mut cookie = match r.cookie {
-        Some(ck) if vorder.contains(&b'C') => parse_cookies(ck),
+        Some(ck) if vorder.contains(&b'C') => parse_cookies(ck, depth),
         _ => PhpArray::new(),
     };
     let mut get = get;
+    // mbstring.encoding_translation (PHP manual: mbstring, HTTP input
+    // character encoding translation)
+    if crate::builtins::mbstring::translation_on(vm) {
+        get = crate::builtins::mbstring::translate_input(vm, 0, get);
+        post = crate::builtins::mbstring::translate_input(vm, 1, post);
+        cookie = crate::builtins::mbstring::translate_input(vm, 2, cookie);
+    }
     crate::builtins::filter::register_request(vm, [&mut get, &mut post, &mut cookie]);
     let order = vm
         .get_ini(b"request_order")
@@ -235,4 +253,7 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
     g.insert(Key::from("_SERVER"), Value::Array(server));
     g.insert(Key::from("_REQUEST"), Value::Array(request));
     g.insert(Key::from("_ENV"), Value::Array(env));
+    if let Some((log, len)) = upload_log {
+        crate::builtins::session::record_upload_progress(vm, &log, len);
+    }
 }

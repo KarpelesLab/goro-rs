@@ -115,6 +115,7 @@ impl Vm {
             fold_constants: true,
             const_cache: Vec::new(),
             halt_offsets: HashMap::new(),
+            hide_native: std::ptr::null(),
             const_eval_names: Vec::new(),
             const_fetch_spelling: None,
             halt_shift: None,

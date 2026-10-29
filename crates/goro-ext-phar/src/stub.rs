@@ -75,10 +75,11 @@ pub fn normalize(stub: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The end of a stub in a phar file: after `__HALT_COMPILER();`, an
-/// optional " ?>" and one line break.
+/// optional " ?>" (or "\n?>") and one line break (observed on PHP 8.5;
+/// test ext/phar/tests/webphar_compilefail.phpt).
 pub fn stub_end(data: &[u8], halt: usize) -> usize {
     let mut p = halt;
-    if data[p..].starts_with(b" ?>") {
+    if data[p..].starts_with(b" ?>") || data[p..].starts_with(b"\n?>") {
         p += 3;
         if data[p..].starts_with(b"\r\n") {
             p += 2;

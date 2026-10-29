@@ -154,6 +154,22 @@ impl goro_runtime::NativeData for GenData {
 }
 
 impl Vm {
+    /// Calls an iterator method for the engine's own iteration: an
+    /// internal class's method shows no frame in traces, as PHP iterates
+    /// internal iterators without method calls (test
+    /// ext/pdo/tests/pdo_025.phpt).
+    fn iter_method(&mut self, it: &ObjRef, lname: &[u8], args: Vec<Value>) -> R<Value> {
+        let f = self.class_of(it).find_method(lname);
+        if let Some(f) = &f
+            && matches!(f.kind, crate::func::FuncKind::Native { .. })
+        {
+            self.hide_native = Rc::as_ptr(f);
+        }
+        let r = self.call_method(it, lname, args);
+        self.hide_native = std::ptr::null();
+        r
+    }
+
     // ------------------------------------------------------------ foreach
 
     fn iter_slots(&self, iter: Reg) -> (*mut Slot, *mut Slot) {
@@ -244,7 +260,7 @@ impl Vm {
                                 "An iterator cannot be used with foreach by reference",
                             );
                         }
-                        self.call_method(&it, b"rewind", Vec::new())?;
+                        self.iter_method(&it, b"rewind", Vec::new())?;
                         unsafe {
                             *sa = Some(Value::Object(it));
                             *sb = Some(enc(M_ITER_REF_FIRST, 0));
@@ -260,7 +276,7 @@ impl Vm {
                         }
                         return Ok(true);
                     }
-                    self.call_method(&it, b"rewind", Vec::new())?;
+                    self.iter_method(&it, b"rewind", Vec::new())?;
                     unsafe {
                         *sa = Some(Value::Object(it));
                         *sb = Some(enc(M_ITER_FIRST, 0));
@@ -431,17 +447,17 @@ impl Vm {
                     return Ok(false);
                 };
                 if mode == M_ITER {
-                    self.call_method(&it, b"next", Vec::new())?;
+                    self.iter_method(&it, b"next", Vec::new())?;
                 }
                 unsafe { *sb = Some(enc(M_ITER, 0)) };
-                let valid = self.call_method(&it, b"valid", Vec::new())?;
+                let valid = self.iter_method(&it, b"valid", Vec::new())?;
                 if !self.to_bool(&valid) {
                     return Ok(false);
                 }
-                let v = self.call_method(&it, b"current", Vec::new())?;
+                let v = self.iter_method(&it, b"current", Vec::new())?;
                 self.put(val, v.into_deref());
                 if key != NONE {
-                    let k = self.call_method(&it, b"key", Vec::new())?;
+                    let k = self.iter_method(&it, b"key", Vec::new())?;
                     self.put(key, k.into_deref());
                 }
                 Ok(true)
@@ -451,10 +467,10 @@ impl Vm {
                     return Ok(false);
                 };
                 if mode == M_ITER_REF {
-                    self.call_method(&it, b"next", Vec::new())?;
+                    self.iter_method(&it, b"next", Vec::new())?;
                 }
                 unsafe { *sb = Some(enc(M_ITER_REF, 0)) };
-                let valid = self.call_method(&it, b"valid", Vec::new())?;
+                let valid = self.iter_method(&it, b"valid", Vec::new())?;
                 if !self.to_bool(&valid) {
                     return Ok(false);
                 }
@@ -465,7 +481,7 @@ impl Vm {
                 let old = unsafe { (*p).replace(r) };
                 drop(old);
                 if key != NONE {
-                    let k = self.call_method(&it, b"key", Vec::new())?;
+                    let k = self.iter_method(&it, b"key", Vec::new())?;
                     self.put(key, k.into_deref());
                 }
                 Ok(true)
@@ -650,20 +666,20 @@ impl Vm {
                 if self.is_generator_obj(&it) {
                     return self.iterate_to_vec(&Value::Object(it), with_keys);
                 }
-                self.call_method(&it, b"rewind", Vec::new())?;
+                self.iter_method(&it, b"rewind", Vec::new())?;
                 loop {
-                    let valid = self.call_method(&it, b"valid", Vec::new())?;
+                    let valid = self.iter_method(&it, b"valid", Vec::new())?;
                     if !self.to_bool(&valid) {
                         break;
                     }
-                    let v = self.call_method(&it, b"current", Vec::new())?;
+                    let v = self.iter_method(&it, b"current", Vec::new())?;
                     let k = if with_keys {
-                        self.call_method(&it, b"key", Vec::new())?
+                        self.iter_method(&it, b"key", Vec::new())?
                     } else {
                         Value::Null
                     };
                     out.push((k.into_deref(), v.into_deref()));
-                    self.call_method(&it, b"next", Vec::new())?;
+                    self.iter_method(&it, b"next", Vec::new())?;
                 }
                 Ok(out)
             }
@@ -1056,16 +1072,16 @@ impl Vm {
                 }
                 let r = (|| -> R<Option<(Value, Value)>> {
                     if fresh {
-                        self.call_method(&it, b"rewind", Vec::new())?;
+                        self.iter_method(&it, b"rewind", Vec::new())?;
                     } else {
-                        self.call_method(&it, b"next", Vec::new())?;
+                        self.iter_method(&it, b"next", Vec::new())?;
                     }
-                    let valid = self.call_method(&it, b"valid", Vec::new())?;
+                    let valid = self.iter_method(&it, b"valid", Vec::new())?;
                     if !self.to_bool(&valid) {
                         return Ok(None);
                     }
-                    let v = self.call_method(&it, b"current", Vec::new())?;
-                    let k = self.call_method(&it, b"key", Vec::new())?;
+                    let v = self.iter_method(&it, b"current", Vec::new())?;
+                    let k = self.iter_method(&it, b"key", Vec::new())?;
                     Ok(Some((k, v)))
                 })();
                 match r {

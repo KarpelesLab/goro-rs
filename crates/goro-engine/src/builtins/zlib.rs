@@ -147,9 +147,40 @@ pub static MODULE: Module = Module {
         ("zlib.output_handler", ""),
     ],
     init: Some(init),
+    on_ini_set: Some(on_ini_set),
     listed: true,
     ..Module::EMPTY
 };
+
+/// zlib.output_compression turned on by ini_set() before any output
+/// starts the compression (PHP manual: zlib runtime configuration; test
+/// ext/zlib/tests/ob_003.phpt).
+fn on_ini_set(vm: &mut Vm, k: &[u8], v: &[u8]) -> R<bool> {
+    if k == b"zlib.output_compression"
+        && super::mbstring::ini_truthy(v)
+        && vm.out.sapi.web()
+        && !vm.out.sapi.sent
+    {
+        start_output_compression(vm);
+    }
+    Ok(true)
+}
+
+/// Starts zlib.output_compression: the output goes through ob_gzhandler,
+/// which compresses for clients that accept it (tests
+/// ext/zlib/tests/ob_001.phpt, bug51269.phpt).
+pub(crate) fn start_output_compression(vm: &mut Vm) {
+    const NAME: &[u8] = b"zlib output compression";
+    if vm.out.buffers.iter().any(|b| b.name.as_bytes() == NAME) {
+        return;
+    }
+    vm.out.buffers.push(crate::vm::output::ObBuffer::new(
+        Some(Value::Str(PhpStr::from("ob_gzhandler"))),
+        0,
+        crate::vm::output::PHP_OUTPUT_HANDLER_STDFLAGS,
+        PhpStr::from(NAME.to_vec()),
+    ));
+}
 
 const fn consts() -> [(&'static str, ConstVal); 27] {
     let mut out = [("", ConstVal::Null); 27];

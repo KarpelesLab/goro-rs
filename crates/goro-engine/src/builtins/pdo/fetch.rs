@@ -566,7 +566,10 @@ fn build(
                 stmt_error(vm, st, fname, &e)?;
                 return Ok(None);
             };
-            Ok(Some(vm.call_value(&f, row)?))
+            // A by-reference callback's reference is kept (test
+            // ext/pdo/tests/pdo_fetch_function_return_by_ref).
+            let c = vm.resolve_callable(&f, true)?;
+            Ok(Some(vm.call_callee_raw(c, row)?))
         }
         FETCH_BOUND => Ok(Some(Value::Bool(true))),
         FETCH_LAZY => {
@@ -1072,7 +1075,10 @@ impl goro_runtime::NativeData for RowObj {
     }
 }
 
-pub fn row_construct(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+/// PDORow has no constructor: user instantiation fails without one in
+/// the trace (test ext/pdo/tests/pdo_036.phpt; observed on PHP 8.5:
+/// ReflectionClass::getConstructor() is null).
+fn row_new_check(vm: &mut Vm) -> R<()> {
     Err(super::core::pdo_exception(
         vm,
         "You may not create a PDORow manually",
@@ -1098,6 +1104,7 @@ fn row_access(found: Option<Value>, acc: &ObjAccess) -> Option<R<Value>> {
 
 pub fn row_hooks() -> NativeHooks {
     NativeHooks {
+        new_check: Some(row_new_check),
         dim: Some(|vm, o, key, acc| {
             let Some(key) = key else {
                 return Some(vm.throw("Error", "Cannot append to PDORow offset"));

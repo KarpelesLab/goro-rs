@@ -1034,6 +1034,12 @@ impl Vm {
                 {
                     return self.magic_set(o, f, name, v);
                 }
+                if p.flags & mflags::WRITE_ONCE != 0 && !cur_uninit {
+                    return self.throw(
+                        "Error",
+                        &format!("Property {} is read only", name.to_string_lossy()),
+                    );
+                }
                 if p.flags & mflags::READONLY != 0 && !cur_uninit && !self.readonly_clone_ok(o, &p)
                 {
                     return self.throw(
@@ -2689,6 +2695,14 @@ impl Vm {
                 "Error",
                 &format!("Cannot instantiate {} {}", what, cls.name.dname()),
             );
+        }
+        let mut c = Some(&**cls);
+        while let Some(k) = c {
+            if let Some(h) = k.native.new_check {
+                h(self)?;
+                break;
+            }
+            c = k.parent.as_deref();
         }
         self.instantiate_raw(cls)
     }

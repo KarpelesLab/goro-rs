@@ -1,8 +1,10 @@
 //! phpinfo() and phpcredits() in the CLI's plain-text form (PHP manual:
-//! phpinfo, phpcredits; layout as observed on PHP 8.5's CLI).
+//! phpinfo, phpcredits; layout as observed on PHP 8.5's CLI), or as HTML
+//! under a web SAPI (info_html.rs).
 
 use goro_runtime::{PhpStr, Value};
 
+use super::info_html::{self as html, Table};
 use super::info_text;
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
@@ -54,7 +56,11 @@ fn credits_text(flags: i64) -> String {
 
 fn phpcredits(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let flags = a.int_or(0, 4294967295);
-    let s = credits_text(flags);
+    let s = if vm.out.sapi.web() {
+        html::credits_page(flags)
+    } else {
+        credits_text(flags)
+    };
     vm.echo(s.as_bytes());
     Ok(Value::Bool(true))
 }
@@ -89,78 +95,64 @@ fn ini_display(v: Option<&PhpStr>) -> String {
     }
 }
 
-fn directives(vm: &Vm, names: &[&str], out: &mut String) {
+/// The settings, sorted: (name, local value, master value).
+fn directive_values(vm: &Vm, names: &[&str]) -> Vec<(String, String, String)> {
     let mut names: Vec<&str> = names.to_vec();
     names.sort_unstable();
     names.dedup();
-    if names.is_empty() {
+    names
+        .into_iter()
+        .map(|n| {
+            let k = PhpStr::from(n);
+            let local = vm.ini.values.get(&k).cloned();
+            let master = match vm.ini.originals.get(&k) {
+                Some(Some(o)) => Some(o.clone()),
+                _ => local.clone(),
+            };
+            (
+                n.to_string(),
+                ini_display(local.as_ref()),
+                ini_display(master.as_ref()),
+            )
+        })
+        .collect()
+}
+
+fn directives(vm: &Vm, names: &[&str], out: &mut String) {
+    let rows = directive_values(vm, names);
+    if rows.is_empty() {
         return;
     }
     out.push_str("\nDirective => Local Value => Master Value\n");
-    for n in names {
-        let k = PhpStr::from(n);
-        let local = vm.ini.values.get(&k).cloned();
-        let master = match vm.ini.originals.get(&k) {
-            Some(Some(o)) => Some(o.clone()),
-            _ => local.clone(),
-        };
-        out.push_str(&format!(
-            "{} => {} => {}\n",
-            n,
-            ini_display(local.as_ref()),
-            ini_display(master.as_ref())
-        ));
+    for (n, l, m) in rows {
+        out.push_str(&format!("{n} => {l} => {m}\n"));
     }
 }
 
-fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let flags = a.int_or(0, 4294967295);
-    let mut out = String::from("phpinfo()\n");
-    let version = match vm.constants.get(&PhpStr::from("PHP_VERSION")) {
-        Some(Value::Str(s)) => s.to_string_lossy(),
-        _ => String::new(),
-    };
-    if flags & 1 != 0 {
-        let uname = match call_named(vm, "php_uname", Vec::new())? {
-            Some(Value::Str(s)) => s.to_string_lossy(),
-            _ => String::new(),
-        };
-        let build = match vm.constants.get(&PhpStr::from("PHP_BUILD_DATE")) {
-            Some(Value::Str(s)) => s.to_string_lossy(),
-            _ => String::new(),
-        };
-        let streams = joined(vm, "stream_get_wrappers")?;
-        let mut transports = joined(vm, "stream_get_transports")?;
-        if transports.is_empty() {
-            transports = "tcp, udp, unix, udg".to_string();
-        }
-        let mut filters = joined(vm, "stream_get_filters")?;
-        if filters.is_empty() {
-            filters = "string.rot13, string.toupper, string.tolower, convert.*".to_string();
-        }
-        out.push_str(&format!(
-            "PHP Version => {version}\n\nSystem => {uname}\nBuild Date => {build}\nConfigure Command => goro\n\
-             Server API => Command Line Interface\nVirtual Directory Support => disabled\n\
-             Configuration File (php.ini) Path => (none)\nLoaded Configuration File => (none)\n\
-             Scan this dir for additional .ini files => (none)\n\
-             Additional .ini files parsed => (none)\nPHP API => 20250925\n\
-             PHP Extension => 20250925\nZend Extension => 420250925\n\
-             Zend Extension Build => API420250925,NTS\nPHP Extension Build => API20250925,NTS\n\
-             PHP Integer Size => 64 bits\nDebug Build => no\nThread Safety => disabled\n\
-             Zend Signal Handling => disabled\nZend Memory Manager => disabled\n\
-             Zend Multibyte Support => disabled\nZend Max Execution Timers => disabled\n\
-             IPv6 Support => enabled\nDTrace Support => disabled\n\n\
-             Registered PHP Streams => {streams}\n\
-             Registered Stream Socket Transports => {transports}\n\
-             Registered Stream Filters => {filters}\n\n\
-             This program makes use of the Zend Scripting Language Engine:\n\
-             Zend Engine v4.5.4, Copyright (c) Zend Technologies\n"
-        ));
+fn directives_html(vm: &Vm, names: &[&str], out: &mut String) {
+    let rows = directive_values(vm, names);
+    if rows.is_empty() {
+        return;
     }
-    // Modules by name (several registry modules can share one), the
-    // unlisted ones folded into Core.
+    let mut t = Table::new();
+    t.header(&["Directive", "Local Value", "Master Value"]);
+    for (n, l, m) in &rows {
+        t.row(&[n, l, m]);
+    }
+    out.push_str(&t.finish());
+}
+
+type InfoFn = Option<fn(&mut Vm) -> String>;
+
+/// The modules by name (several registry modules can share one), the
+/// unlisted ones' settings folded into Core.
+fn module_list(
+    vm: &Vm,
+) -> (
+    Vec<&'static str>,
+    Vec<(&'static str, Vec<&'static str>, InfoFn)>,
+) {
     let mut core_ini: Vec<&'static str> = Vec::new();
-    type InfoFn = Option<fn(&mut Vm) -> String>;
     let mut mods: Vec<(&'static str, Vec<&'static str>, InfoFn)> = Vec::new();
     for m in vm.modules.iter() {
         let inis = m.ini.iter().map(|(k, _)| *k);
@@ -174,6 +166,143 @@ fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     mods.sort_by_key(|(n, _, _)| n.to_ascii_lowercase());
+    (core_ini, mods)
+}
+
+/// The general information block (INFO_GENERAL), as `a => b` lines.
+fn general(vm: &mut Vm, version: &str, sapi: &str) -> R<String> {
+    let uname = match call_named(vm, "php_uname", Vec::new())? {
+        Some(Value::Str(s)) => s.to_string_lossy(),
+        _ => String::new(),
+    };
+    let build = match vm.constants.get(&PhpStr::from("PHP_BUILD_DATE")) {
+        Some(Value::Str(s)) => s.to_string_lossy(),
+        _ => String::new(),
+    };
+    let streams = joined(vm, "stream_get_wrappers")?;
+    let mut transports = joined(vm, "stream_get_transports")?;
+    if transports.is_empty() {
+        transports = "tcp, udp, unix, udg".to_string();
+    }
+    let mut filters = joined(vm, "stream_get_filters")?;
+    if filters.is_empty() {
+        filters = "string.rot13, string.toupper, string.tolower, convert.*".to_string();
+    }
+    Ok(format!(
+        "PHP Version => {version}\n\nSystem => {uname}\nBuild Date => {build}\nConfigure Command => goro\n\
+         Server API => {sapi}\nVirtual Directory Support => disabled\n\
+         Configuration File (php.ini) Path => (none)\nLoaded Configuration File => (none)\n\
+         Scan this dir for additional .ini files => (none)\n\
+         Additional .ini files parsed => (none)\nPHP API => 20250925\n\
+         PHP Extension => 20250925\nZend Extension => 420250925\n\
+         Zend Extension Build => API420250925,NTS\nPHP Extension Build => API20250925,NTS\n\
+         PHP Integer Size => 64 bits\nDebug Build => no\nThread Safety => disabled\n\
+         Zend Signal Handling => disabled\nZend Memory Manager => disabled\n\
+         Zend Multibyte Support => disabled\nZend Max Execution Timers => disabled\n\
+         IPv6 Support => enabled\nDTrace Support => disabled\n\n\
+         Registered PHP Streams => {streams}\n\
+         Registered Stream Socket Transports => {transports}\n\
+         Registered Stream Filters => {filters}\n\n\
+         This program makes use of the Zend Scripting Language Engine:\n\
+         Zend Engine v4.5.4, Copyright (c) Zend Technologies\n"
+    ))
+}
+
+/// phpinfo() under a web SAPI: the same content as an HTML page.
+fn phpinfo_html(vm: &mut Vm, flags: i64, version: &str) -> R<Value> {
+    let mut out = html::head(&format!("PHP {version} - phpinfo()"));
+    if flags & 1 != 0 {
+        out.push_str(&format!(
+            "<table>\n<tr class=\"h\"><td>\n<h1 class=\"p\">PHP Version {version}</h1>\n</td></tr>\n</table>\n"
+        ));
+        let sapi = if vm.out.sapi.server {
+            "Built-in HTTP server"
+        } else {
+            "CGI/FastCGI"
+        };
+        let text = general(vm, version, sapi)?;
+        let mut parts = text.split("\n\n");
+        parts.next(); // the version, shown above
+        for part in parts {
+            let mut t = Table::new();
+            t.lines(part);
+            out.push_str(&t.finish());
+        }
+    }
+    let (core_ini, mods) = module_list(vm);
+    if flags & 4 != 0 {
+        out.push_str("<h1>Configuration</h1>\n");
+        if flags & 8 == 0 {
+            out.push_str(&html::module_heading("PHP Core"));
+            directives_html(vm, &core_ini, &mut out);
+        }
+    }
+    if flags & 8 != 0 {
+        out.push_str(&html::module_heading("Core"));
+        let mut t = Table::new();
+        t.row(&["PHP Version", version]);
+        out.push_str(&t.finish());
+        directives_html(vm, &core_ini, &mut out);
+        for (name, inis, info) in &mods {
+            out.push_str(&html::module_heading(name));
+            let text = match info {
+                Some(f) => f(vm),
+                None if *name == "gettext" => "GetText Support => enabled\n".to_string(),
+                None => format!("{name} support => enabled\n"),
+            };
+            let mut t = Table::new();
+            t.lines(&text);
+            out.push_str(&t.finish());
+            directives_html(vm, inis, &mut out);
+        }
+        out.push_str("<h2>Additional Modules</h2>\n");
+        let mut t = Table::new();
+        t.header(&["Module Name"]);
+        out.push_str(&t.finish());
+    }
+    if flags & 16 != 0 {
+        out.push_str("<h2>Environment</h2>\n");
+        let mut t = Table::new();
+        t.header(&["Variable", "Value"]);
+        for (k, v) in std::env::vars_os() {
+            t.row(&[&k.to_string_lossy(), &v.to_string_lossy()]);
+        }
+        out.push_str(&t.finish());
+    }
+    if flags & 32 != 0 {
+        out.push_str("<h2>PHP Variables</h2>\n");
+        let mut t = Table::new();
+        t.header(&["Variable", "Value"]);
+        html::variables(vm, &mut t)?;
+        out.push_str(&t.finish());
+    }
+    if flags & 2 != 0 {
+        out.push_str("<hr />\n");
+        out.push_str(&html::credits_body(4294967295));
+    }
+    if flags & 64 != 0 {
+        out.push_str(&html::license());
+    }
+    out.push_str(html::FOOT);
+    vm.echo(out.as_bytes());
+    Ok(Value::Bool(true))
+}
+
+fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let flags = a.int_or(0, 4294967295);
+    let mut out = String::from("phpinfo()\n");
+    let version = match vm.constants.get(&PhpStr::from("PHP_VERSION")) {
+        Some(Value::Str(s)) => s.to_string_lossy(),
+        _ => String::new(),
+    };
+    if vm.out.sapi.web() {
+        return phpinfo_html(vm, flags, &version);
+    }
+    if flags & 1 != 0 {
+        let text = general(vm, &version, "Command Line Interface")?;
+        out.push_str(&text);
+    }
+    let (core_ini, mods) = module_list(vm);
     if flags & 4 != 0 {
         out.push('\n');
         out.push_str(HR);

@@ -8,9 +8,9 @@
 mod funcs;
 mod regex;
 
-use goro_charset::ops::MbError;
+use goro_charset::ops::{self, MbError};
 use goro_charset::{Encoding, Subst, SubstMode};
-use goro_runtime::{PhpArray, PhpStr, Value};
+use goro_runtime::{Key, KeyRef, PhpArray, PhpStr, Value};
 
 use crate::func::Args;
 use crate::registry::{ConstVal, Module};
@@ -455,6 +455,11 @@ pub(crate) struct MbState {
     /// The language of the startup settings.
     pub lang0: usize,
     pub http_input: Vec<Encoding>,
+    /// The HTTP input list is "pass" (no translation).
+    pub http_input_pass: bool,
+    /// What mbstring.encoding_translation found for $_GET, $_POST and
+    /// $_COOKIE (mb_http_input("G"), "P", "C").
+    pub request_input: [Option<Output>; 3],
     pub http_output: Output,
     pub http_output_func: bool,
     pub strict: bool,
@@ -477,6 +482,8 @@ impl Default for MbState {
             lang: 0,
             lang0: 0,
             http_input: Vec::new(),
+            http_input_pass: false,
+            request_input: [None; 3],
             http_output: Output::Enc(E::Utf8),
             http_output_func: false,
             strict: false,
@@ -533,11 +540,18 @@ fn internal_from(mb: &[u8], internal: &[u8], charset: &[u8]) -> Encoding {
 }
 
 /// An encoding list setting: the valid encodings and the invalid names.
+/// An HTTP input setting of "pass": the input is taken as it is.
+fn is_pass(v: &[u8]) -> bool {
+    v.trim_ascii().eq_ignore_ascii_case(b"pass")
+}
+
 fn parse_list_setting(v: &[u8], lang: usize) -> (Vec<Encoding>, Vec<Vec<u8>>) {
     let mut out = Vec::new();
     let mut bad = Vec::new();
     for item in goro_charset::encoding::split_list(v) {
-        if item.is_empty() {
+        // "pass" is an HTTP input list of its own (tests
+        // mb_http_input_pass.phpt, gh13123.phpt)
+        if item.is_empty() || item.eq_ignore_ascii_case(b"pass") {
             continue;
         }
         if item.eq_ignore_ascii_case(b"auto") {
@@ -607,8 +621,10 @@ fn load(vm: &mut Vm) {
         detect = LANGS[lang].detect.to_vec();
     }
     let mut http_input = parse_list_setting(&ini(vm, b"mbstring.http_input"), lang).0;
+    let mut http_input_pass = is_pass(&ini(vm, b"mbstring.http_input"));
     if http_input.is_empty() && ini(vm, b"mbstring.http_input").trim_ascii().is_empty() {
         let ie = ini(vm, b"input_encoding");
+        http_input_pass = is_pass(&ie);
         http_input = if ie.trim_ascii().is_empty() {
             enc_setting(&ini(vm, b"default_charset"))
                 .into_iter()
@@ -632,6 +648,7 @@ fn load(vm: &mut Vm) {
     s.internal = internal;
     s.detect = detect;
     s.http_input = http_input;
+    s.http_input_pass = http_input_pass;
     s.http_output = http_output;
     s.sub = sub;
     s.strict = strict;
@@ -868,6 +885,111 @@ fn on_ini_set(vm: &mut Vm, k: &[u8], v: &[u8]) -> R<bool> {
 /// Throws an [`MbError`] as `ValueError`.
 pub(crate) fn mb_err<T>(vm: &mut Vm, a: &Args, e: MbError) -> R<T> {
     vm.throw("ValueError", &e.message(&a.fname()))
+}
+
+/// mbstring.encoding_translation is on.
+pub(crate) fn translation_on(vm: &mut Vm) -> bool {
+    ini_truthy(&ini(vm, b"mbstring.encoding_translation"))
+}
+
+/// The encoding request input is translated from, or None for "pass".
+fn translation_source(vm: &mut Vm) -> Option<Vec<Encoding>> {
+    if !st(vm).loaded {
+        load(vm);
+    }
+    let s = st(vm);
+    (!s.http_input_pass).then(|| s.http_input.clone())
+}
+
+/// With translation, the lead bytes of a Shift_JIS-like input encoding,
+/// whose second bytes can be `\\` (see [`crate::cli_server::upload::Limits`]).
+pub(crate) fn translation_lead(vm: &mut Vm) -> Option<fn(u8) -> bool> {
+    if !translation_on(vm) {
+        return None;
+    }
+    fn sjis(b: u8) -> bool {
+        matches!(b, 0x81..=0x9F | 0xE0..=0xFC)
+    }
+    fn dbcs(b: u8) -> bool {
+        matches!(b, 0x81..=0xFE)
+    }
+    match translation_source(vm)?.first()? {
+        E::Sjis
+        | E::SjisDocomo
+        | E::SjisKddi
+        | E::SjisSoftbank
+        | E::SjisMac
+        | E::Sjis2004
+        | E::Cp932
+        | E::SjisWin => Some(sjis),
+        E::Big5 | E::Cp950 | E::Cp936 | E::Gb18030 | E::Gb18030_2022 | E::Uhc => Some(dbcs),
+        _ => None,
+    }
+}
+
+/// mbstring.encoding_translation of a request array (`which`: 0 $_GET,
+/// 1 $_POST, 2 $_COOKIE): names and values from the HTTP input encoding
+/// (detected among several, test mb_http_input_multi_post.phpt) to the
+/// internal one; mb_http_input() tells which it was (test
+/// mb_http_input.phpt).
+pub(crate) fn translate_input(vm: &mut Vm, which: usize, arr: PhpArray) -> PhpArray {
+    if arr.is_empty() {
+        return arr;
+    }
+    let Some(list) = translation_source(vm) else {
+        st(vm).request_input[which] = Some(Output::Pass);
+        return arr;
+    };
+    let to = internal(vm);
+    let from = match list.as_slice() {
+        [] => to,
+        [one] => *one,
+        many => {
+            fn gather(a: &PhpArray, out: &mut Vec<u8>) {
+                for (k, v) in a.iter() {
+                    if let KeyRef::Str(s) = k {
+                        out.extend_from_slice(s.as_bytes());
+                        out.push(b' ');
+                    }
+                    match v.deref() {
+                        Value::Str(s) => {
+                            out.extend_from_slice(s.as_bytes());
+                            out.push(b' ');
+                        }
+                        Value::Array(inner) => gather(&inner, out),
+                        _ => {}
+                    }
+                }
+            }
+            let mut all = Vec::new();
+            gather(&arr, &mut all);
+            let strict = st(vm).strict;
+            ops::detect::detect_encoding(&all, many, strict).unwrap_or(to)
+        }
+    };
+    st(vm).request_input[which] = Some(Output::Enc(from));
+    if from == to {
+        return arr;
+    }
+    fn conv(vm: &mut Vm, arr: &PhpArray, to: Encoding, from: Encoding) -> PhpArray {
+        let mut out = PhpArray::new();
+        for (key, v) in arr.iter() {
+            let key = match key {
+                KeyRef::Str(s) => {
+                    Key::from_php_str(&PhpStr::from(convert_counted(vm, s, to, from)))
+                }
+                KeyRef::Int(i) => Key::Int(i),
+            };
+            let v = match v.deref() {
+                Value::Str(s) => Value::Str(PhpStr::from(convert_counted(vm, &s, to, from))),
+                Value::Array(inner) => Value::Array(conv(vm, &inner, to, from)),
+                other => other,
+            };
+            out.insert(key, v);
+        }
+        out
+    }
+    conv(vm, &arr, to, from)
 }
 
 pub(crate) fn internal(vm: &mut Vm) -> Encoding {

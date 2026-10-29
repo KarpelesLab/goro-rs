@@ -292,6 +292,7 @@ pub struct StreamRegistry {
     user_filters: Vec<(Vec<u8>, PhpStr)>,
     include_filters: Vec<IncludeFilter>,
     path_hooks: Vec<PathHook>,
+    virtual_cwd: Option<Vec<u8>>,
 }
 
 /// Registers a stream wrapper for `scheme` (lower case, without `://`).
@@ -310,6 +311,17 @@ pub type PathHook = fn(&mut Vm, &[u8]) -> Option<Vec<u8>>;
 /// Registers a path hook.
 pub fn register_path_hook(vm: &mut Vm, f: PathHook) {
     vm.ext::<StreamRegistry>().path_hooks.push(f);
+}
+
+/// The working directory a front controller gives the code it runs, inside
+/// its archive (Phar::webPhar; PHP manual: include, paths starting with
+/// ./ or ../): a URL such as `phar:///path/app.phar/dir`.
+pub fn set_virtual_cwd(vm: &mut Vm, dir: Option<Vec<u8>>) {
+    vm.ext::<StreamRegistry>().virtual_cwd = dir;
+}
+
+pub(crate) fn virtual_cwd(vm: &mut Vm) -> Option<Vec<u8>> {
+    vm.ext::<StreamRegistry>().virtual_cwd.clone()
 }
 
 /// A relative path as the path hooks rewrite it.

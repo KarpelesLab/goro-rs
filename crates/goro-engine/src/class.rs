@@ -73,6 +73,10 @@ pub mod mflags {
     /// Internal state of a class written in PHP (stub property named
     /// `__*`): invisible to var_dump, casts, serialization, reflection.
     pub const HIDDEN: u32 = 262144;
+    /// An internal class's property that can be initialized from anywhere
+    /// but not changed after ("Property queryString is read only"; stub
+    /// attribute `#[WriteOnce]`).
+    pub const WRITE_ONCE: u32 = 1 << 19;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +353,9 @@ pub struct NativeHooks {
     /// XMLReader::open() and XMLReader::XML() can be called statically or
     /// on an instance).
     pub static_this: bool,
+    /// Instantiation by user code (`new`, ReflectionClass::newInstance*):
+    /// may refuse it, without a constructor frame (PDORow).
+    pub new_check: Option<fn(&mut crate::vm::Vm) -> crate::vm::R<()>>,
 }
 
 /// The access [`NativeHooks::prop`] and [`NativeHooks::dim`] are asked

@@ -402,17 +402,32 @@ impl Vm {
             // hook (phar://): include_path entries of that wrapper, then
             // the directory of the calling script (PHP manual: Phar, using
             // Phar archives).
-            let mut dirs: Vec<Vec<u8>> =
-                crate::builtins::streams::split_include_path(&self.ini.include_path)
-                    .into_iter()
-                    .filter(|d| d.windows(3).any(|w| w == b"://"))
-                    .collect();
-            let cur = self.cur_file();
-            if let Some(p) = cur.iter().rposition(|&c| c == b'/')
-                && cur.windows(3).any(|w| w == b"://")
-            {
-                dirs.push(cur[..p].to_vec());
-            }
+            // A path starting with ./ or ../ is relative to the working
+            // directory only (PHP manual: include), which a front controller
+            // sets inside its archive (test ext/phar/tests/frontcontroller34).
+            let dotted = path.starts_with(b"./") || path.starts_with(b"../");
+            let virtual_cwd = if dotted {
+                crate::builtins::streams::virtual_cwd(self)
+            } else {
+                None
+            };
+            let dirs: Vec<Vec<u8>> = match virtual_cwd {
+                Some(d) => vec![d],
+                None => {
+                    let mut dirs: Vec<Vec<u8>> =
+                        crate::builtins::streams::split_include_path(&self.ini.include_path)
+                            .into_iter()
+                            .filter(|d| d.windows(3).any(|w| w == b"://"))
+                            .collect();
+                    let cur = self.cur_file();
+                    if let Some(p) = cur.iter().rposition(|&c| c == b'/')
+                        && cur.windows(3).any(|w| w == b"://")
+                    {
+                        dirs.push(cur[..p].to_vec());
+                    }
+                    dirs
+                }
+            };
             for mut d in dirs {
                 let Some(op) =
                     crate::builtins::streams::wrapper_for(self, &d).and_then(|w| w.include)
@@ -577,6 +592,19 @@ impl Vm {
         Ok(true)
     }
 
+    /// Runs a file in the current scope as a front controller does
+    /// (Phar::webPhar): like an include, but without a frame of its own in
+    /// stack traces (test ext/phar/tests/frontcontroller29.phpt: the trace
+    /// goes from the file's code straight to Phar::webPhar()).
+    pub fn run_front_file(&mut self, src: &[u8], file: &[u8]) -> R<Value> {
+        let key = PhpStr::new(file);
+        if !self.included_set.contains(&key) {
+            self.included_set.insert(key.clone());
+            self.included.push(key);
+        }
+        self.run_attached(src, file, false, "front controller")
+    }
+
     /// Compiles and runs code in the current scope (include, eval).
     fn run_attached(&mut self, src: &[u8], file: &[u8], eval: bool, what: &str) -> R<Value> {
         let unit = match self.compile_source(src, file, eval) {
@@ -596,6 +624,7 @@ impl Vm {
             "include_once" => 2,
             "require" => 3,
             "require_once" => 4,
+            "front controller" => 6,
             _ => 5,
         };
         // The owner of the variables.
