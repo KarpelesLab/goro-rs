@@ -581,14 +581,12 @@ fn initialize(vm: &mut Vm) -> R<bool> {
 }
 
 /// The ID for the session being opened: the one set or received, a new
-/// one when there is none, it is malformed, or (use_strict_mode) the
-/// module does not know it.
+/// one when there is none or (use_strict_mode) the module does not know
+/// it. A malformed ID is kept: the files handler refuses it (observed on
+/// PHP 8.5: session_id('_'); session_start() fails).
 fn settle_id(vm: &mut Vm, m: Mod) -> R<bool> {
     let cur = st(vm).id.clone().filter(|i| !i.is_empty());
-    let mut need_new = match &cur {
-        None => true,
-        Some(_) => false,
-    };
+    let mut need_new = cur.is_none();
     if !need_new
         && ini_bool(vm, "session.use_strict_mode")
         && mod_has_validate(vm, m)
