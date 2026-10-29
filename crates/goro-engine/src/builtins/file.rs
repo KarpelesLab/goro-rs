@@ -382,6 +382,9 @@ pub struct Stream {
     pub uri: PhpStr,
     pub mode: PhpStr,
     pub wrapper: &'static str,
+    /// data: streams: their media type, parameters and base64 flag, as
+    /// stream_get_meta_data() reports them first.
+    pub data_meta: Option<PhpArray>,
     pub stream_type: &'static str,
     /// Bytes read ahead (stdin line reads, user stream chunks).
     pub pending: Vec<u8>,
@@ -422,6 +425,7 @@ impl Stream {
             write_filters: Vec::new(),
             filtered: Vec::new(),
             filters_closed: false,
+            data_meta: None,
         }
     }
 
@@ -502,11 +506,25 @@ impl Stream {
             return Ok(n);
         }
         match &mut self.backing {
-            Backing::File(f) => f.read(buf),
+            Backing::File(f) => {
+                let n = f.read(buf)?;
+                if self.append {
+                    self.upos += n as i64;
+                }
+                Ok(n)
+            }
             Backing::Memory { data, pos } => {
+                // a position past the end (after fseek) reads nothing
+                // (test bug52335.phpt)
                 let n = buf.len().min(data.len().saturating_sub(*pos));
-                buf[..n].copy_from_slice(&data[*pos..*pos + n]);
+                if n > 0 {
+                    buf[..n].copy_from_slice(&data[*pos..*pos + n]);
+                }
                 *pos += n;
+                // a short read sets EOF (test stream_rfc2397_007.phpt)
+                if n < buf.len() {
+                    self.eof = true;
+                }
                 Ok(n)
             }
             Backing::Stdin => std::io::stdin().read(buf),
@@ -563,6 +581,9 @@ impl Stream {
                     f.seek(SeekFrom::End(0))?;
                 }
                 f.write_all(b)?;
+                if self.append {
+                    self.upos += b.len() as i64;
+                }
                 Ok(b.len())
             }
             Backing::Memory { data, pos } => {
@@ -765,18 +786,38 @@ impl Vm {
             self.cwd.join(p)
         }
     }
+
+    /// A path for opening a plain file stream: ".." after a directory that
+    /// doesn't exist removes it, as PHP resolves these paths itself (test
+    /// file_variation5.phpt: "dir/bad_dir/../../file" opens "file"; other
+    /// filesystem calls such as chmod() fail, test chmod_variation2.phpt).
+    pub fn stream_path(&self, p: &[u8]) -> PathBuf {
+        let full = self.fs_path(p);
+        use std::path::Component;
+        if !os(p).components().any(|c| c == Component::ParentDir) {
+            return full;
+        }
+        let mut out = PathBuf::new();
+        for c in full.components() {
+            if c == Component::ParentDir && !out.exists() && out.parent().is_some() {
+                out.pop();
+            } else {
+                out.push(c.as_os_str());
+            }
+        }
+        out
+    }
 }
 
-fn io_err_msg(e: &std::io::Error) -> &'static str {
-    match e.kind() {
-        std::io::ErrorKind::NotFound => "No such file or directory",
-        std::io::ErrorKind::PermissionDenied => "Permission denied",
-        std::io::ErrorKind::AlreadyExists => "File exists",
-        _ => match e.raw_os_error() {
-            Some(libc::EISDIR) => "Is a directory",
-            Some(libc::ENOTDIR) => "Not a directory",
-            Some(libc::ENOTEMPTY) => "Directory not empty",
-            _ => "Operation failed",
+/// The C library's text of an I/O error (as PHP reports them).
+fn io_err_msg(e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(n) => crate::builtins::exec::strerror(n),
+        None => match e.kind() {
+            std::io::ErrorKind::NotFound => "No such file or directory".into(),
+            std::io::ErrorKind::PermissionDenied => "Permission denied".into(),
+            std::io::ErrorKind::AlreadyExists => "File exists".into(),
+            _ => "Operation failed".into(),
         },
     }
 }
@@ -838,6 +879,25 @@ pub fn open_stream(
                     .ok()
                     .filter(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()))
                     .and_then(|d| d.parse::<i32>().ok());
+                let neg = l[3..]
+                    .strip_prefix(b"-")
+                    .is_some_and(|d| !d.is_empty() && d.iter().all(|c| c.is_ascii_digit()));
+                if neg {
+                    if !quiet {
+                        let mut rl = libc::rlimit {
+                            rlim_cur: 0,
+                            rlim_max: 0,
+                        };
+                        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+                        vm.warn(&format!(
+                            "{}({}): Failed to open stream: The file descriptors must be non-negative numbers smaller than {}",
+                            fname,
+                            String::from_utf8_lossy(filename),
+                            rl.rlim_cur
+                        ))?;
+                    }
+                    return Ok(None);
+                }
                 let Some(n) = n else {
                     if !quiet {
                         vm.warn(&format!(
@@ -867,7 +927,11 @@ pub fn open_stream(
                 use std::os::fd::FromRawFd;
                 // SAFETY: fd is a fresh descriptor owned by the File.
                 let f = unsafe { std::fs::File::from_raw_fd(fd) };
-                Stream::new(Backing::File(f), mode, filename, "PHP", "STDIO")
+                let mut s = Stream::new(Backing::File(f), mode, filename, "PHP", "STDIO");
+                // the mode is ignored (test php_fd_wrapper_02.phpt)
+                s.readable = true;
+                s.writable = true;
+                s
             }
             b"input" => Stream::new(
                 Backing::Memory {
@@ -952,11 +1016,25 @@ pub fn open_stream(
         }
         return Ok(None);
     }
-    let m = mode
-        .iter()
-        .filter(|&&c| c != b'b' && c != b't')
-        .copied()
-        .collect::<Vec<u8>>();
+    // The first letter is the mode, a '+' anywhere adds the other
+    // direction, other letters are ignored (observed on PHP 8.5: "rw"
+    // opens for reading, "Q" warns).
+    let plus = mode.contains(&b'+');
+    let m: Vec<u8> = match mode.first() {
+        Some(&c @ (b'r' | b'w' | b'a' | b'x' | b'c')) if plus => vec![c, b'+'],
+        Some(&c @ (b'r' | b'w' | b'a' | b'x' | b'c')) => vec![c],
+        _ => {
+            if !quiet {
+                vm.warn(&format!(
+                    "{}({}): Failed to open stream: `{}' is not a valid mode for fopen",
+                    fname,
+                    String::from_utf8_lossy(filename),
+                    String::from_utf8_lossy(mode)
+                ))?;
+            }
+            return Ok(None);
+        }
+    };
     let mut o = std::fs::OpenOptions::new();
     match &m[..] {
         b"r" => o.read(true),
@@ -968,12 +1046,9 @@ pub fn open_stream(
         b"x" => o.write(true).create_new(true),
         b"x+" => o.read(true).write(true).create_new(true),
         b"c" => o.write(true).create(true),
-        b"c+" => o.read(true).write(true).create(true),
-        _ => {
-            return vm.fthrow(a, "ValueError", "Argument #2 ($mode) must be a valid mode");
-        }
+        _ => o.read(true).write(true).create(true),
     };
-    let p = vm.fs_path(path);
+    let p = vm.stream_path(path);
     if p.is_dir() && m.first() != Some(&b'r') {
         if !quiet {
             vm.warn(&format!(
@@ -1281,7 +1356,7 @@ fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Value::Bool(s.eof && s.pending.is_empty()));
         }
         let at_end = match &mut s.backing {
-            Backing::Memory { data, pos } => *pos >= data.len() && (s.eof || *pos >= data.len()),
+            Backing::Memory { .. } => s.eof,
             Backing::File(f) => {
                 if s.eof {
                     true
@@ -1301,7 +1376,6 @@ fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         Ok(Value::Bool(
             at_end && s.eof
-                || matches!(s.backing, Backing::Memory { .. }) && at_end
                 || matches!(s.backing, Backing::Native(_)) && at_end && s.pending.is_empty(),
         ))
     })
@@ -1361,6 +1435,7 @@ fn fflush(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |_vm, s| {
         Ok(match &mut s.backing {
+            Backing::File(_) if s.append => Value::Int(s.upos),
             Backing::File(f) => Value::Int(f.stream_position().map(|p| p as i64).unwrap_or(0)),
             Backing::Memory { pos, .. } => Value::Int(*pos as i64),
             Backing::User { .. } => Value::Int(s.upos),
@@ -1385,6 +1460,15 @@ fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
             }
         };
     }
+    if !(0..=2).contains(&whence) {
+        return false;
+    }
+    // a directory stream rewinds, whatever the offset (test
+    // fseek_dir_basic.phpt)
+    if let Backing::Dir { pos, .. } = &mut s.backing {
+        *pos = 0;
+        return true;
+    }
     s.eof = false;
     s.pending.clear();
     // Seeking flushes the write filters (observed on PHP 8.5).
@@ -1408,7 +1492,13 @@ fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
                     SeekFrom::Start(off as u64)
                 }
             };
-            f.seek(w).is_ok()
+            match f.seek(w) {
+                Ok(p) => {
+                    s.upos = p as i64;
+                    true
+                }
+                Err(_) => false,
+            }
         }
         Backing::Memory { data, pos } => {
             let base = match whence {
@@ -1444,6 +1534,14 @@ fn fseek(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let off = a.int(1);
     let wh = a.int_or(2, 0);
     with_stream(vm, a, 0, |vm, s| {
+        if matches!(
+            s.backing,
+            Backing::Stdin | Backing::Stdout | Backing::Stderr | Backing::Output
+        ) || s.is_pipe()
+        {
+            vm.warn("fseek(): Stream does not support seeking")?;
+            return Ok(Value::Int(-1));
+        }
         Ok(Value::Int(if do_seek(vm, s, off, wh) { 0 } else { -1 }))
     })
 }
@@ -1464,8 +1562,9 @@ fn ftruncate(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |vm, s| {
         Ok(Value::Bool(match &mut s.backing {
             Backing::File(f) => f.set_len(size as u64).is_ok(),
-            Backing::Memory { data, .. } => {
+            Backing::Memory { data, pos } => {
                 data.resize(size as usize, 0);
+                *pos = (*pos).min(data.len());
                 true
             }
             Backing::User { .. } => {
@@ -1735,6 +1834,18 @@ fn stream_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub(crate) fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |_vm, s| {
         let mut m = PhpArray::new();
+        // data: streams have no timed_out/blocked/eof entries (test
+        // stream_rfc2397_002.phpt)
+        if let Some(dm) = &s.data_meta {
+            let mut m = dm.clone();
+            m.insert(Key::from("wrapper_type"), Value::from(s.wrapper));
+            m.insert(Key::from("stream_type"), Value::from(s.stream_type));
+            m.insert(Key::from("mode"), Value::Str(s.mode.clone()));
+            m.insert(Key::from("unread_bytes"), Value::Int(0));
+            m.insert(Key::from("seekable"), Value::Bool(true));
+            m.insert(Key::from("uri"), Value::Str(s.uri.clone()));
+            return Ok(Value::Array(m));
+        }
         m.insert(Key::from("timed_out"), Value::Bool(false));
         // a pipe set non-blocking by stream_set_blocking() (test
         // ext/standard/tests/streams/bug72853.phpt)
@@ -1944,6 +2055,11 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
         // an object without __toString() writes nothing (observed on
         // PHP 8.5; test file_put_contents.phpt)
         Value::Object(o) if vm.class_of(o).find_method(b"__tostring").is_none() => {
+            // the file is opened (truncated) first
+            let mode: &[u8] = if flags & 8 != 0 { b"ab" } else { b"wb" };
+            if let Some(mut s) = open_stream(vm, a, &f, mode, false)? {
+                super::streams::close_stream(vm, &mut s)?;
+            }
             return Ok(Value::Bool(false));
         }
         Value::Object(_) => {
@@ -1964,6 +2080,17 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // native streams (compress.zlib://) finish their output on close
     super::streams::close_stream(vm, &mut s)?;
     match r {
+        Ok(n) if n < bytes.len() => {
+            vm.fwarn(
+                a,
+                &format!(
+                    "Only {} of {} bytes written, possibly out of free disk space",
+                    n,
+                    bytes.len()
+                ),
+            )?;
+            Ok(Value::Bool(false))
+        }
         Ok(n) => Ok(Value::Int(n as i64)),
         Err(_) => Ok(Value::Bool(false)),
     }
@@ -1992,7 +2119,14 @@ fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut i = 0;
     while i < data.len() {
         if data[i] == b'\n' {
-            let end = if ignore_nl { i } else { i + 1 };
+            // a CR before the LF goes too (observed on PHP 8.5)
+            let end = if !ignore_nl {
+                i + 1
+            } else if i > start && data[i - 1] == b'\r' {
+                i - 1
+            } else {
+                i
+            };
             let line = &data[start..end];
             if !(skip_empty && ignore_nl && line.is_empty()) {
                 let _ = out.push(Value::Str(PhpStr::new(line)));
@@ -2031,7 +2165,7 @@ fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
-    pwarn(vm, a, what, io_err_msg(e))?;
+    pwarn(vm, a, what, &io_err_msg(e))?;
     Ok(Value::Bool(false))
 }
 
@@ -2076,7 +2210,8 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return super::userstream::path_op(vm, a, &cls, "unlink", vec![Value::Str(f)]);
     }
     let p = vm.fs_path(&f);
-    if p.is_dir() {
+    // a symbolic link to a directory is removed
+    if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
         pwarn(vm, a, &f, "Is a directory")?;
         return Ok(Value::Bool(false));
     }
@@ -2113,7 +2248,7 @@ fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let mut both = from.to_vec();
             both.push(b',');
             both.extend_from_slice(&to);
-            pwarn(vm, a, &both, io_err_msg(&e))?;
+            pwarn(vm, a, &both, &io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
@@ -2224,7 +2359,7 @@ fn mkdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Ok(Value::Bool(true))
         }
         Err(e) => {
-            vm.fwarn(a, io_err_msg(&e))?;
+            vm.fwarn(a, &io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
@@ -2355,8 +2490,9 @@ fn is_executable(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    // directories count (test is_executable_variation1.phpt)
     Ok(Value::Bool(
-        meta(vm, a).is_some_and(|m| m.is_file()) && access(vm, a, libc::X_OK),
+        meta(vm, a).is_some() && access(vm, a, libc::X_OK),
     ))
 }
 
@@ -2453,6 +2589,13 @@ fn touch(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     }
     let f = a.str(0);
+    if a.opt_int(1).is_none() && a.opt_int(2).is_some() {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer",
+        );
+    }
     if f.is_empty() {
         return Ok(Value::Bool(false));
     }
@@ -2522,7 +2665,7 @@ fn chmod(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match std::fs::set_permissions(vm.fs_path(&f), std::fs::Permissions::from_mode(m as u32)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => {
-            vm.fwarn(a, io_err_msg(&e))?;
+            vm.fwarn(a, &io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
@@ -2811,6 +2954,16 @@ pub fn fnmatch(pat: &[u8], s: &[u8], flags: i64) -> bool {
 }
 
 fn fnmatch_fn(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // PHP_MAXPATHLEN (test fnmatch_maxpathlen.phpt)
+    for (i, what) in [(1, "Filename"), (0, "Pattern")] {
+        if a.bytes(i).len() >= 4096 {
+            vm.fwarn(
+                a,
+                &format!("{what} exceeds the maximum allowed length of 4096 characters"),
+            )?;
+            return Ok(Value::Bool(false));
+        }
+    }
     if !nul_arg(vm, a, 0, "pattern")? {
         return Ok(Value::Null);
     }
@@ -3019,7 +3172,7 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm,
                 a,
                 &d,
-                &format!("Failed to open directory: {}", io_err_msg(&e)),
+                &format!("Failed to open directory: {}", &io_err_msg(&e)),
             )?;
             vm.fwarn(a, "(errno 2): No such file or directory")?;
             Ok(Value::Bool(false))
@@ -3071,7 +3224,7 @@ pub(crate) fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm,
                 a,
                 &d,
-                &format!("Failed to open directory: {}", io_err_msg(&e)),
+                &format!("Failed to open directory: {}", &io_err_msg(&e)),
             )?;
             Ok(Value::Bool(false))
         }
@@ -3207,7 +3360,9 @@ fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let d = a.str(0);
     let prefix = a.str(1);
-    let prefix: Vec<u8> = prefix.iter().take(63).copied().collect();
+    // the prefix is a file name, 63 bytes at most (tests
+    // tempnam_variation3.phpt, tempnam_variation9.phpt)
+    let prefix: Vec<u8> = basename_bytes(&prefix, b"").into_iter().take(63).collect();
     let mut dir = if d.is_empty() {
         PathBuf::from("/tmp")
     } else {
@@ -3217,15 +3372,30 @@ fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.notice_msg("tempnam(): file created in the system's temporary directory")?;
         dir = PathBuf::from("/tmp");
     }
+    // the name is made in the resolved directory (test
+    // tempnam_variation2.phpt)
+    if let Ok(c) = std::fs::canonicalize(&dir) {
+        dir = c;
+    }
     for n in 0..1000u32 {
+        // 19 random letters and digits follow (observed on PHP 8.5)
         let name = {
             let mut v = prefix.clone();
             let t = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
-            v.extend_from_slice(
-                format!("{:x}{:x}{}", std::process::id(), t.subsec_nanos(), n).as_bytes(),
-            );
+            let mut x = (t.as_nanos() as u64)
+                ^ ((std::process::id() as u64) << 32)
+                ^ (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            const ALNUM: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            for _ in 0..19 {
+                // xorshift64*
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
+                let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+                v.push(ALNUM[(r >> 33) as usize % ALNUM.len()]);
+            }
             v
         };
         let p = dir.join(std::ffi::OsStr::from_bytes(&name));
@@ -3319,7 +3489,7 @@ fn readlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match std::fs::read_link(vm.fs_path(&f)) {
         Ok(p) => Ok(Value::Str(PhpStr::new(p.as_os_str().as_bytes()))),
         Err(e) => {
-            vm.fwarn(a, io_err_msg(&e))?;
+            vm.fwarn(a, &io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
@@ -3340,7 +3510,7 @@ fn symlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match std::os::unix::fs::symlink(os(&t), vm.fs_path(&l)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => {
-            vm.fwarn(a, io_err_msg(&e))?;
+            vm.fwarn(a, &io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
@@ -3361,7 +3531,7 @@ fn link(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match std::fs::hard_link(vm.fs_path(&t), vm.fs_path(&l)) {
         Ok(()) => Ok(Value::Bool(true)),
         Err(e) => {
-            vm.fwarn(a, io_err_msg(&e))?;
+            vm.fwarn(a, &io_err_msg(&e))?;
             Ok(Value::Bool(false))
         }
     }
@@ -3378,7 +3548,7 @@ fn linkinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match std::fs::symlink_metadata(vm.fs_path(&f)) {
         Ok(m) => Ok(Value::Int(m.dev() as i64)),
         Err(e) => {
-            vm.fwarn(a, io_err_msg(&e))?;
+            vm.fwarn(a, &io_err_msg(&e))?;
             Ok(Value::Int(-1))
         }
     }
@@ -3402,7 +3572,7 @@ fn disk_space(vm: &mut Vm, a: &mut Args, total: bool) -> R<Value> {
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
         let e = std::io::Error::last_os_error();
-        vm.fwarn(a, io_err_msg(&e))?;
+        vm.fwarn(a, &io_err_msg(&e))?;
         return Ok(Value::Bool(false));
     }
     let blocks = if total { st.f_blocks } else { st.f_bavail };
@@ -3486,7 +3656,7 @@ fn change_owner(vm: &mut Vm, a: &mut Args, group: bool, link: bool) -> R<Value> 
     };
     if rc != 0 {
         let e = std::io::Error::last_os_error();
-        vm.fwarn(a, io_err_msg(&e))?;
+        vm.fwarn(a, &io_err_msg(&e))?;
         return Ok(Value::Bool(false));
     }
     Ok(Value::Bool(true))
@@ -3733,7 +3903,7 @@ fn fputcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn fgetcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let len = a.opt_int(1).unwrap_or(0);
-    if len < 0 {
+    if !(0..i64::MAX).contains(&len) {
         return vm.fthrow(
             a,
             "ValueError",
@@ -3857,7 +4027,20 @@ fn vfprintf(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn fscanf(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let fmt = a.str(1);
+    if let Value::Resource(r) = a.val(0)
+        && (r.is_closed() || !is_stream_res(&r))
+    {
+        return vm.fthrow(
+            a,
+            "TypeError",
+            "supplied resource is not a valid File-Handle resource",
+        );
+    }
     let line = with_stream(vm, a, 0, |vm, s| {
+        if !s.readable {
+            vm.notice_msg("fscanf(): Read of 8192 bytes failed with errno=9 Bad file descriptor")?;
+            return Ok(Value::Bool(false));
+        }
         let r = read_line(vm, s, None);
         if let Backing::Memory { data, pos } = &s.backing
             && *pos >= data.len()
@@ -3926,7 +4109,11 @@ impl Vm {
             // value is a prefix (manual: "/dir/incl" also allows
             // "/dir/include").
             if d.ends_with(b"/") {
-                if t_b == dir_b || (t_b.starts_with(dir_b) && t_b.get(dir_b.len()) == Some(&b'/')) {
+                // ("/" allows everything, test bug41655_2.phpt)
+                if t_b == dir_b
+                    || (t_b.starts_with(dir_b)
+                        && (dir_b.ends_with(b"/") || t_b.get(dir_b.len()) == Some(&b'/')))
+                {
                     return true;
                 }
             } else if t_b.starts_with(dir_b)
@@ -3971,6 +4158,13 @@ impl Vm {
 /// `data:` URLs (RFC 2397; PHP manual: data://): the decoded data as a
 /// read-only memory stream. Messages observed on PHP 8.5.
 fn open_data_url(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) -> R<Option<Stream>> {
+    if url.contains(&0) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($filename) must not contain any null bytes",
+        );
+    }
     let mut rest = &url[5..];
     if let Some(r) = rest.strip_prefix(b"//") {
         rest = r;
@@ -3991,9 +4185,37 @@ fn open_data_url(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) ->
     };
     let meta = &rest[..comma];
     let payload = &rest[comma + 1..];
-    let base64 = meta
-        .split(|&c| c == b';')
-        .any(|p| p.eq_ignore_ascii_case(b"base64"));
+    // [mediatype][;param=value]*[;base64] (RFC 2397; messages from test
+    // stream_rfc2397_002.phpt)
+    let mut parts = meta.split(|&c| c == b';');
+    let media = parts.next().unwrap_or_default();
+    let params: Vec<&[u8]> = parts.collect();
+    let mut dm = PhpArray::new();
+    if !media.is_empty() {
+        if !media.contains(&b'/') || media.contains(&b'=') {
+            return fail(vm, "illegal media type");
+        }
+        dm.insert(Key::from("mediatype"), Value::Str(PhpStr::new(media)));
+    }
+    let mut base64 = false;
+    for (i, prm) in params.iter().enumerate() {
+        if prm.eq_ignore_ascii_case(b"base64") && i + 1 == params.len() {
+            base64 = true;
+            break;
+        }
+        // parameters need a media type
+        let Some(eq) = prm.iter().position(|&c| c == b'=') else {
+            return fail(vm, "illegal parameter");
+        };
+        if media.is_empty() {
+            return fail(vm, "illegal media type");
+        }
+        dm.insert(
+            Key::from_bytes(&prm[..eq]),
+            Value::Str(PhpStr::new(&prm[eq + 1..])),
+        );
+    }
+    dm.insert(Key::from("base64"), Value::Bool(base64));
     let data = if base64 {
         match goro_ext_standard::url::base64_decode(payload, true) {
             Some(d) => d,
@@ -4011,6 +4233,7 @@ fn open_data_url(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) ->
     );
     s.writable = false;
     s.readable = true;
+    s.data_meta = Some(dm);
     Ok(Some(s))
 }
 
