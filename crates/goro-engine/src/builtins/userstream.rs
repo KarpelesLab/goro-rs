@@ -119,8 +119,40 @@ fn register(vm: &mut Vm, a: &mut Args) -> R<Value> {
         )?;
         return Ok(Value::Bool(false));
     }
+    URL_WRAPPERS.with(|u| {
+        let mut u = u.borrow_mut();
+        u.retain(|x| *x != lp);
+        // STREAM_IS_URL
+        if a.int_or(2, 0) & 1 != 0 {
+            u.push(lp.clone());
+        }
+    });
     vm.user_wrappers.insert(lp, cls.name.clone());
     Ok(Value::Bool(true))
+}
+
+fn is_url_wrapper(path: &[u8]) -> bool {
+    let sch = scheme(path).unwrap_or_default();
+    URL_WRAPPERS.with(|u| u.borrow().contains(&sch))
+}
+
+fn url_disabled(vm: &mut Vm, fname: &str, path: &[u8], setting: &str) -> R<()> {
+    let p = path.windows(3).position(|w| w == b"://").unwrap_or(0);
+    vm.warn(&format!(
+        "{fname}(): {}:// wrapper is disabled in the server configuration by {setting}=0",
+        String::from_utf8_lossy(&path[..p])
+    ))?;
+    vm.warn(&format!(
+        "{fname}({}): Failed to open stream: no suitable wrapper could be found",
+        String::from_utf8_lossy(path)
+    ))
+}
+
+thread_local! {
+    /// Includes reading through user wrappers.
+    static INCLUDING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// User wrappers registered with STREAM_IS_URL.
+    static URL_WRAPPERS: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn unregister(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -172,7 +204,7 @@ fn restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 /// The scheme of a URL (`scheme://...`), lowercased.
-fn scheme(path: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn scheme(path: &[u8]) -> Option<Vec<u8>> {
     let p = path.windows(3).position(|w| w == b"://")?;
     let s = &path[..p];
     valid_protocol(s).then(|| s.to_ascii_lowercase())
@@ -282,6 +314,28 @@ pub fn open_named(
     mode: &[u8],
     quiet: bool,
 ) -> R<Option<Stream>> {
+    // URL wrappers need allow_url_fopen (test file/include_userstream_003.phpt)
+    if is_url_wrapper(path)
+        && !vm
+            .get_ini(b"allow_url_fopen")
+            .is_some_and(|v| super::misc::assert_ini_truthy(&v))
+    {
+        if !quiet {
+            url_disabled(vm, fname, path, "allow_url_fopen")?;
+        }
+        return Ok(None);
+    }
+    if is_url_wrapper(path)
+        && INCLUDING.with(|c| c.get()) > 0
+        && !vm
+            .get_ini(b"allow_url_include")
+            .is_some_and(|v| super::misc::assert_ini_truthy(&v))
+    {
+        if !quiet {
+            url_disabled(vm, fname, path, "allow_url_include")?;
+        }
+        return Ok(None);
+    }
     let ctx = OPEN_CONTEXT
         .with(|c| c.borrow().clone())
         .unwrap_or_else(super::sockets::default_context);
@@ -463,8 +517,67 @@ pub fn simple(vm: &mut Vm, s: &Stream, method: &[u8], args: Vec<Value>) -> R<Opt
     call(vm, &o, method, args)
 }
 
+/// stream_set_option() of a user stream: None when the stream isn't one;
+/// a missing method warns and fails (test file/userstreams_003.phpt).
+pub fn set_option(
+    vm: &mut Vm,
+    s: &Stream,
+    fname: &str,
+    option: i64,
+    value: i64,
+    ptr: Value,
+) -> R<Option<bool>> {
+    let Backing::User { obj } = &s.backing else {
+        return Ok(None);
+    };
+    let o = obj.clone();
+    match call(
+        vm,
+        &o,
+        b"stream_set_option",
+        vec![Value::Int(option), Value::Int(value), ptr],
+    )? {
+        Some(v) => Ok(Some(vm.to_bool(&v))),
+        None => {
+            let c = class_of_stream(vm, s);
+            vm.warn(&format!(
+                "{fname}(): {c}::stream_set_option is not implemented!"
+            ))?;
+            Ok(Some(false))
+        }
+    }
+}
+
 /// url_stat() of a user wrapper URL.
 pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Option<PhpArray>> {
+    // the last result is cached until clearstatcache() or a change made
+    // through a wrapper (test file/userwrapper.phpt)
+    if let Some(st) = STAT_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(p, _)| p.as_slice() == path)
+            .map(|(_, st)| st.clone())
+    }) {
+        return Ok(Some(st));
+    }
+    let r = url_stat_uncached(vm, class, path, flags)?;
+    if let Some(st) = &r {
+        STAT_CACHE.with(|c| *c.borrow_mut() = Some((path.to_vec(), st.clone())));
+    }
+    Ok(r)
+}
+
+thread_local! {
+    static STAT_CACHE: std::cell::RefCell<Option<(Vec<u8>, PhpArray)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Forgets the cached url_stat() result (clearstatcache()).
+pub fn clear_stat_cache() {
+    STAT_CACHE.with(|c| *c.borrow_mut() = None);
+}
+
+fn url_stat_uncached(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Option<PhpArray>> {
     let o = instance(vm, class, None)?;
     let r = call(
         vm,
@@ -486,7 +599,20 @@ pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Optio
 
 /// A path operation (unlink, rename, mkdir, rmdir, stream_metadata) on a
 /// user wrapper URL: the method's result as a bool.
+/// A path operation (unlink, rename, mkdir, rmdir, metadata): the stat
+/// cache is dropped first.
 pub fn path_op(vm: &mut Vm, a: &Args, class: &PhpStr, method: &str, args: Vec<Value>) -> R<Value> {
+    clear_stat_cache();
+    path_op_cached(vm, a, class, method, args)
+}
+
+fn path_op_cached(
+    vm: &mut Vm,
+    a: &Args,
+    class: &PhpStr,
+    method: &str,
+    args: Vec<Value>,
+) -> R<Value> {
     let ctx = call_context(a);
     let o = instance(vm, class, Some(ctx))?;
     match call(vm, &o, method.as_bytes(), args)? {
@@ -572,7 +698,14 @@ pub fn opendir(vm: &mut Vm, a: &Args, class: &PhpStr, path: &[u8]) -> R<Option<R
 
 /// The whole contents of a user wrapper URL (include/require).
 pub fn read_all(vm: &mut Vm, fname: &str, class: &PhpStr, path: &[u8]) -> R<Option<Vec<u8>>> {
-    let Some(mut s) = open_named(vm, fname, class, path, b"rb", false)? else {
+    // URL wrappers can't be included unless allow_url_include is on
+    // (PHP manual: allow_url_include; test file/include_userstream_002.phpt)
+    // opens made for an include, also from the wrapper's own code (test
+    // file/include_userstream_002.phpt)
+    INCLUDING.with(|c| c.set(c.get() + 1));
+    let opened = open_named(vm, fname, class, path, b"rb", false);
+    INCLUDING.with(|c| c.set(c.get() - 1));
+    let Some(mut s) = opened? else {
         return Ok(None);
     };
     let mut out = Vec::new();

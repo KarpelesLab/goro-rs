@@ -462,6 +462,11 @@ impl<E: Env> P<'_, E> {
             }
             self.i += 1;
         }
+        // an unterminated quote doesn't hide a comment (test
+        // bug51094.phpt: `ini="ini;raw` gives `"ini`)
+        if in_dq && let Some(p) = self.s[start..self.i].iter().position(|&c| c == b';') {
+            self.i = start + p;
+        }
         let mut v = self.s[start..self.i].to_vec();
         while v.last().copied().is_some_and(is_blank) {
             v.pop();

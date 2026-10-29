@@ -610,7 +610,14 @@ pub(crate) fn scan_into(
                         Scanned::Str(rest[..end].to_vec())
                     }
                     b'c' => {
-                        let w = c.width.filter(|&w| w > 0).unwrap_or(1).min(rest.len());
+                        // up to the width (1 by default), stopping at white
+                        // space (observed on PHP 8.5: sscanf(" a", "%c")
+                        // gives "")
+                        let max = c.width.filter(|&w| w > 0).unwrap_or(1).min(rest.len());
+                        let mut w = 0;
+                        while w < max && !is_ws(rest[w]) {
+                            w += 1;
+                        }
                         pos += w;
                         Scanned::Str(rest[..w].to_vec())
                     }

@@ -169,8 +169,26 @@ impl Vm {
         }
         if self.ini.log_errors {
             let text = format!("PHP {}:  {} in {} on line {}\n", label, msg, file, line);
-            self.out.flush();
-            self.write_stderr(text.as_bytes());
+            // to the error_log file when one is set, time-stamped (PHP
+            // manual: error_log ini setting; test
+            // general_functions/bug60723.phpt)
+            let target = self.get_ini(b"error_log").unwrap_or_default();
+            if !target.is_empty() && target.as_bytes() != b"syslog" {
+                use std::io::Write;
+                use std::os::unix::ffi::OsStrExt;
+                let stamp = crate::builtins::date::log_timestamp(self);
+                let p = self.fs_path(&target);
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(std::path::Path::new(std::ffi::OsStr::from_bytes(
+                        p.as_os_str().as_bytes(),
+                    )))
+                    .and_then(|mut f| f.write_all(format!("[{stamp}] {text}").as_bytes()));
+            } else {
+                self.out.flush();
+                self.write_stderr(text.as_bytes());
+            }
         }
         match self.ini.display_errors {
             0 => {}

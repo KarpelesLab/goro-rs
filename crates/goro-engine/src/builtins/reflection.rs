@@ -3447,6 +3447,9 @@ fn c_new_no_ctor(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if c.has_flag(cflags::INTERNAL)
         && c.has_flag(cflags::FINAL)
         && c.lname.as_bytes() != b"stdclass"
+        // observed on PHP 8.5 (test
+        // DirectoryClass_reflection_create_instance_no_construct.phpt)
+        && c.lname.as_bytes() != b"directory"
     {
         return refl_error(
             vm,

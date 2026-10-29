@@ -1985,7 +1985,17 @@ fn stream_get_transports(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 
 fn stream_set_blocking(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let enable = a.bool(1);
-    with_stream(vm, a, 0, |_vm, s| {
+    with_stream(vm, a, 0, |vm, s| {
+        if let Some(r) = super::userstream::set_option(
+            vm,
+            s,
+            "stream_set_blocking",
+            1,
+            enable as i64,
+            Value::Null,
+        )? {
+            return Ok(Value::Bool(r));
+        }
         Ok(Value::Bool(match &mut s.backing {
             Backing::Native(n) => n.set_blocking(enable) || !n.is_socket(),
             Backing::File(f) => {
@@ -2020,7 +2030,13 @@ fn stream_set_timeout(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #1 ($stream) must be an open stream resource",
         );
     }
-    with_stream(vm, a, 0, |_vm, s| {
+    let (sec, usec) = (a.int(1), a.int_or(2, 0));
+    with_stream(vm, a, 0, |vm, s| {
+        if let Some(r) =
+            super::userstream::set_option(vm, s, "stream_set_timeout", 4, sec, Value::Int(usec))?
+        {
+            return Ok(Value::Bool(r));
+        }
         Ok(Value::Bool(match &mut s.backing {
             Backing::Native(n) => n.set_timeout(secs),
             Backing::File(_) => s.is_pipe(),

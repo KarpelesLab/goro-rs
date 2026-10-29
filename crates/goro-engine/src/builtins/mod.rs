@@ -3,11 +3,13 @@
 
 pub mod array;
 pub mod bcmath;
+pub mod browscap;
 pub mod bz2;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
 pub mod date;
+pub mod dir;
 pub mod dom;
 pub mod enums;
 pub mod exec;
@@ -29,9 +31,11 @@ pub mod ini;
 mod intl;
 pub mod json;
 pub mod libxml;
+pub mod mail;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
+pub mod net;
 pub mod openssl;
 pub mod output;
 pub mod password;
@@ -46,6 +50,7 @@ pub mod sockets;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
+pub mod stdmisc;
 pub mod streams;
 pub mod string;
 pub mod strmisc;
@@ -88,6 +93,11 @@ pub fn modules() -> Vec<&'static Module> {
         &strmisc::MODULE,
         &password::MODULE,
         &misc::MODULE,
+        &mail::MODULE,
+        &net::MODULE,
+        &dir::MODULE,
+        &stdmisc::MODULE,
+        &browscap::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,
