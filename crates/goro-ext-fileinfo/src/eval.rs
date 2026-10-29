@@ -7,7 +7,10 @@
 //! a match, negative offsets only work on files, `indirect` recursion
 //! stops after 50 levels with "indirect count (50) exceeded".
 
-use crate::magic::{DateStyle, Endian, Entry, Kind, Line, Magic, SF_LC, SF_LINES, SF_REL, SF_START, SF_SW, SF_TRIM, SF_UC, SF_W};
+use crate::magic::{
+    DateStyle, Endian, Entry, Kind, Line, Magic, SF_LC, SF_LINES, SF_REL, SF_START, SF_SW, SF_TRIM,
+    SF_UC, SF_W,
+};
 
 /// What one matching entry produced.
 #[derive(Default, Debug, Clone)]
@@ -91,7 +94,11 @@ fn sext(v: u64, size: u8) -> i64 {
 }
 
 fn mask(size: u8) -> u64 {
-    if size >= 8 { u64::MAX } else { (1u64 << (size as u32 * 8)) - 1 }
+    if size >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (size as u32 * 8)) - 1
+    }
 }
 
 fn apply_op(v: u64, op: u8, n: u64) -> u64 {
@@ -102,20 +109,8 @@ fn apply_op(v: u64, op: u8, n: u64) -> u64 {
         b'+' => v.wrapping_add(n),
         b'-' => v.wrapping_sub(n),
         b'*' => v.wrapping_mul(n),
-        b'/' => {
-            if n == 0 {
-                v
-            } else {
-                v / n
-            }
-        }
-        b'%' => {
-            if n == 0 {
-                v
-            } else {
-                v % n
-            }
-        }
+        b'/' => v.checked_div(n).unwrap_or(v),
+        b'%' => v.checked_rem(n).unwrap_or(v),
         _ => v,
     }
 }
@@ -180,11 +175,7 @@ impl<'a> Ctx<'a> {
     fn resolve(&self, l: &Line, base: usize, parent_end: usize) -> Option<usize> {
         let off = &l.off;
         let Some(ind) = &off.ind else {
-            return self.abs_off(
-                base as i64,
-                off.rel.then_some(parent_end),
-                off.base,
-            );
+            return self.abs_off(base as i64, off.rel.then_some(parent_end), off.base);
         };
         let at = self.abs_off(0, ind.rel.then_some(parent_end), ind.base)?;
         let mut v = if ind.special == b'o' {
@@ -208,11 +199,19 @@ impl<'a> Ctx<'a> {
             let n = if ind.operand_ind {
                 let p = self.abs_off(0, None, ind.operand)?;
                 let r = read_uint(self.buf, p, ind.size, ind.endian)?;
-                if ind.signed { sext(r, ind.size) as u64 } else { r }
+                if ind.signed {
+                    sext(r, ind.size) as u64
+                } else {
+                    r
+                }
             } else {
                 ind.operand as u64
             };
-            v = if ind.op == b'~' { !v } else { apply_op(v, ind.op, n) };
+            v = if ind.op == b'~' {
+                !v
+            } else {
+                apply_op(v, ind.op, n)
+            };
         }
         let mut o = (v as i64).wrapping_add(off.base);
         if off.rel {
@@ -294,7 +293,11 @@ impl<'a> Ctx<'a> {
                         }
                         continue;
                     };
-                    let o = if l.sflags & SF_REL != 0 { o + parent_end } else { o };
+                    let o = if l.sflags & SF_REL != 0 {
+                        o + parent_end
+                    } else {
+                        o
+                    };
                     self.indirect += 1;
                     if self.indirect > 50 {
                         return Err(Stop::Error("indirect count (50) exceeded".into()));
@@ -341,7 +344,7 @@ impl<'a> Ctx<'a> {
                     ends[lv] = end;
                     cont = lv + 1;
                     any = true;
-                    let d = format_desc(&l.desc, &val, l);
+                    let d = format_desc(&l.desc, &val);
                     f.print(&d);
                     f.meta(l);
                 }
@@ -382,7 +385,11 @@ impl<'a> Ctx<'a> {
                 if !ok {
                     return None;
                 }
-                let end = if l.kind == Kind::Offset { o } else { o + size as usize };
+                let end = if l.kind == Kind::Offset {
+                    o
+                } else {
+                    o + size as usize
+                };
                 let val = match l.kind {
                     Kind::Date(sz, st) => Val::Date(v, sz, st),
                     _ => Val::Int(v, size, signed),
@@ -391,7 +398,11 @@ impl<'a> Ctx<'a> {
             }
             Kind::Float(size) => {
                 let r = read_uint(b, o, size, l.endian)?;
-                let v = if size == 4 { f32::from_bits(r as u32) as f64 } else { f64::from_bits(r) };
+                let v = if size == 4 {
+                    f32::from_bits(r as u32) as f64
+                } else {
+                    f64::from_bits(r)
+                };
                 let ok = match l.reln {
                     b'x' => true,
                     b'=' => v == l.fnum,
@@ -457,7 +468,11 @@ impl<'a> Ctx<'a> {
             }
             Kind::PStr(lsize, le, incl) => {
                 let n = read_uint(b, o, lsize, le)? as usize;
-                let n = if incl { n.checked_sub(lsize as usize)? } else { n };
+                let n = if incl {
+                    n.checked_sub(lsize as usize)?
+                } else {
+                    n
+                };
                 let st = o + lsize as usize;
                 let s = b.get(st..st.checked_add(n)?.min(b.len()))?;
                 let ok = match l.reln {
@@ -513,7 +528,11 @@ impl<'a> Ctx<'a> {
                     return None;
                 }
                 let s = &b[o..];
-                let range = if l.range == 0 { s.len() } else { l.range as usize };
+                let range = if l.range == 0 {
+                    s.len()
+                } else {
+                    l.range as usize
+                };
                 let mut found = None;
                 if l.reln == b'x' {
                     found = Some((0, 0));
@@ -547,8 +566,16 @@ impl<'a> Ctx<'a> {
                 }
                 let s = &b[o..];
                 let lim = if l.sflags & SF_LINES != 0 {
-                    let want = if l.range == 0 { usize::MAX } else { l.range as usize };
-                    let cap = if l.range == 0 { 8192 } else { (l.range as usize).saturating_mul(80) };
+                    let want = if l.range == 0 {
+                        usize::MAX
+                    } else {
+                        l.range as usize
+                    };
+                    let cap = if l.range == 0 {
+                        8192
+                    } else {
+                        (l.range as usize).saturating_mul(80)
+                    };
                     let mut n = 0;
                     let mut end = s.len().min(cap);
                     for (k, &c) in s.iter().enumerate().take(cap) {
@@ -578,7 +605,11 @@ impl<'a> Ctx<'a> {
                     (b'!', None) => Some((o, Val::Bytes(Vec::new()))),
                     (b'!', Some(_)) => None,
                     (_, Some((a, z))) => {
-                        let end = if l.sflags & SF_START != 0 { o + a } else { o + z };
+                        let end = if l.sflags & SF_START != 0 {
+                            o + a
+                        } else {
+                            o + z
+                        };
                         Some((end, Val::Bytes(region[a..z].to_vec())))
                     }
                     _ => None,
@@ -594,7 +625,9 @@ impl<'a> Ctx<'a> {
                 for &c in &s[..n] {
                     x = x.wrapping_mul(8).wrapping_add((c - b'0') as u64);
                 }
-                let want = crate::magic::parse_num(&l.sval).map(|v| v.0 as u64).unwrap_or(0);
+                let want = crate::magic::parse_num(&l.sval)
+                    .map(|v| v.0 as u64)
+                    .unwrap_or(0);
                 let ok = cmp_int(x, want, l.reln, 8, false);
                 ok.then_some((o + n, Val::Int(x, 8, false)))
             }
@@ -680,10 +713,8 @@ pub fn str_match(s: &[u8], m: &[u8], flags: u32) -> Option<usize> {
     while j < m.len() {
         let mc = m[j];
         if mc == b' ' && flags & (SF_W | SF_SW) != 0 {
-            if flags & SF_W != 0 {
-                if i >= s.len() || !s[i].is_ascii_whitespace() {
-                    return None;
-                }
+            if flags & SF_W != 0 && (i >= s.len() || !s[i].is_ascii_whitespace()) {
+                return None;
             }
             while i < s.len() && s[i].is_ascii_whitespace() {
                 i += 1;
@@ -795,21 +826,28 @@ fn date_string(v: u64, size: u8, st: DateStyle) -> String {
             let d = v & 0xffff;
             format!(
                 "{} {:02}, {}",
-                ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                    [((d >> 5) & 0xf).clamp(1, 12) as usize - 1],
+                [
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                    "Dec"
+                ][((d >> 5) & 0xf).clamp(1, 12) as usize - 1],
                 d & 0x1f,
                 1980 + (d >> 9)
             )
         }
         DateStyle::MsdosTime => {
             let t = v & 0xffff;
-            format!("{:02}:{:02}:{:02}", t >> 11, (t >> 5) & 0x3f, (t & 0x1f) * 2)
+            format!(
+                "{:02}:{:02}:{:02}",
+                t >> 11,
+                (t >> 5) & 0x3f,
+                (t & 0x1f) * 2
+            )
         }
     }
 }
 
 /// Expands the printf conversion of a description with the value.
-fn format_desc(desc: &[u8], val: &Val, l: &Line) -> Vec<u8> {
+fn format_desc(desc: &[u8], val: &Val) -> Vec<u8> {
     let Some(p) = desc.iter().position(|&c| c == b'%') else {
         return desc.to_vec();
     };
@@ -817,7 +855,7 @@ fn format_desc(desc: &[u8], val: &Val, l: &Line) -> Vec<u8> {
     let mut i = p + 1;
     if desc.get(i) == Some(&b'%') {
         out.push(b'%');
-        out.extend_from_slice(&format_desc(&desc[i + 1..], val, l));
+        out.extend_from_slice(&format_desc(&desc[i + 1..], val));
         return out;
     }
     let mut left = false;

@@ -77,13 +77,15 @@ pub fn stream_names(b: &[u8]) -> Option<Vec<String>> {
             break;
         }
         let s = sector(cur)?;
-        for e in s.chunks_exact(128) {
+        for e in s.as_chunks::<128>().0 {
             let nl = u16le(e, 64)? as usize;
-            if nl < 2 || nl > 64 || e[66] == 0 {
+            if !(2..=64).contains(&nl) || e[66] == 0 {
                 continue;
             }
             let units: Vec<u16> = e[..nl - 2]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             names.push(String::from_utf16_lossy(&units));

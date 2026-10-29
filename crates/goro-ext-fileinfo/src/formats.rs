@@ -11,7 +11,12 @@ use crate::text::{Enc, TextInfo};
 
 pub const BUILTIN_MAGIC: &str = include_str!("builtin.magic");
 
-fn found(desc: impl Into<Vec<u8>>, mime: Option<&str>, ext: Option<&str>, apple: Option<&str>) -> Found {
+fn found(
+    desc: impl Into<Vec<u8>>,
+    mime: Option<&str>,
+    ext: Option<&str>,
+    apple: Option<&str>,
+) -> Found {
     Found {
         desc: desc.into(),
         mime: mime.map(|s| s.as_bytes().to_vec()),
@@ -37,7 +42,12 @@ fn le32(b: &[u8], at: usize) -> Option<u32> {
 /// SIMH tape images, JSON, CSV and compound documents.
 pub fn pre_tests(b: &[u8], ti: &TextInfo, out: &mut Vec<Found>) {
     if simh(b) {
-        out.push(found("SIMH tape data", Some("application/SIMH-tape-data"), None, None));
+        out.push(found(
+            "SIMH tape data",
+            Some("application/SIMH-tape-data"),
+            None,
+            None,
+        ));
         return;
     }
     if ti.is_text() && matches!(ti.enc, Enc::Ascii | Enc::Utf8 | Enc::Utf8Bom) {
@@ -51,7 +61,12 @@ pub fn pre_tests(b: &[u8], ti: &TextInfo, out: &mut Vec<Found>) {
                     None,
                 ));
             } else {
-                out.push(found("JSON text data", Some("application/json"), None, None));
+                out.push(found(
+                    "JSON text data",
+                    Some("application/json"),
+                    None,
+                    None,
+                ));
             }
             return;
         }
@@ -130,7 +145,11 @@ fn tar(b: &[u8]) -> Option<Found> {
     let sum = oct(&h[148..156])?;
     let mut s = 0u64;
     for (i, &c) in h.iter().enumerate() {
-        s += if (148..156).contains(&i) { 32 } else { c as u64 };
+        s += if (148..156).contains(&i) {
+            32
+        } else {
+            c as u64
+        };
     }
     if s != sum {
         return None;
@@ -145,11 +164,11 @@ fn tar(b: &[u8]) -> Option<Found> {
     Some(found(d, Some(mime), Some("tar"), None))
 }
 
+type Check = fn(&[u8]) -> Option<Found>;
+
 /// Native checks of the default database, before its magic rules.
 pub fn native(b: &[u8], _ti: &TextInfo, out: &mut Vec<Found>) {
-    let checks: &[fn(&[u8]) -> Option<Found>] = &[
-        jpeg, id3, pdf, zip, gpkg, openpgp, ext_fs, bcachefs, dsdiff,
-    ];
+    let checks: &[Check] = &[jpeg, id3, pdf, zip, gpkg, openpgp, ext_fs, bcachefs, dsdiff];
     for c in checks {
         if let Some(f) = c(b) {
             out.push(f);
@@ -261,7 +280,12 @@ fn openpgp(b: &[u8]) -> Option<Found> {
         p = s + l;
     }
     d.push_str("; OpenPGP Certificate");
-    Some(found(d, Some("application/pgp-keys"), Some("asc/gpg/pgp"), None))
+    Some(found(
+        d,
+        Some("application/pgp-keys"),
+        Some("asc/gpg/pgp"),
+        None,
+    ))
 }
 
 // ------------------------------------------------------------ ext2/3/4
@@ -278,7 +302,11 @@ fn ext_fs(b: &[u8]) -> Option<Found> {
     let compat = le32(b, sb + 92)?;
     let incompat = le32(b, sb + 96)?;
     let ro = le32(b, sb + 100)?;
-    let kind = if incompat & 0x0040 != 0 || incompat & 0x0200 != 0 || ro & 0x0008 != 0 || incompat & 0x0080 != 0 {
+    let kind = if incompat & 0x0040 != 0
+        || incompat & 0x0200 != 0
+        || ro & 0x0008 != 0
+        || incompat & 0x0080 != 0
+    {
         "ext4"
     } else if compat & 0x0004 != 0 {
         "ext3"
@@ -299,7 +327,10 @@ fn ext_fs(b: &[u8]) -> Option<Found> {
         .take_while(|&c| c != 0)
         .collect();
     if !name.is_empty() {
-        d.push_str(&format!(", volume name \"{}\"", String::from_utf8_lossy(&name)));
+        d.push_str(&format!(
+            ", volume name \"{}\"",
+            String::from_utf8_lossy(&name)
+        ));
     }
     if incompat & 0x0004 != 0 {
         d.push_str(" (needs journal recovery)");
@@ -368,7 +399,7 @@ fn bcachefs(b: &[u8]) -> Option<Found> {
             break;
         }
         if ty == 1 {
-            if let Some(u) = b.get(p + 8 + 16 * 0..p + 8 + 16) {
+            if let Some(u) = b.get(p + 8..p + 8 + 16) {
                 d.push_str(&format!("/UUID={}", hex_uuid(u)));
             }
             break;
@@ -407,7 +438,9 @@ fn dsdiff(b: &[u8]) -> Option<Found> {
             let end = st + sz;
             let (mut rate, mut chans, mut comp) = (None, None, None);
             while q < end {
-                let Some((cid, cst, csz)) = chunk(q) else { break };
+                let Some((cid, cst, csz)) = chunk(q) else {
+                    break;
+                };
                 match cid {
                     b"FS  " => rate = be32(b, cst),
                     b"CHNL" => chans = be16(b, cst),
@@ -552,12 +585,22 @@ fn jpeg(b: &[u8]) -> Option<Found> {
 
 const BITRATES: [[u32; 16]; 5] = [
     // MPEG-1 layer I, II, III
-    [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0],
-    [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0],
-    [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0],
+    [
+        0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0,
+    ],
+    [
+        0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0,
+    ],
+    [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+    ],
     // MPEG-2/2.5 layer I, layers II and III
-    [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0],
-    [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0],
+    [
+        0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0,
+    ],
+    [
+        0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+    ],
 ];
 
 /// An MPEG audio frame header (ISO/IEC 11172-3 2.4.1.3, 13818-3).
@@ -598,7 +641,7 @@ pub fn mpeg_audio(h: &[u8]) -> Option<String> {
         _ => [11025, 12000, 8000],
     };
     let sr = rates[sri];
-    let srs = if sr % 1000 == 0 {
+    let srs = if sr.is_multiple_of(1000) {
         format!("{} kHz", sr / 1000)
     } else {
         format!("{} kHz", sr as f64 / 1000.0)
@@ -666,7 +709,11 @@ fn pdf(b: &[u8]) -> Option<Found> {
         while j < b.len() && matches!(b[j], b' ' | b'\r' | b'\n' | b'\t') {
             j += 1;
         }
-        if b[j..].starts_with(b"/Pages") && !b[j + 6..].first().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        if b[j..].starts_with(b"/Pages")
+            && !b[j + 6..]
+                .first()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
             // Search the dictionary around it for /Count.
             let lo = (i + p).saturating_sub(512);
             let hi = (st + 512).min(b.len());
@@ -816,7 +863,10 @@ fn tga(b: &[u8]) -> Option<Found> {
     let cmap = b[1];
     let ty = b[2];
     let depth = b[16];
-    if cmap > 1 || !matches!(ty, 1 | 2 | 3 | 9 | 10 | 11) || !matches!(depth, 1 | 8 | 15 | 16 | 24 | 32) {
+    if cmap > 1
+        || !matches!(ty, 1 | 2 | 3 | 9 | 10 | 11)
+        || !matches!(depth, 1 | 8 | 15 | 16 | 24 | 32)
+    {
         return None;
     }
     if cmap == 0 && b[3..8].iter().any(|&c| c != 0) {

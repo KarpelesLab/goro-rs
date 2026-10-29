@@ -207,7 +207,11 @@ pub fn parse_num(s: &[u8]) -> Option<(i64, usize)> {
         }
         return None;
     }
-    let v = if neg { (v as i64).wrapping_neg() } else { v as i64 };
+    let v = if neg {
+        (v as i64).wrapping_neg()
+    } else {
+        v as i64
+    };
     Some((v, j))
 }
 
@@ -476,10 +480,10 @@ impl Parser {
                     self.failed = true;
                     return;
                 };
-                if let Some((e, _)) = self.cur.as_mut() {
-                    if e.lines.len() == 1 {
-                        e.strength_adj = Some((op, n));
-                    }
+                if let Some((e, _)) = self.cur.as_mut()
+                    && e.lines.len() == 1
+                {
+                    e.strength_adj = Some((op, n));
                 }
             }
             _ => {
@@ -507,11 +511,16 @@ impl Parser {
             level += 1;
             i += 1;
         }
-        // A continuation without an entry fails the load, after its
-        // fields are checked (and reported) like any line.
+        // A continuation without an entry fails the load silently once its
+        // offset parsed; a line of only '>' too (observed on PHP 8.5, tests
+        // bug61964.phpt, bug71527.phpt).
         let orphan = level > 0 && self.cur.is_none();
         if orphan {
             self.failed = true;
+        }
+        if i >= s.len() {
+            self.failed = true;
+            return;
         }
         let prev_level = self
             .cur
@@ -536,6 +545,9 @@ impl Parser {
             ));
             return;
         };
+        if orphan {
+            return;
+        }
         let mut j = skip_ws(rest, used);
         // Type name.
         let tstart = j;
@@ -714,7 +726,8 @@ impl Parser {
         let t = &rest[j..];
         // The test.
         let mut k = 0;
-        let is_x = |t: &[u8], k: usize| t.get(k) == Some(&b'x') && t.get(k + 1).is_none_or(|&c| is_ws(c));
+        let is_x =
+            |t: &[u8], k: usize| t.get(k) == Some(&b'x') && t.get(k + 1).is_none_or(|&c| is_ws(c));
         match kind {
             Kind::Name | Kind::Use => {
                 let (mut v, n) = parse_escaped(t);
@@ -960,7 +973,7 @@ fn strength(e: &Entry) -> i64 {
         Kind::Indirect | Kind::Name | Kind::Use => {}
     }
     match l.reln {
-        b'x' => s = s.min(1).max(0),
+        b'x' => s = s.clamp(0, 1),
         b'!' => s -= 15,
         b'<' | b'>' => s -= 8,
         b'&' | b'^' => s -= 10,
@@ -1036,7 +1049,10 @@ fn parse_offset(s: &[u8]) -> Option<(Offset, usize)> {
             i += 1;
         }
         if let Some(&c) = s.get(i)
-            && matches!(c, b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'~')
+            && matches!(
+                c,
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'~'
+            )
         {
             i += 1;
             ind.op = c;
@@ -1080,10 +1096,7 @@ impl Magic {
     /// Parses one or more magic sources (a directory's files are given in
     /// name order). Returns the database (or the failure) and the warnings
     /// PHP prints, fatal or not.
-    pub fn parse(
-        sources: &[&[u8]],
-        keep_order: bool,
-    ) -> (Result<Magic, ParseError>, Vec<String>) {
+    pub fn parse(sources: &[&[u8]], keep_order: bool) -> (Result<Magic, ParseError>, Vec<String>) {
         let mut p = Parser {
             warnings: Vec::new(),
             failed: false,
@@ -1115,7 +1128,7 @@ impl Magic {
             names: p.names,
         };
         if !p.keep_order {
-            m.entries.sort_by(|a, b| b.strength.cmp(&a.strength));
+            m.entries.sort_by_key(|a| std::cmp::Reverse(a.strength));
         }
         (Ok(m), warnings)
     }

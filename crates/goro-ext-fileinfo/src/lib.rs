@@ -132,7 +132,10 @@ fn classify(db: &Db, buf: &[u8], flags: i64, file_mode: bool) -> Result<Outcome,
         return Ok(simple("empty", "application/x-empty"));
     }
     if buf.len() == 1 {
-        return Ok(simple("very short file (no magic)", "application/octet-stream"));
+        return Ok(simple(
+            "very short file (no magic)",
+            "application/octet-stream",
+        ));
     }
     let all = flags & CONTINUE != 0;
     let ti = TextInfo::analyze(buf);
@@ -152,7 +155,11 @@ fn classify(db: &Db, buf: &[u8], flags: i64, file_mode: bool) -> Result<Outcome,
     if all || found.is_empty() {
         formats::post_tests(buf, &mut found);
     }
-    let text_desc = if is_text { ti.describe() } else { String::new() };
+    let text_desc = if is_text {
+        ti.describe()
+    } else {
+        String::new()
+    };
     let mut text_matched = false;
     if is_text && (all || found.is_empty()) {
         let tb = ti.text_buffer(buf);

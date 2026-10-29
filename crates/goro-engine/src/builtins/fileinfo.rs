@@ -132,7 +132,13 @@ fn abs_path(vm: &Vm, p: &[u8]) -> Vec<u8> {
 
 /// Loads the database for finfo_open()/new finfo(); diagnostics are
 /// returned (`fname` prefixes them) for the caller to print or throw.
-fn load_db(vm: &mut Vm, fname: &str, path: Option<&[u8]>, flags: i64, diags: &mut Vec<Diag>) -> Option<Rc<fi::Db>> {
+fn load_db(
+    vm: &mut Vm,
+    fname: &str,
+    path: Option<&[u8]>,
+    flags: i64,
+    diags: &mut Vec<Diag>,
+) -> Option<Rc<fi::Db>> {
     use std::os::unix::ffi::OsStrExt;
     let Some(path) = path.filter(|p| !p.is_empty()) else {
         return Some(fi::builtin());
@@ -265,7 +271,13 @@ fn finfo_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     }
     let mut diags = Vec::new();
-    let db = load_db(vm, "finfo_open", path.as_ref().map(|p| p.as_bytes()), flags, &mut diags);
+    let db = load_db(
+        vm,
+        "finfo_open",
+        path.as_ref().map(|p| p.as_bytes()),
+        flags,
+        &mut diags,
+    );
     for d in diags {
         match d {
             Diag::Warning(m) => vm.warn(&m)?,
@@ -323,7 +335,9 @@ fn finfo_close(vm: &mut Vm, a: &mut Args) -> R<Value> {
     )?;
     let v = a.val(0);
     match &v {
-        Value::Object(o) if o.class().name().as_bytes().eq_ignore_ascii_case(b"finfo") => Ok(Value::Bool(true)),
+        Value::Object(o) if o.class().name().as_bytes().eq_ignore_ascii_case(b"finfo") => {
+            Ok(Value::Bool(true))
+        }
         _ => vm.fthrow(
             a,
             "TypeError",
@@ -336,7 +350,9 @@ fn finfo_close(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn finfo_set_flags(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let Some(o) = a.obj(0) else { return invalid(vm) };
+    let Some(o) = a.obj(0) else {
+        return invalid(vm);
+    };
     if !set_flags_of(&o, a.int(1)) {
         return invalid(vm);
     }
@@ -377,7 +393,14 @@ fn is_directory(vm: &mut Vm, path: &[u8]) -> R<bool> {
     Ok(std::fs::metadata(vm.fs_path(lp)).is_ok_and(|m| m.is_dir()))
 }
 
-fn run_identify(vm: &mut Vm, a: &Args, db: &fi::Db, data: &[u8], flags: i64, file_mode: bool) -> R<Value> {
+fn run_identify(
+    vm: &mut Vm,
+    a: &Args,
+    db: &fi::Db,
+    data: &[u8],
+    flags: i64,
+    file_mode: bool,
+) -> R<Value> {
     match fi::identify(db, data, flags, file_mode) {
         Ok(s) => Ok(Value::Str(PhpStr::from(s))),
         Err(m) => {
@@ -466,10 +489,7 @@ fn m_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn do_buffer(vm: &mut Vm, a: &mut Args, db: Rc<fi::Db>, oflags: i64, argn: usize) -> R<Value> {
     if a.len() > argn + 2 {
-        vm.fdeprecated(
-            a,
-            "The $context parameter has no effect for finfo_buffer()",
-        )?;
+        vm.fdeprecated(a, "The $context parameter has no effect for finfo_buffer()")?;
     }
     let data = a.str(argn);
     let flags = match a.opt_int(argn + 1) {
