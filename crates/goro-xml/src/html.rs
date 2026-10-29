@@ -766,8 +766,15 @@ impl Builder<'_> {
             .bytes()
             .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0C));
         if blank {
+            // Blanks in html and head are kept, and dropped with
+            // LIBXML_NOBLANKS (observed on PHP 8.5; tests dom005.phpt,
+            // ghsa-p3x9-6h7p-cgfc_001.phpt).
+            if self.stack.is_empty() {
+                return;
+            }
             let cur = self.current();
-            if self.stack.is_empty() || Some(cur) == self.html {
+            let noblanks = self.flags & crate::xml::opt::NOBLANKS != 0;
+            if noblanks && (Some(cur) == self.html || Some(cur) == self.head) {
                 return;
             }
         } else if self.stack.is_empty() && self.noimplied() {
