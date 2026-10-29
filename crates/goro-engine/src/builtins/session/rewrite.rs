@@ -303,7 +303,7 @@ impl Config {
             host = &host[..p];
         }
         let host = host.to_ascii_lowercase();
-        self.hosts.iter().any(|h| *h == host)
+        self.hosts.contains(&host)
     }
 
     /// The URL with the variables added.
