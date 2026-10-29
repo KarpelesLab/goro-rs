@@ -38,7 +38,10 @@ pub(crate) fn read_entry(vm: &mut Vm, s: &Shared, inner: &[u8]) -> Result<Vec<u8
     let mut l = s.borrow_mut();
     if let Some(ext) = mounted(&l.mounts, inner) {
         if super::os_path(&ext).is_dir() {
-            return Err(format!("phar error: path \"{}\" is a directory", lossy(inner)));
+            return Err(format!(
+                "phar error: path \"{}\" is a directory",
+                lossy(inner)
+            ));
         }
         return std::fs::read(super::os_path(&ext))
             .map_err(|_| format!("phar error: Cannot open mounted file \"{}\"", lossy(&ext)));
