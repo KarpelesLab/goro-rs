@@ -51,8 +51,8 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **92.8%** overall
-(16,343 passing, 1,260 failing, 3,897 skipped), as of 2026-10-29. The
+php-src test suite (8.5.4), share of the tests that run: **92.7%** overall
+(16,349 passing, 1,283 failing, 3,941 skipped), as of 2026-10-29. The
 ext/opcache tests now run (goro has no optimizer or JIT, so tests that dump
 opcodes fail where they used to be skipped).
 The extension libraries below are wired into the engine; ext/random,
@@ -247,6 +247,17 @@ the XML extensions each pass 87-100% of their tests that run.
   debug-callback output, `curl_getinfo()` timings, and the multi and
   (persistent) share handles; ext/curl: every test that runs locally passes
   (the others need Caddy, an FTP server, ext/sockets or the Internet).
+- `goro-ext-sqlite`: SQLite for ext/sqlite3 and pdo_sqlite on
+  [graphitesql](https://crates.io/crates/graphitesql) (pure Rust, SQLite 3
+  file format): open flags and URI filenames, statements with their tail,
+  SQLite's parameter numbering, result codes, extended codes and messages,
+  column origins, double-quoted string literals, and the bridge running
+  PHP user functions, aggregates, collations and authorizers. On it:
+  ext/pdo (`PDO`, `PDOStatement`, `PDORow`, every fetch mode, error modes,
+  bound parameters and columns, statement classes, a driver interface and
+  placeholder scanner for future drivers), pdo_sqlite with `Pdo\Sqlite`,
+  and ext/sqlite3 (blob streams, backup, authorizer, exceptions mode):
+  281 of the 302 ext/pdo, pdo_sqlite and sqlite3 tests that run pass.
 - `goro-ext-exif`: ext/exif and the image functions of ext/standard on
   bytes: `exif_read_data()` (JPEG APP1, TIFF and HEIF Exif with the IFD0,
   THUMBNAIL, EXIF, GPS, INTEROP, WINXP and maker note sections of ten

@@ -4032,7 +4032,7 @@ impl Vm {
     /// Whether the running user code's current call has its result
     /// discarded by an expression statement (directly, or through an
     /// internal function such as call_user_func()).
-    fn caller_discards_result(&self) -> bool {
+    pub(crate) fn caller_discards_result(&self) -> bool {
         if self.ex.frames.is_empty() {
             return false;
         }

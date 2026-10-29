@@ -27,6 +27,7 @@ members = [
     "crates/goro-ext-exif",
     "crates/goro-ext-curl",
     "crates/goro-ext-fileinfo",
+    "crates/goro-ext-sqlite",
 ]
 
 [workspace.package]
