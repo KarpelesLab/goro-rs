@@ -40,7 +40,7 @@ class _ZendTestClass implements _ZendTestInterface {
     #[\Deprecated]
     public function __toString(): string { return ""; }
 
-    public function returnsStatic(): static { return new static(); }
+    public static function returnsStatic(): static { return new static(); }
 
     public function returnsThrowable(): Throwable { throw new Exception(); }
 
@@ -52,7 +52,7 @@ class _ZendTestClass implements _ZendTestInterface {
 }
 
 class _ZendTestChildClass extends _ZendTestClass {
-    public function returnsThrowable(): Exception { throw new Exception(); }
+    public function returnsThrowable(): Exception { throw new Error(); }
 }
 
 trait _ZendTestTrait {
@@ -178,4 +178,28 @@ final class FloatCastableNoOperations {
 final class NumericCastableNoOperations {
     private int|float $val;
     public function __construct(int|float $val) { $this->val = $val; }
+}
+
+/* A fiber of its own on top of Fiber (tests ext/zend_test/tests/
+ * fiber_test_07.phpt, gh16388.phpt): start/resume/suspend, and pipeTo()
+ * handing the return value to another callable. Suspending across nested
+ * fibers of the other kind (fiber_test_01..06) is not emulated. */
+#[NotCloneable]
+final class _ZendTestFiber {
+    private $__fiber;
+    private $__pipe = null;
+    public function __construct(callable $callable) { $this->__fiber = new Fiber($callable); }
+    public function start(mixed ...$args): mixed { return $this->__h_done($this->__fiber->start(...$args)); }
+    public function resume(mixed $value = null): mixed { return $this->__h_done($this->__fiber->resume($value)); }
+    public function pipeTo(callable $callable): static { $this->__pipe = $callable; return $this; }
+    public static function suspend(mixed $value = null): mixed { return Fiber::suspend($value); }
+    private function __h_done($v) {
+        if ($this->__pipe !== null && $this->__fiber->isTerminated()) {
+            $p = $this->__pipe;
+            $this->__pipe = null;
+            $p($this->__fiber->getReturn());
+            return null;
+        }
+        return $v;
+    }
 }

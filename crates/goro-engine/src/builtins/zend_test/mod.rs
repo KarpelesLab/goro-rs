@@ -264,6 +264,7 @@ pub static MODULE: Module = Module {
         c!("longcastablenooperations"),
         c!("floatcastablenooperations"),
         c!("numericcastablenooperations"),
+        c!("_zendtestfiber"),
         ns!("zendtestns\\foo"),
         ns!("zendtestns\\unlikelycompileerror"),
         ns!("zendtestns\\notunlikelycompileerror"),
@@ -367,10 +368,12 @@ fn startup_ini(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
         if k == b"zend_test.quantity_value"
             && let (_, Some(w)) = crate::vm::setup::parse_quantity(v)
         {
-            let _ = vm.warn(&format!(
-                "Invalid \"zend_test.quantity_value\" setting. {}",
-                w
-            ));
+            let _ = vm.raise_at(
+                crate::vm::errors::E_WARNING,
+                &format!("Invalid \"zend_test.quantity_value\" setting. {}", w),
+                PhpStr::from("Unknown"),
+                0,
+            );
         }
     }
 }
