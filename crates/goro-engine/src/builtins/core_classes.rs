@@ -820,7 +820,10 @@ fn gen_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .find_class(b"GeneratorExit_", false)?
         .expect("GeneratorExit_");
     let marker = vm.instantiate_raw(&cls)?;
-    vm.with_gen(&g, |d| d.delegate = None);
+    vm.with_gen(&g, |d| {
+        d.delegate = None;
+        d.force_closed = true;
+    });
     match vm.gen_resume(&g, None, Some(marker.clone())) {
         Err(crate::vm::Unwind::Throw(e)) if ObjRef::ptr_eq(&e, &marker) => Ok(Value::Null),
         Err(e) => Err(e),

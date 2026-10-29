@@ -62,6 +62,8 @@ pub struct GenData {
     /// Pending calls open across a yield (`f(yield $x)`), with the values
     /// of their reserved slots.
     pub saved_pending: Vec<(Pending, Vec<Slot>)>,
+    /// Being destroyed with a `finally` to run: yielding is an error.
+    pub force_closed: bool,
     /// Advanced past the first yield (rewind no longer allowed).
     pub advanced: bool,
     /// The generator function, its closure object and class scope; kept
@@ -798,6 +800,7 @@ impl Vm {
             delegate_fresh: false,
             yield_dst: NONE,
             saved_pending: Vec::new(),
+            force_closed: false,
             advanced: false,
         };
         *o.obj().native.borrow_mut() = Some(Box::new(data));
@@ -1116,6 +1119,16 @@ impl Vm {
 
     /// `yield`: suspends the generator frame.
     pub(crate) fn op_yield(&mut self, dst: Reg, val: Reg, key: Reg) -> R<Option<Value>> {
+        // A `finally` run by the generator's destruction can't yield
+        // (test Zend/tests/generators/errors/yield_in_force_closed_finally_error).
+        if let Some(g) = self.frame().generator.clone()
+            && self.with_gen(&g, |d| d.force_closed).unwrap_or(false)
+        {
+            return self.throw(
+                "Error",
+                "Cannot yield from finally in a force-closed generator",
+            );
+        }
         let by_ref = self.code_ref().flags & fflags::BY_REF != 0;
         let v = if val == NONE {
             Value::Null
@@ -1197,6 +1210,16 @@ impl Vm {
 
     pub(crate) fn op_yield_from(&mut self, dst: Reg, src: Reg) -> R<Option<Value>> {
         let v = self.get(src)?;
+        // Test Zend/tests/generators/yield_from_force_closed.
+        if let Some(g) = self.frame().generator.clone()
+            && self.with_gen(&g, |d| d.force_closed).unwrap_or(false)
+        {
+            drop(v);
+            return self.throw(
+                "Error",
+                "Cannot use \"yield from\" in a force-closed generator",
+            );
+        }
         let g = self
             .frame()
             .generator
