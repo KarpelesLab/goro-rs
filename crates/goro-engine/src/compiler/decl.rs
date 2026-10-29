@@ -1085,6 +1085,7 @@ impl<'a> Compiler<'a> {
             for a in g.attrs {
                 let name = self.resolve_class(&a.name);
                 let mut args = Vec::new();
+                let mut arg_texts = Vec::new();
                 for arg in a.args {
                     if arg.unpack {
                         return self.err(
@@ -1092,12 +1093,14 @@ impl<'a> Compiler<'a> {
                             arg.span.line,
                         );
                     }
+                    arg_texts.push(self.export_const_expr(&arg.value));
                     let v = self.const_expr(&arg.value)?;
                     args.push((arg.name.map(|n| PhpStr::intern(n.name)), v));
                 }
                 out.push(AttrInfo {
                     name: PhpStr::intern(&name),
                     args,
+                    arg_texts,
                     line: a.span.line,
                 });
             }
@@ -3162,6 +3165,82 @@ impl<'a> Compiler<'a> {
             i += 1;
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+}
+
+/// Names in an exported constant expression, resolved the way PHP shows
+/// them in Reflection output (tests ext/reflection/tests/gh9447.phpt,
+/// ReflectionAttribute_toString.phpt, Zend/tests/first_class_callable/
+/// constexpr/attributes_ast_printing_runtime.phpt; observed on PHP 8.5):
+/// classes as `\Full\Name` (as written when that resolves to itself, except
+/// after `new`), functions and constants by their namespaced name.
+struct ExportNames<'c, 'a> {
+    c: &'c Compiler<'a>,
+}
+
+impl ExportNames<'_, '_> {
+    fn special(n: &Name<'_>) -> bool {
+        n.is_special_class()
+    }
+}
+
+impl goro_syntax::export::Resolver for ExportNames<'_, '_> {
+    fn class(&self, n: &Name<'_>) -> Option<Vec<u8>> {
+        if Self::special(n) {
+            return None;
+        }
+        let r = self.c.resolve_class(n);
+        if n.kind != NameKind::FullyQualified && r == n.name {
+            return None;
+        }
+        let mut v = vec![b'\\'];
+        v.extend_from_slice(&r);
+        Some(v)
+    }
+
+    fn new_class(&self, n: &Name<'_>) -> Option<Vec<u8>> {
+        if Self::special(n) {
+            return None;
+        }
+        let mut v = vec![b'\\'];
+        v.extend_from_slice(&self.c.resolve_class(n));
+        Some(v)
+    }
+
+    fn function(&self, n: &Name<'_>) -> Option<Vec<u8>> {
+        if n.kind == NameKind::FullyQualified {
+            return None;
+        }
+        Some(self.c.resolve_func(n).0)
+    }
+
+    fn constant(&self, n: &Name<'_>) -> Option<Vec<u8>> {
+        if n.kind == NameKind::Unqualified
+            && [&b"true"[..], b"false", b"null"]
+                .iter()
+                .any(|k| n.name.eq_ignore_ascii_case(k))
+        {
+            return None;
+        }
+        Some(self.c.resolve_const_name(n).0)
+    }
+
+    fn closure(&self, line: u32) -> Option<Vec<u8>> {
+        let mut v = b"Closure(".to_vec();
+        v.extend_from_slice(self.c.closure_name(line).as_bytes());
+        v.push(b')');
+        Some(v)
+    }
+}
+
+impl<'a> Compiler<'a> {
+    /// A constant expression exported with its names resolved (Reflection
+    /// output of defaults and attribute arguments).
+    pub(crate) fn export_const_expr(&self, e: &Expr<'_>) -> String {
+        let r = ExportNames { c: self };
+        let mut x = goro_syntax::export::Exporter::with_resolver(self.src, &r);
+        x.expr(e, 0);
+        String::from_utf8_lossy(&x.finish()).into_owned()
     }
 }
 
