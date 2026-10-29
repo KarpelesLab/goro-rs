@@ -105,6 +105,25 @@ impl goro_runtime::NativeData for GenData {
         if let Some((_, Some(c), _)) = &self.func_info {
             visit(&Value::Object(c.clone()));
         }
+        // Calls open across a yield hold their arguments (test
+        // Zend/tests/generators/gh9750-001).
+        for (p, slots) in &self.saved_pending {
+            for v in slots.iter().flatten() {
+                visit(v);
+            }
+            for v in p.args.iter().chain(p.extra.iter()) {
+                visit(v);
+            }
+            if let Some(n) = &p.named_extra {
+                visit(&Value::Array(n.clone()));
+            }
+            if let Some(t) = &p.this {
+                visit(&Value::Object(t.clone()));
+            }
+            if let Some(c) = &p.closure {
+                visit(&Value::Object(c.clone()));
+            }
+        }
     }
     fn clear(&mut self) {
         if let Some(fi) = &mut self.func_info {
@@ -115,6 +134,16 @@ impl goro_runtime::NativeData for GenData {
         }
         self.frame = None;
         self.delegate = None;
+        // An object whose constructor call never ran gets no destructor
+        // (test Zend/tests/generators/gh9750-008).
+        for (p, _) in &self.saved_pending {
+            if p.flags & super::pending_flags::NEW != 0
+                && let Some(t) = &p.this
+            {
+                t.mark_destructor_called();
+            }
+        }
+        self.saved_pending.clear();
         self.key = Value::Null;
         self.value = Value::Null;
         self.ret = None;
@@ -197,6 +226,16 @@ impl Vm {
                         } else {
                             o.clone()
                         };
+                        // A by-reference getIterator() generator (test
+                        // Zend/tests/generators/generator_method_by_ref).
+                        if self.is_generator_obj(&it) && self.gen_by_ref(&it) {
+                            self.gen_rewind_traverse(&it)?;
+                            unsafe {
+                                *sa = Some(Value::Object(it));
+                                *sb = Some(enc(M_GEN_FIRST, 0));
+                            }
+                            return Ok(true);
+                        }
                         if !crate::builtins::spl::ai_iterates_by_ref(self, &it) {
                             return self.throw(
                                 "Error",
