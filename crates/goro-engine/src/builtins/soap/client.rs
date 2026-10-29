@@ -92,6 +92,13 @@ pub fn state_of(vm: &mut Vm, o: &ObjRef) -> SoapState {
     }
 }
 
+/// A classmap maps type names (string keys) to class names (observed on
+/// PHP 8.5; test bugs/gh16256.phpt).
+pub fn classmap_valid(a: &PhpArray) -> bool {
+    a.iter()
+        .all(|(k, _)| matches!(k, goro_runtime::KeyRef::Str(_)))
+}
+
 pub fn classmap_of(v: Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Value::Array(a) = v {
@@ -280,6 +287,13 @@ fn construct_inner(
     }
     set(vm, "_exceptions", Value::Bool(exceptions));
     if let Some(Value::Array(cm)) = opt(opts, "classmap") {
+        if !classmap_valid(&cm) {
+            return Err(soap_php_error(
+                vm,
+                a,
+                "'classmap' option must be an associative array",
+            ));
+        }
         set(vm, "_classmap", Value::Array(cm));
     }
     if let Some(v) = opt(opts, "features") {
@@ -406,7 +420,9 @@ fn do_call(
         _ => true,
     };
     let mut headers = header_list(vm, a, &in_headers)?;
+    let mut force_header = matches!(in_headers, Value::Array(_));
     if let Value::Array(def) = vm.get_prop_raw(this, b"__default_headers") {
+        force_header = true;
         for (_, h) in def.iter() {
             if let Value::Object(o) = h.deref() {
                 headers.push(o);
@@ -422,7 +438,16 @@ fn do_call(
     } else {
         ErrMode::Fatal
     });
-    let r = call_inner(vm, this, name, args, &options, &headers, out_headers.as_ref());
+    let r = call_inner(
+        vm,
+        this,
+        name,
+        args,
+        &options,
+        &headers,
+        out_headers.as_ref(),
+        force_header,
+    );
     pop_mode();
     let r = match r {
         Ok(v) => v,
@@ -440,6 +465,7 @@ fn do_call(
     Ok(r)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn call_inner(
     vm: &mut Vm,
     this: &ObjRef,
@@ -448,6 +474,7 @@ fn call_inner(
     options: &PhpArray,
     headers: &[ObjRef],
     out_headers: Option<&goro_runtime::PhpRef>,
+    force_header: bool,
 ) -> R<Value> {
     let sdl = sdl_of(this);
     let version = int_prop(vm, this, "_soap_version").unwrap_or(1);
@@ -458,6 +485,7 @@ fn call_inner(
         _ => str_prop(vm, this, "location"),
     };
     let mut cx = Cx::new(sdl.clone(), version, &st);
+    cx.force_header = force_header;
     let (request, action, func) = match &sdl {
         Some(s) => {
             let Some(f) = s.find_function(name) else {
@@ -524,7 +552,9 @@ fn call_inner(
     if trace {
         vm.set_prop_raw(this, b"__last_response", Value::Str(resp.clone()));
     }
-    if one_way && resp.is_empty() {
+    // An empty response is no result (observed on PHP 8.5; tests
+    // bugs/bug71711.phpt, bug77410.phpt).
+    if resp.is_empty() {
         return Ok(Value::Null);
     }
     parse_response(vm, sdl, func.as_ref(), &st, resp.as_bytes(), out_headers)
@@ -570,7 +600,7 @@ pub fn write_headers(
     headers: &[ObjRef],
     sdl_headers: &[super::sdl::Header],
 ) -> R<()> {
-    if headers.is_empty() {
+    if headers.is_empty() && !cx.force_header {
         return Ok(());
     }
     let h = cx.doc.new_el(&format!("{prefix}:Header"));
@@ -694,12 +724,13 @@ fn wsdl_request(
     let body = cx.doc.add_child(env, &format!("{prefix}:Body"));
     let literal = f.input.literal;
     let method = if f.rpc {
-        let ns = if f.input.ns.is_empty() {
-            sdl.target_ns.clone()
+        // Without a namespace the call element gets the envelope's prefix
+        // (observed on PHP 8.5; test bugs/bug32776.phpt).
+        let q = if f.input.ns.is_empty() {
+            format!("{prefix}:{}", f.name)
         } else {
-            f.input.ns.clone()
+            cx.doc.qname(Some(body), &f.input.ns, &f.name)
         };
-        let q = cx.doc.qname(Some(body), &ns, &f.name);
         Some(cx.doc.add_child(body, &q))
     } else {
         None
@@ -721,6 +752,21 @@ fn wsdl_request(
         {
             val = Some(vm.get_prop_raw(o, b"param_data"));
         }
+        // A missing argument takes its element's default (observed on PHP
+        // 8.5; test bugs/bug34643.phpt).
+        let default = p
+            .element
+            .as_ref()
+            .and_then(|(ns, n)| sdl.element(ns, n))
+            .and_then(|e| {
+                let t = &sdl.types[sdl.deref_element(e)];
+                t.default.clone().or(t.fixed.clone())
+            });
+        let val = match (val, default) {
+            (Some(v), _) => Some(v),
+            (None, Some(d)) => Some(Value::Str(PhpStr::from(d))),
+            (None, None) => None,
+        };
         let val = match val {
             Some(v) => v,
             // Document parts are written even without an argument

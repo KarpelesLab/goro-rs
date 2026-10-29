@@ -351,15 +351,23 @@ pub fn construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn construct_inner(
     vm: &mut Vm,
-    a: &Args,
+    a_args: &Args,
     this: &ObjRef,
     wsdl: Option<String>,
     opts: &PhpArray,
 ) -> R<Value> {
+    let a = a_args;
     let version = match opt(opts, "soap_version") {
         Some(v) => {
             let n = vm.to_int(&v)?;
-            if n == 2 { 2 } else { 1 }
+            if n != 1 && n != 2 {
+                return Err(super::soap_php_error(
+                    vm,
+                    a,
+                    "'soap_version' option must be SOAP_1_1 or SOAP_1_2",
+                ));
+            }
+            n
         }
         None => 1,
     };
@@ -394,6 +402,13 @@ fn construct_inner(
         None => None,
     };
     let classmap = match opt(opts, "classmap") {
+        Some(Value::Array(a)) if !super::client::classmap_valid(&a) => {
+            return Err(super::soap_php_error(
+                vm,
+                a_args,
+                "'classmap' option must be an associative array",
+            ));
+        }
         Some(v @ Value::Array(_)) => classmap_of(v),
         _ => Vec::new(),
     };
@@ -770,7 +785,9 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match out {
         Out::Doc(xml) => {
             store_last(&this, xml.as_bytes());
-            send_doc(vm, ver, xml.as_bytes(), false);
+            if !xml.is_empty() {
+                send_doc(vm, ver, xml.as_bytes(), false);
+            }
         }
         Out::Fault(f, func) => {
             let xml = fault_xml(vm, ver, &f, sdl, &st, &headers, func.as_ref())?;
@@ -1378,18 +1395,18 @@ fn response_doc(
     match (func, sdl) {
         (Some(f), Some(s)) => {
             let Some(out) = &f.output else {
-                // One-way: an empty body.
-                return Ok(cx.doc.serialize(env));
+                // One-way operations send nothing back (observed on PHP
+                // 8.5; test bugs/bug32776.phpt).
+                return Ok(String::new());
             };
             let literal = out.literal;
             if f.rpc {
-                let ns = if out.ns.is_empty() {
-                    s.target_ns.clone()
-                } else {
-                    out.ns.clone()
-                };
                 let rname = format!("{}Response", f.name);
-                let q = cx.doc.qname(Some(body), &ns, &rname);
+                let q = if out.ns.is_empty() {
+                    format!("{prefix}:{rname}")
+                } else {
+                    cx.doc.qname(Some(body), &out.ns, &rname)
+                };
                 let m = cx.doc.add_child(body, &q);
                 let n = out.parts.len();
                 if version == 2 && n == 1 && !literal {

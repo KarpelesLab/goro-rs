@@ -29,6 +29,8 @@ pub struct Dx<'a> {
     pub typemap: Rc<Vec<TypeMapEntry>>,
     pub ids: HashMap<String, NodeId>,
     pub done: HashMap<NodeId, Value>,
+    /// Inside a repeating model group.
+    pub rep: u32,
 }
 
 impl<'a> Dx<'a> {
@@ -47,6 +49,7 @@ impl<'a> Dx<'a> {
             typemap: st.typemap.clone(),
             ids,
             done: HashMap::new(),
+            rep: 0,
         }
     }
 }
@@ -839,7 +842,7 @@ fn model(
                 }
                 return Ok(());
             }
-            let multi = m.max != 1 || sdl.types[e].max != 1;
+            let multi = m.max != 1 || sdl.types[e].max != 1 || dx.rep > 0;
             if multi && (nodes.len() > 1 || dx.features & SOAP_SINGLE_ELEMENT_ARRAYS != 0) {
                 let mut arr = PhpArray::new();
                 for c in nodes {
@@ -857,8 +860,21 @@ fn model(
             Ok(())
         }
         MKind::Sequence | MKind::All | MKind::Choice => {
+            let rep = m.max != 1;
+            if rep {
+                dx.rep += 1;
+            }
             for it in &m.items {
-                model(vm, dx, sdl, it, n, obj, used)?;
+                let r = model(vm, dx, sdl, it, n, obj, used);
+                if r.is_err() {
+                    if rep {
+                        dx.rep -= 1;
+                    }
+                    return r;
+                }
+            }
+            if rep {
+                dx.rep -= 1;
             }
             Ok(())
         }
@@ -918,6 +934,7 @@ fn default_value(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, s: &str) -> R<Value
         typemap: dx.typemap.clone(),
         ids: HashMap::new(),
         done: HashMap::new(),
+        rep: 0,
     };
     from_xml_typed(vm, &mut sub, enc, root)
 }

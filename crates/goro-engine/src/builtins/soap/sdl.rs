@@ -578,13 +578,19 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 for a in self.d(di).kids(port) {
                     let d = self.d(di);
                     if d.local(a) == "address" {
-                        addr = Some(a);
+                        // A SOAP address wins over others.
                         if d.ns(a) == NS_WSDL_SOAP11 {
                             version = 1;
+                            addr = Some(a);
+                            break;
                         } else if d.ns(a) == NS_WSDL_SOAP12 {
                             version = 2;
+                            addr = Some(a);
+                            break;
                         }
-                        break;
+                        if addr.is_none() {
+                            addr = Some(a);
+                        }
                     }
                 }
                 let Some(addr) = addr else {
@@ -605,6 +611,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 // the soap:binding element); other transports are skipped
                 // (observed on PHP 8.5; tests bugs/bug50698_*.phpt).
                 let mut style_rpc = false;
+                let mut http_binding = false;
                 let mut soap_binding = None;
                 for b in self.d(bdi).kids(bnode) {
                     let d = self.d(bdi);
@@ -618,6 +625,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if let Some(b) = soap_binding {
                     let d = self.d(bdi);
                     if version == 0 {
+                        // A SOAP binding behind a non-SOAP address (an
+                        // HTTP one): its operations are rpc/encoded calls
+                        // (observed on PHP 8.5; test bugs/bug47049.phpt).
+                        http_binding = true;
                         version = if d.ns(b) == NS_WSDL_SOAP12 { 2 } else { 1 };
                     }
                     style_rpc = d.attr(b, "style").as_deref() == Some("rpc");
@@ -636,7 +647,20 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     NS_WSDL_SOAP11
                 };
                 found_port = true;
+                let first = self.sdl.functions.len();
                 self.bind_operations(bdi, bnode, soap_ns, style_rpc, version, &location)?;
+                if http_binding {
+                    let tns = self.sdl.target_ns.clone();
+                    for f in &mut self.sdl.functions[first..] {
+                        f.rpc = true;
+                        f.input.literal = false;
+                        f.input.ns = tns.clone();
+                        if let Some(o) = &mut f.output {
+                            o.literal = false;
+                            o.ns = tns.clone();
+                        }
+                    }
+                }
             }
         }
         if !found_port {

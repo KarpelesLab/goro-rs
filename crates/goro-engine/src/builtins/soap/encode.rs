@@ -45,6 +45,11 @@ pub struct Cx {
     pub ref_n: u32,
     /// Encoding a value nested in itself (recursion guard).
     pub depth: u32,
+    /// Inside a repeating model group (its elements repeat too).
+    pub rep: u32,
+    /// Write a Header element even without headers (an array of
+    /// headers was given; observed on PHP 8.5; test bugs/bug70388.phpt).
+    pub force_header: bool,
 }
 
 pub const SOAP_SINGLE_ELEMENT_ARRAYS: i64 = 1;
@@ -63,6 +68,8 @@ impl Cx {
             refs: Vec::new(),
             ref_n: 0,
             depth: 0,
+            rep: 0,
+            force_header: false,
         }
     }
 
@@ -1424,6 +1431,28 @@ fn model_to_xml(
     literal: bool,
     strict: bool,
 ) -> R<bool> {
+    let group_rep = m.kind != MKind::Element && m.max != 1;
+    if group_rep {
+        cx.rep += 1;
+    }
+    let r = model_inner(vm, cx, sdl, m, v, el, literal, strict);
+    if group_rep {
+        cx.rep -= 1;
+    }
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn model_inner(
+    vm: &mut Vm,
+    cx: &mut Cx,
+    sdl: &Rc<Sdl>,
+    m: &Model,
+    v: &Value,
+    el: El,
+    literal: bool,
+    strict: bool,
+) -> R<bool> {
     match m.kind {
         MKind::Element => {
             let Some(e) = m.elem else { return Ok(true) };
@@ -1438,12 +1467,19 @@ fn model_to_xml(
             Ok(true)
         }
         MKind::Choice => {
+            // A repeating choice writes every alternative present
+            // (observed on PHP 8.5; test bugs/bug35142.phpt).
+            let mut any = false;
             for it in &m.items {
                 if model_present(vm, sdl, it, v)? {
-                    return model_to_xml(vm, cx, sdl, it, v, el, literal, strict);
+                    let r = model_to_xml(vm, cx, sdl, it, v, el, literal, strict)?;
+                    if m.max == 1 {
+                        return Ok(r);
+                    }
+                    any = true;
                 }
             }
-            Ok(!strict || m.min == 0 || m.items.is_empty())
+            Ok(any || !strict || m.min == 0 || m.items.is_empty())
         }
         MKind::Group => {
             let g = m.group.as_ref().and_then(|q| sdl.group(q)).cloned();
@@ -1534,7 +1570,7 @@ fn element_to_xml(
     let qualified = ed.qualified && literal;
     let nillable = ed.nillable || decl.nillable;
     let min = m.min;
-    let max = m.max;
+    let max = if cx.rep > 0 { -1 } else { m.max };
     let mut val = get_field(vm, v, &name)?;
     // A list for a struct whose element repeats: the list is that
     // element's values (observed on PHP 8.5; tests
