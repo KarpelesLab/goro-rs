@@ -1259,7 +1259,11 @@ impl Vm {
         }
         let x = self.get(a)?;
         let y = self.get(b)?;
-        let r = self.binary_op(op, &x, &y)?;
+        // Test Zend/tests/operator_unsupported_types.
+        goro_runtime::ops::set_expression_operands(true);
+        let r = self.binary_op(op, &x, &y);
+        goro_runtime::ops::set_expression_operands(false);
+        let r = r?;
         drop(x);
         drop(y);
         self.put(dst, r);
