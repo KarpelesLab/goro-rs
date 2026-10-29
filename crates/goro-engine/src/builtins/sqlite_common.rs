@@ -220,7 +220,9 @@ pub fn collation(cb: Value) -> std::rc::Rc<dyn Fn(&str, &str) -> Ordering> {
         let args = vec![Value::Str(PhpStr::from(a)), Value::Str(PhpStr::from(b))];
         match call(&cb, args) {
             Ok(v) => {
-                let n = with_vm(|vm| vm.to_int(&v)).and_then(|r| r.ok()).unwrap_or(0);
+                let n = with_vm(|vm| vm.to_int(&v))
+                    .and_then(|r| r.ok())
+                    .unwrap_or(0);
                 n.cmp(&0)
             }
             Err(_) => Ordering::Equal,

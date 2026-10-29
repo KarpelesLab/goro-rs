@@ -16,8 +16,8 @@ use goro_ext_sqlite::{Kind, Stmt};
 use goro_runtime::{Key, ObjRef, PhpArray, PhpRef, Value};
 
 use super::{
-    ASSOC, BOTH, Conn, NUM, T_BLOB, T_FLOAT, T_INTEGER, T_NULL, T_TEXT, common, fail, is_auth,
-    run, with_native,
+    ASSOC, BOTH, Conn, NUM, T_BLOB, T_FLOAT, T_INTEGER, T_NULL, T_TEXT, common, fail, is_auth, run,
+    with_native,
 };
 use crate::class::NativeHooks;
 use crate::func::Args;
@@ -244,7 +244,8 @@ pub(super) fn new_result(
     Ok(o)
 }
 
-const DB_NOT_INIT: &str = "The SQLite3 object has not been correctly initialised or is already closed";
+const DB_NOT_INIT: &str =
+    "The SQLite3 object has not been correctly initialised or is already closed";
 const STMT_NOT_INIT: &str =
     "The SQLite3Stmt object has not been correctly initialised or is already closed";
 const RES_NOT_INIT: &str =
@@ -795,7 +796,11 @@ pub(super) fn r_fetch_array(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match step(vm, a, &state)? {
         Some(i) => {
             let s = state.borrow();
-            Ok(Value::Array(row_array(&s.cur.columns, &s.cur.rows[i], mode)))
+            Ok(Value::Array(row_array(
+                &s.cur.columns,
+                &s.cur.rows[i],
+                mode,
+            )))
         }
         None => Ok(Value::Bool(false)),
     }
@@ -808,7 +813,11 @@ pub(super) fn r_fetch_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mut out = PhpArray::new();
     while let Some(i) = step(vm, a, &state)? {
         let s = state.borrow();
-        let _ = out.push(Value::Array(row_array(&s.cur.columns, &s.cur.rows[i], mode)));
+        let _ = out.push(Value::Array(row_array(
+            &s.cur.columns,
+            &s.cur.rows[i],
+            mode,
+        )));
     }
     Ok(Value::Array(out))
 }

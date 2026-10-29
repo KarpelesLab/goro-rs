@@ -454,7 +454,10 @@ pub(super) fn prepare(
         let db = conn.db.try_borrow();
         match db.as_ref().ok().and_then(|d| d.as_ref()) {
             Some(db) => prepare_dqs(db, sql),
-            None => Err(SqlError::new(gs::SQLITE_MISUSE, gs::errstr(gs::SQLITE_MISUSE))),
+            None => Err(SqlError::new(
+                gs::SQLITE_MISUSE,
+                gs::errstr(gs::SQLITE_MISUSE),
+            )),
         }
     };
     if common::has_pending() {
@@ -627,10 +630,16 @@ pub(super) fn run(
                     }
                     r
                 }
-                None => Err(SqlError::new(gs::SQLITE_MISUSE, gs::errstr(gs::SQLITE_MISUSE))),
+                None => Err(SqlError::new(
+                    gs::SQLITE_MISUSE,
+                    gs::errstr(gs::SQLITE_MISUSE),
+                )),
             },
             // A callback running SQL on the connection that runs it.
-            Err(_) => Err(SqlError::new(gs::SQLITE_LOCKED, gs::errstr(gs::SQLITE_LOCKED))),
+            Err(_) => Err(SqlError::new(
+                gs::SQLITE_LOCKED,
+                gs::errstr(gs::SQLITE_LOCKED),
+            )),
         }
     };
     if !st.readonly {
@@ -718,7 +727,10 @@ fn do_open(vm: &mut Vm, a: &mut Args) -> R<()> {
                     "open_basedir restriction in effect. File({raw}) is not within the allowed path(s): ({bd})"
                 ),
             )?;
-            return vm.throw("Exception", &format!("open_basedir prohibits opening {raw}"));
+            return vm.throw(
+                "Exception",
+                &format!("open_basedir prohibits opening {raw}"),
+            );
         }
         vm.fs_path(name.as_bytes()).to_string_lossy().into_owned()
     };
@@ -850,7 +862,10 @@ fn m_load_extension(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let path = format!("{}/{}", dir, name.to_string_lossy());
     let full = vm.fs_path(path.as_bytes());
     let dir_full = vm.fs_path(dir.as_bytes());
-    let inside = match (std::fs::canonicalize(&full), std::fs::canonicalize(&dir_full)) {
+    let inside = match (
+        std::fs::canonicalize(&full),
+        std::fs::canonicalize(&dir_full),
+    ) {
         (Ok(f), Ok(d)) => f.starts_with(&d),
         _ => false,
     };
@@ -877,10 +892,16 @@ fn m_backup(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     };
     let d = open_conn_of(vm, &dst_obj)?;
-    let src_name = a.str(1);
-    let dst_name = a.str(2);
+    let main = PhpStr::from("main");
+    let src_name = a.opt_str(1).unwrap_or_else(|| main.clone());
+    let dst_name = a.opt_str(2).unwrap_or(main);
     if Rc::ptr_eq(&c, &d) && src_name == dst_name {
-        complain(vm, a, &c, "Backup failed: source and destination are the same")?;
+        complain(
+            vm,
+            a,
+            &c,
+            "Backup failed: source and destination are the same",
+        )?;
         return Ok(Value::Bool(false));
     }
     for n in [&src_name, &dst_name] {
@@ -901,7 +922,10 @@ fn m_backup(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let r = image.and_then(|img| match d.db.try_borrow_mut() {
         Ok(mut g) => g.as_mut().expect("open").restore(&img),
-        Err(_) => Err(SqlError::new(gs::SQLITE_LOCKED, gs::errstr(gs::SQLITE_LOCKED))),
+        Err(_) => Err(SqlError::new(
+            gs::SQLITE_LOCKED,
+            gs::errstr(gs::SQLITE_LOCKED),
+        )),
     });
     match r {
         Ok(()) => {
