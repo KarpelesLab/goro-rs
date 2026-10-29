@@ -39,6 +39,7 @@ pub mod pcre;
 pub mod posix;
 pub mod phar;
 pub mod random;
+pub mod readline;
 pub mod reflection;
 pub mod serialize;
 pub mod session;
@@ -105,6 +106,7 @@ pub fn modules() -> Vec<&'static Module> {
         &calendar::MODULE,
         &tokenizer::MODULE,
         &gettext::MODULE,
+        &readline::MODULE,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
