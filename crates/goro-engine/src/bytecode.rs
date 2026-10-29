@@ -1045,6 +1045,11 @@ pub mod fflags {
     pub const NODISCARD: u32 = 131072;
     /// Some parameter has a type (binding can fail on a type).
     pub const TYPED_PARAMS: u32 = 1 << 18;
+    /// A constant expression that is a bare global constant (`= FOO`):
+    /// its undefined-constant error shows no "[constant expression]"
+    /// frame (observed on PHP 8.5; test Zend/tests/enum/
+    /// update-class-constant-failure vs Zend/tests/bug47572).
+    pub const BARE_CONST: u32 = 1 << 19;
 }
 
 /// Jump table for `switch` / `match`.

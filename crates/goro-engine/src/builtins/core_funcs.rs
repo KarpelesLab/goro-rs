@@ -1881,6 +1881,15 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
         vm.warn("fiber.stack_size must be a positive number")?;
         return Ok(Value::Bool(false));
     }
+    // Empty argument separators are refused (test Zend/tests/bug46811,
+    // observed on PHP 8.5 for both).
+    if matches!(
+        k.as_bytes(),
+        b"arg_separator.output" | b"arg_separator.input"
+    ) && v.is_empty()
+    {
+        return Ok(Value::Bool(false));
+    }
     let mut v = v;
     if k.as_bytes() == b"memory_limit" {
         let (n, w) = crate::vm::setup::parse_quantity(&v);

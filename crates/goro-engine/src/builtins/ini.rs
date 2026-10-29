@@ -91,11 +91,9 @@ fn put(target: &mut PhpArray, key: &[u8], offset: Option<Option<Vec<u8>>>, v: Va
 fn parse_common(vm: &mut Vm, a: &Args, src: &[u8], origin: &str) -> R<Value> {
     let sections = a.bool_or(1, false);
     let Some(mode) = Mode::from_int(a.int_or(2, 0)) else {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #3 ($scanner_mode) must be one of INI_SCANNER_NORMAL, INI_SCANNER_RAW, or INI_SCANNER_TYPED",
-        );
+        // A plain warning (observed on PHP 8.5; test Zend/tests/bug61087).
+        vm.warn("Invalid scanner mode")?;
+        return Ok(Value::Bool(false));
     };
     let events = {
         let mut env = VmEnv { vm };

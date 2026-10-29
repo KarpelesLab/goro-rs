@@ -2742,16 +2742,6 @@ impl Vm {
         // with an undefined constant in a constant throws; test
         // ext/opcache/tests/invalid_new_dce).
         if cls.kind == crate::class::ClassKind::Class {
-            let pending: Vec<Rc<crate::class::ClassConst>> = cls
-                .consts
-                .borrow()
-                .iter()
-                .filter(|c| matches!(*c.value.borrow(), ConstState::Pending(_)))
-                .cloned()
-                .collect();
-            for c in pending {
-                self.eval_class_const(&c)?;
-            }
             self.ensure_statics(cls)?;
         }
         let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();

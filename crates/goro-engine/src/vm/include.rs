@@ -1236,7 +1236,16 @@ impl Vm {
                 } else {
                     n.to_string_lossy()
                 };
-                self.throw("Error", &format!("Undefined constant \"{}\"", shown))
+                // In a constant expression the error shows its frame (test
+                // Zend/tests/bug47572).
+                let fl = self.code_ref().flags;
+                let ce = fl & crate::bytecode::fflags::CONST_EXPR != 0
+                    && fl & crate::bytecode::fflags::BARE_CONST == 0;
+                let on = ce || self.trace_const_expr;
+                let saved = std::mem::replace(&mut self.trace_const_expr, on);
+                let r = self.throw("Error", &format!("Undefined constant \"{}\"", shown));
+                self.trace_const_expr = saved;
+                r
             }
         }
     }
