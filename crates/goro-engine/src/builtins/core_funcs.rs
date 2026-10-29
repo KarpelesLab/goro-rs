@@ -1115,8 +1115,13 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let m = lower(&a.str(1));
     Ok(Value::Bool(match c {
         Some(c) => {
-            c.find_method_str(&m).is_some()
-                || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
+            // A parent's private static method is not the child's (tests
+            // Zend/tests/method_exists_002, inheritance/bug50810).
+            c.find_method_str(&m).is_some_and(|f| {
+                use crate::class::mflags::{PRIVATE, STATIC};
+                f.flags & (PRIVATE | STATIC) != (PRIVATE | STATIC)
+                    || std::ptr::eq(f.scope.get(), &*c)
+            }) || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
         }
         None => false,
     }))
@@ -1832,6 +1837,15 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if k.as_bytes() == b"zend.exception_string_param_max_len" {
         let n = goro_runtime::convert::str_to_int(&v);
         if !(0..=1_000_000).contains(&n) {
+            return Ok(Value::Bool(false));
+        }
+    }
+    // zend.assertions can't switch to or from -1 at run time (tests
+    // Zend/tests/assert/expect_016.phpt, expect_017.phpt).
+    if k.as_bytes() == b"zend.assertions" {
+        let to = goro_runtime::convert::str_to_int(&v) == -1;
+        if to != (goro_runtime::convert::str_to_int(&old) == -1) {
+            vm.warn("zend.assertions may be completely enabled or disabled only in php.ini")?;
             return Ok(Value::Bool(false));
         }
     }

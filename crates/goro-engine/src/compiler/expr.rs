@@ -1175,6 +1175,7 @@ impl<'a> Compiler<'a> {
                 if let Some(t) = literal_truth(left)
                     && t == (op == BinaryOp::BoolOr)
                 {
+                    self.dead_spans.push((right.span.start, right.span.end));
                     let d = self.tmp();
                     let c = self.add_const(Value::Bool(t));
                     self.emit(Op::Copy { dst: d, src: c });
@@ -1798,16 +1799,20 @@ impl<'a> Compiler<'a> {
         if lname == b"assert"
             || (fb.as_deref().map(|f| f.eq_ignore_ascii_case(b"assert")) == Some(true))
         {
-            // assert() with zend.assertions: the message includes the
-            // source text of the expression (handled by the function, which
-            // receives the text as a hidden argument).
+            // assert() with zend.assertions: without a description, the
+            // message is the call exported from the AST (PHP manual:
+            // assert; tests Zend/tests/assert/expect_015.phpt,
+            // named_params/assert.phpt), passed as a hidden argument (a
+            // named one after a named argument). The message ends at a NUL
+            // byte (observed on PHP 8.5).
             if let Some(first) = args.as_slice().first()
                 && args.as_slice().len() == 1
-                && first.name.is_none()
+                && !first.unpack
             {
-                let text =
-                    &self.src[first.value.span.start as usize..first.value.span.end as usize];
-                let desc = format!("assert({})", String::from_utf8_lossy(text));
+                let mut desc = goro_syntax::export::call(self.src, b"assert", args);
+                if let Some(i) = desc.iter().position(|&c| c == 0) {
+                    desc.truncate(i);
+                }
                 let k = self.name_pair(b"assert");
                 let cache = self.cache();
                 self.emit(Op::InitFCall {
@@ -1819,9 +1824,16 @@ impl<'a> Compiler<'a> {
                 self.f.call_depth += 1;
                 let v = self.expr(&first.value)?;
                 self.free(v);
-                self.emit(Op::Send { src: v, arg: 0 });
-                let dc = self.str_const(desc.as_bytes());
-                self.emit(Op::Send { src: dc, arg: 1 });
+                let dc = self.str_const(&desc);
+                if let Some(n) = &first.name {
+                    let name = self.str_const(n.name);
+                    self.emit(Op::SendNamed { src: v, name });
+                    let name = self.str_const(b"description");
+                    self.emit(Op::SendNamed { src: dc, name });
+                } else {
+                    self.emit(Op::Send { src: v, arg: 0 });
+                    self.emit(Op::Send { src: dc, arg: 1 });
+                }
                 self.f.call_depth -= 1;
                 let d = self.dst(hint);
                 self.f.line = line;
@@ -1960,7 +1972,10 @@ impl<'a> Compiler<'a> {
                         let var = self.cv(v);
                         self.emit(Op::SendNamedVar { var, name });
                     }
-                    _ if is_ref_capable(&a.value) && !contains_nullsafe(&a.value) => {
+                    _ if is_ref_capable(&a.value)
+                        && !contains_nullsafe(&a.value)
+                        && !temp_rooted(&a.value) =>
+                    {
                         let j = self.emit(Op::JmpNamedArgByRef { name, t: 0 });
                         let v = self.expr(&a.value)?;
                         self.free(v);
@@ -2004,6 +2019,31 @@ impl<'a> Compiler<'a> {
                     self.free(v);
                     self.emit(Op::Send { src: v, arg: i });
                 }
+                // A place through a temporary (`C[0]`, `func_get_args()[0]`):
+                // a value, or an error for a by-reference parameter (test
+                // Zend/tests/gh12102_*).
+                _ if is_ref_capable(&a.value)
+                    && !contains_nullsafe(&a.value)
+                    && (temp_rooted(&a.value) || {
+                        let root = access_root(&a.value);
+                        !std::ptr::eq(root, &a.value) && self.check_builtin_write(root).is_err()
+                    }) =>
+                {
+                    let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    self.emit(Op::Send { src: v, arg: i });
+                    let j2 = self.emit(Op::Jmp { t: 0 });
+                    self.patch_here(j);
+                    let msg = self.add_const(Value::Str(PhpStr::intern(
+                        b"Cannot use temporary expression in write context",
+                    )));
+                    self.emit(Op::Error {
+                        msg: msg & !CONST,
+                        kind: 0,
+                    });
+                    self.patch_here(j2);
+                }
                 ExprKind::Index { index: None, .. } => {
                     // `f($a[])`: only valid for by-reference parameters.
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
@@ -2018,7 +2058,10 @@ impl<'a> Compiler<'a> {
                     self.free(r);
                     self.emit(Op::SendRef { src: r, arg: i });
                 }
-                _ if is_ref_capable(&a.value) && !contains_nullsafe(&a.value) => {
+                _ if is_ref_capable(&a.value)
+                    && !contains_nullsafe(&a.value)
+                    && !temp_rooted(&a.value) =>
+                {
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
                     let v = self.expr(&a.value)?;
                     self.free(v);
@@ -2259,11 +2302,19 @@ impl<'a> Compiler<'a> {
                 if contains_nullsafe(e) {
                     return self.err("Can't use nullsafe operator in write context", e.span.line);
                 }
-                let v = self.expr(e)?;
-                Ok(LPath {
-                    base: PathBase::Tmp(v),
-                    elems: Vec::new(),
-                })
+                // A temporary value can't be written through (observed on
+                // PHP 8.5: `(new A)->p = 1`, `[1][0] = 2`; tests
+                // Zend/tests/gh12102_*).
+                if matches!(e.kind, ExprKind::Clone { .. }) {
+                    return self.err(
+                        "Cannot use result of built-in function in write context",
+                        e.span.line,
+                    );
+                }
+                self.err(
+                    "Cannot use temporary expression in write context",
+                    e.span.line,
+                )
             }
         }
     }
@@ -3259,6 +3310,33 @@ fn writes_directly(e: &Expr<'_>) -> bool {
         }
         ExprKind::StaticCall(sc) => !matches!(sc.args, Args::FirstClassCallable),
         _ => false,
+    }
+}
+
+/// The expression an access chain (`x->a[b]->c`) starts from.
+pub(crate) fn access_root<'e, 'a>(e: &'e Expr<'a>) -> &'e Expr<'a> {
+    match &e.kind {
+        ExprKind::Prop { obj, .. } => access_root(obj),
+        ExprKind::Index { base, .. } => access_root(base),
+        _ => e,
+    }
+}
+
+/// Whether an access chain starts at a temporary value (a literal, `new`,
+/// an operator's result...) rather than a variable or a call: such places
+/// can be read but not written.
+pub(crate) fn temp_rooted(e: &Expr<'_>) -> bool {
+    match &e.kind {
+        ExprKind::Prop { obj, .. } => temp_rooted(obj),
+        ExprKind::Index { base, .. } => temp_rooted(base),
+        ExprKind::Variable(_)
+        | ExprKind::VariableVariable(_)
+        | ExprKind::StaticProp(_)
+        | ExprKind::Call { .. }
+        | ExprKind::MethodCall { .. }
+        | ExprKind::StaticCall(_)
+        | ExprKind::CallExpr { .. } => false,
+        _ => true,
     }
 }
 

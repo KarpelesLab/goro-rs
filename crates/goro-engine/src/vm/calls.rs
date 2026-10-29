@@ -2761,10 +2761,16 @@ impl Vm {
             self.raise_func_deprecation(code, what, func, magic.as_ref())?;
         }
         if code.flags & fflags::ABSTRACT != 0 {
-            return self.throw(
-                "Error",
-                &format!("Cannot call abstract method {}()", func.display_name()),
-            );
+            // Through __call()/__callStatic(): the name called (tests
+            // Zend/tests/gh_17718_*).
+            let shown = match (
+                self.magic_call_name.clone().filter(|_| is_magic_call(func)),
+                func.scope(),
+            ) {
+                (Some(n), Some(c)) => format!("{}::{}", c.name.dname(), n.to_string_lossy()),
+                _ => func.display_name(),
+            };
+            return self.throw("Error", &format!("Cannot call abstract method {}()", shown));
         }
         if code.flags & fflags::NODISCARD != 0 && self.caller_discards_result() {
             let what = if func.scope().is_some() {

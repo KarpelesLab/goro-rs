@@ -778,6 +778,33 @@ impl Vm {
                     let v = ctx.value.clone();
                     return self.var_action(r, path.action, v, res);
                 }
+                // A property write through an undefined variable fails
+                // without defining it (observed on PHP 8.5; test
+                // Zend/tests/bug75921).
+                if matches!(path.elems[0], PathElem::Prop(..))
+                    && !matches!(path.action, PathAction::Unset)
+                    && self.peek(r).is_none()
+                {
+                    let n = ctx.names[0].clone().unwrap_or_default();
+                    let last = path.elems.len() == 1;
+                    let what = match (last, path.action) {
+                        (true, PathAction::Assign(_) | PathAction::AssignOp(..)) => "assign",
+                        (true, PathAction::IncDec(_)) => "increment/decrement",
+                        _ => "modify",
+                    };
+                    if last {
+                        let mut c = ctx;
+                        let _ = self.walk_value(&mut c)?;
+                    }
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Attempt to {} property \"{}\" on null",
+                            what,
+                            n.to_string_lossy()
+                        ),
+                    );
+                }
                 Place::Ptr(self.var_place(r))
             }
             PathBase::This => {
@@ -988,6 +1015,13 @@ impl Vm {
                     return self.write_elem(place, key, action, value);
                 }
                 // Intermediate: fetch the element for writing.
+                // A property of a string offset (test Zend/tests/
+                // string_offset_as_object).
+                if matches!(elems[i + 1], PathElem::Prop(..))
+                    && matches!(unsafe { &*deref_ptr(place.ptr()) }, Value::Str(s) if !s.is_empty())
+                {
+                    return self.throw("Error", "Cannot use string offset as an object");
+                }
                 let rmw = matches!(action, PathAction::AssignOp(..) | PathAction::IncDec(_));
                 let mut next =
                     match self.dim_fetch_w(place, key, matches!(action, PathAction::Unset), rmw)? {

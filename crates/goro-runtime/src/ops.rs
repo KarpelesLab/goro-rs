@@ -72,7 +72,37 @@ pub fn binary_op(op: BinOp, a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResul
     }
 }
 
+thread_local! {
+    static COMMUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the binary operation evaluated next as an expression `a op b`
+/// (not a compound assignment): commutative operators then report an
+/// object or resource operand first, as PHP's operator does.
+pub fn set_expression_operands(on: bool) {
+    COMMUTED.with(|c| c.set(on));
+}
+
+fn commuted(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Mul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+    ) && COMMUTED.with(|c| c.get())
+}
+
 fn unsupported(op: BinOp, a: &Value, b: &Value) -> PhpError {
+    // The commutative operators name an object, else a resource, first
+    // (observed on PHP 8.5: `1 * new stdClass` is "stdClass * int"; test
+    // Zend/tests/operator_unsupported_types).
+    // (a resource only comes before an array: `10 * STDERR` stays "int *
+    // resource"; test ext/standard/tests/array/array_product_variation5)
+    let swap = match (a.deref(), b.deref()) {
+        (Value::Object(_), _) => false,
+        (_, Value::Object(_)) => true,
+        (Value::Array(_), Value::Resource(_)) => true,
+        _ => false,
+    };
+    let (a, b) = if commuted(op) && swap { (b, a) } else { (a, b) };
     PhpError::type_error(format!(
         "Unsupported operand types: {} {} {}",
         a.type_name_for_error(),
@@ -112,6 +142,11 @@ fn num_operand(v: &Value, ctx: &mut dyn Ctx) -> Option<Number> {
 }
 
 fn num_operands(op: BinOp, a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<(Number, Number)> {
+    // An object or resource right operand of a commutative operator fails
+    // before the left one is converted (no "non-numeric" warning first).
+    if commuted(op) && matches!(b, Value::Object(_) | Value::Resource(_)) {
+        return Err(unsupported(op, a, b));
+    }
     let x = num_operand(a, ctx).ok_or_else(|| unsupported(op, a, b))?;
     let y = num_operand(b, ctx).ok_or_else(|| unsupported(op, a, b))?;
     Ok((x, y))
@@ -311,6 +346,9 @@ fn float_string_to_int(s: &[u8], f: f64, ctx: &mut dyn Ctx) -> i64 {
 }
 
 fn int_operands(op: BinOp, a: &Value, b: &Value, ctx: &mut dyn Ctx) -> PhpResult<(i64, i64)> {
+    if commuted(op) && matches!(b, Value::Object(_) | Value::Resource(_)) {
+        return Err(unsupported(op, a, b));
+    }
     let x = int_operand(a, ctx).ok_or_else(|| unsupported(op, a, b))?;
     let y = int_operand(b, ctx).ok_or_else(|| unsupported(op, a, b))?;
     Ok((x, y))

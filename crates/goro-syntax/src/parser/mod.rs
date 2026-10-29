@@ -452,10 +452,12 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn notice(&mut self, kind: NoticeKind, msg: impl Into<String>, line: u32) {
+        let offset = self.toks.get(self.pos).map_or(0, |t| t.start);
         self.notices.push(Notice {
             kind,
             message: msg.into(),
             line,
+            offset,
         });
     }
 

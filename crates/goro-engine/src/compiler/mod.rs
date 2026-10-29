@@ -242,6 +242,9 @@ pub struct Compiler<'a> {
     pub(crate) in_const_stmt: bool,
     /// Pending `?->` short-circuit jumps of the current chain.
     pub(crate) nullsafe_jumps: Vec<(usize, Reg)>,
+    /// Source ranges left uncompiled (the right operand of `false && x`):
+    /// parser notices in them are not reported.
+    pub(crate) dead_spans: Vec<(u32, u32)>,
 }
 
 /// Compiles a parsed file. `eval_scope` is true for `eval()` code.
@@ -275,6 +278,7 @@ pub fn compile_program<'a>(
         in_chain: false,
         in_const_stmt: false,
         nullsafe_jumps: Vec::new(),
+        dead_spans: Vec::new(),
     };
     if let Some((cls, parent)) = eval_class {
         c.class = Some(ClassCtx {
@@ -314,6 +318,21 @@ pub fn compile_program<'a>(
         c.check_namespaces(prog.stmts)?;
         c.top_stmts(prog.stmts, &mut hoisted, &mut classes)
     })();
+    // Code PHP does not compile reports no deprecations (observed on PHP
+    // 8.5: `assert(0 && ...)` in Zend/tests/assert/expect_015.phpt).
+    if !c.dead_spans.is_empty() {
+        let dead = std::mem::take(&mut c.dead_spans);
+        let mut i = 0;
+        let parser = prog.notices.len();
+        c.notices.retain(|_| {
+            let keep = i >= parser || {
+                let o = prog.notices[i].offset;
+                !dead.iter().any(|&(s, e)| o >= s && o < e)
+            };
+            i += 1;
+            keep
+        });
+    }
     hrh::order(&mut c.notices);
     if let Err(mut e) = r {
         e.notices = std::mem::take(&mut c.notices);
@@ -526,7 +545,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Resolves a class name (PHP manual: Name resolution rules).
-    pub(crate) fn resolve_class(&self, n: &Name<'a>) -> Vec<u8> {
+    pub(crate) fn resolve_class(&self, n: &Name<'_>) -> Vec<u8> {
         match n.kind {
             NameKind::FullyQualified => n.name.to_vec(),
             NameKind::Relative => self.qualify(n.name),
@@ -549,7 +568,7 @@ impl<'a> Compiler<'a> {
 
     /// Resolves a function name: the qualified name, and the global fallback
     /// for unqualified names inside a namespace.
-    pub(crate) fn resolve_func(&self, n: &Name<'a>) -> (Vec<u8>, Option<Vec<u8>>) {
+    pub(crate) fn resolve_func(&self, n: &Name<'_>) -> (Vec<u8>, Option<Vec<u8>>) {
         match n.kind {
             NameKind::FullyQualified => (n.name.to_vec(), None),
             NameKind::Relative => (self.qualify(n.name), None),
@@ -567,7 +586,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    pub(crate) fn resolve_const_name(&self, n: &Name<'a>) -> (Vec<u8>, Option<Vec<u8>>) {
+    pub(crate) fn resolve_const_name(&self, n: &Name<'_>) -> (Vec<u8>, Option<Vec<u8>>) {
         match n.kind {
             NameKind::FullyQualified => (n.name.to_vec(), None),
             NameKind::Relative => (self.qualify(n.name), None),

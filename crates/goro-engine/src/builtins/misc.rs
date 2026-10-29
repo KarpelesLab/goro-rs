@@ -473,6 +473,11 @@ fn assert_callback(vm: &mut Vm) -> Value {
 /// assert). `desc` is the description argument (a string or Throwable).
 pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
     let cb = assert_callback(vm);
+    let bail = ini_flag(vm, b"assert.bail") != 0;
+    // An exception from the callback is thrown after the warning, or
+    // reported as an uncaught warning with assert.bail (tests
+    // Zend/tests/assert/gh16293_001.phpt, gh16293_002.phpt).
+    let mut pending = None;
     if !cb.is_null() && !vm.is_callable_value(&cb, false) {
         // Test assert/assert_variation.phpt.
         let why = vm.callable_error(&cb);
@@ -480,21 +485,28 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
             Value::Str(s) => s.to_string_lossy(),
             _ => "Array".to_string(),
         };
-        return vm.throw("Error", &format!("Invalid callback {}, {}", shown, why));
-    }
-    if !cb.is_null() {
+        let r = vm.throw("Error", &format!("Invalid callback {}, {}", shown, why));
+        match r {
+            Err(Unwind::Throw(o)) if bail => pending = Some(o),
+            other => return other,
+        }
+    } else if !cb.is_null() {
         let file = vm.cur_file();
         let line = vm.cur_line() as i64;
         let d = match &desc {
             Value::Object(_) => Value::Null,
             other => other.clone(),
         };
-        vm.call_value(
+        match vm.call_value(
             &cb,
             vec![Value::Str(file), Value::Int(line), Value::Null, d],
-        )?;
+        ) {
+            Err(Unwind::Throw(o)) if bail => pending = Some(o),
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
     }
-    if ini_flag(vm, b"assert.exception") != 0 {
+    if pending.is_none() && ini_flag(vm, b"assert.exception") != 0 {
         return match desc {
             Value::Object(o) => Err(Unwind::Throw(o)),
             Value::Null => {
@@ -502,8 +514,11 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
                 Err(Unwind::Throw(e))
             }
             other => {
+                // The message keeps its bytes (non-UTF-8 string literals
+                // in the exported assertion).
                 let msg = vm.to_php_str(&other)?;
-                let e = vm.create_exception("AssertionError", &msg.to_string_lossy(), 0)?;
+                let e = vm.create_exception("AssertionError", "", 0)?;
+                vm.set_prop_raw(&e, b"message", Value::Str(msg));
                 Err(Unwind::Throw(e))
             }
         };
@@ -521,7 +536,10 @@ pub(crate) fn assert_failed(vm: &mut Vm, desc: Value) -> R<Value> {
             vm.warn(&format!("assert(): {} failed", m.to_string_lossy()))?;
         }
     }
-    if ini_flag(vm, b"assert.bail") != 0 {
+    if bail {
+        if let Some(o) = pending {
+            vm.warn_uncaught(&o);
+        }
         vm.exit_status = 255;
         return Err(Unwind::Exit);
     }

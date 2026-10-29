@@ -41,6 +41,7 @@ pub mod math;
 pub mod mbstring;
 pub mod misc;
 pub mod net;
+pub mod opcache;
 pub mod openssl;
 pub mod output;
 pub mod password;
@@ -149,6 +150,7 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlreader::MODULE,
         &simplexml::MODULE,
         &openssl::MODULE,
+        &opcache::MODULE,
         &session::MODULE,
         &session::rewrite::MODULE,
         &gd::MODULE,
