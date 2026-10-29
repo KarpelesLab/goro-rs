@@ -1338,6 +1338,13 @@ impl<'a> Compiler<'a> {
     }
 
     fn foreach_stmt(&mut self, f: &'a ForeachStmt<'a>, line: u32) -> CResult<()> {
+        // Test tests/lang/foreachLoop.006 (PHP's grammar accepts the form,
+        // the compiler rejects it).
+        if f.key_by_ref
+            && let Some(k) = &f.key
+        {
+            return self.err("Key element cannot be a reference", k.span.line);
+        }
         let iter = self.hidden_pair();
         // `as [&$x, $y]` iterates by reference (test Zend/tests/list/
         // list_reference_004).
