@@ -1175,6 +1175,7 @@ impl<'a> Compiler<'a> {
                 if let Some(t) = literal_truth(left)
                     && t == (op == BinaryOp::BoolOr)
                 {
+                    self.dead_spans.push((right.span.start, right.span.end));
                     let d = self.tmp();
                     let c = self.add_const(Value::Bool(t));
                     self.emit(Op::Copy { dst: d, src: c });
@@ -1798,16 +1799,20 @@ impl<'a> Compiler<'a> {
         if lname == b"assert"
             || (fb.as_deref().map(|f| f.eq_ignore_ascii_case(b"assert")) == Some(true))
         {
-            // assert() with zend.assertions: the message includes the
-            // source text of the expression (handled by the function, which
-            // receives the text as a hidden argument).
+            // assert() with zend.assertions: without a description, the
+            // message is the call exported from the AST (PHP manual:
+            // assert; tests Zend/tests/assert/expect_015.phpt,
+            // named_params/assert.phpt), passed as a hidden argument (a
+            // named one after a named argument). The message ends at a NUL
+            // byte (observed on PHP 8.5).
             if let Some(first) = args.as_slice().first()
                 && args.as_slice().len() == 1
-                && first.name.is_none()
+                && !first.unpack
             {
-                let text =
-                    &self.src[first.value.span.start as usize..first.value.span.end as usize];
-                let desc = format!("assert({})", String::from_utf8_lossy(text));
+                let mut desc = goro_syntax::export::call(self.src, b"assert", args);
+                if let Some(i) = desc.iter().position(|&c| c == 0) {
+                    desc.truncate(i);
+                }
                 let k = self.name_pair(b"assert");
                 let cache = self.cache();
                 self.emit(Op::InitFCall {
@@ -1819,9 +1824,16 @@ impl<'a> Compiler<'a> {
                 self.f.call_depth += 1;
                 let v = self.expr(&first.value)?;
                 self.free(v);
-                self.emit(Op::Send { src: v, arg: 0 });
-                let dc = self.str_const(desc.as_bytes());
-                self.emit(Op::Send { src: dc, arg: 1 });
+                let dc = self.str_const(&desc);
+                if let Some(n) = &first.name {
+                    let name = self.str_const(n.name);
+                    self.emit(Op::SendNamed { src: v, name });
+                    let name = self.str_const(b"description");
+                    self.emit(Op::SendNamed { src: dc, name });
+                } else {
+                    self.emit(Op::Send { src: v, arg: 0 });
+                    self.emit(Op::Send { src: dc, arg: 1 });
+                }
                 self.f.call_depth -= 1;
                 let d = self.dst(hint);
                 self.f.line = line;

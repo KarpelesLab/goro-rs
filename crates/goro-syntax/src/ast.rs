@@ -118,6 +118,8 @@ pub struct Notice {
     pub kind: NoticeKind,
     pub message: String,
     pub line: u32,
+    /// Byte offset of the token being parsed when it was found.
+    pub offset: u32,
 }
 
 // ===== statements =====

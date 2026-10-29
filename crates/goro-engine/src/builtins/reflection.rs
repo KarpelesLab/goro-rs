@@ -5262,7 +5262,36 @@ fn a_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some((info, _, scope, _)) = this_attr(a) else {
         return Ok(Value::Null);
     };
-    let args = attr_args(vm, &info, scope)?;
+    // Arguments that are not compile-time values show as code, unevaluated
+    // (tests ext/reflection/tests/ReflectionAttribute_toString.phpt,
+    // gh11937_1.phpt).
+    let args = if info.arg_texts.len() == info.args.len() {
+        let mut v = Vec::new();
+        for ((n, c), t) in info.args.iter().zip(&info.arg_texts) {
+            let mut out = Vec::new();
+            match c {
+                ConstExpr::Value(x) => {
+                    let _ = vm.var_export_into(&mut out, x, 0);
+                }
+                ConstExpr::Code(_) => out.extend_from_slice(t.as_bytes()),
+            }
+            v.push((n.clone(), out));
+        }
+        v
+    } else {
+        let arr = attr_args(vm, &info, scope)?;
+        let mut v = Vec::new();
+        for (k, x) in arr.iter() {
+            let mut out = Vec::new();
+            let _ = vm.var_export_into(&mut out, &x.clone(), 0);
+            let n = match k {
+                goro_runtime::KeyRef::Str(s) => Some(s.clone()),
+                _ => None,
+            };
+            v.push((n, out));
+        }
+        v
+    };
     let mut s = format!(
         "Attribute [ {} ]",
         info.name
@@ -5273,18 +5302,16 @@ fn a_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !args.is_empty() {
         s.push_str(" {\n");
         s.push_str(&format!("  - Arguments [{}] {{\n", args.len()));
-        for (i, (k, v)) in args.iter().enumerate() {
-            let mut out = Vec::new();
-            let _ = vm.var_export_into(&mut out, &v.clone(), 0);
+        for (i, (k, out)) in args.iter().enumerate() {
             let key = match k {
-                goro_runtime::KeyRef::Str(s) => format!("{} = ", s.to_string_lossy()),
-                _ => String::new(),
+                Some(s) => format!("{} = ", s.to_string_lossy()),
+                None => String::new(),
             };
             s.push_str(&format!(
                 "    Argument #{} [ {}{} ]\n",
                 i,
                 key,
-                String::from_utf8_lossy(&out)
+                String::from_utf8_lossy(out)
             ));
         }
         s.push_str("  }\n}");

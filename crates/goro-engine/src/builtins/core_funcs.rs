@@ -1840,6 +1840,15 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return Ok(Value::Bool(false));
         }
     }
+    // zend.assertions can't switch to or from -1 at run time (tests
+    // Zend/tests/assert/expect_016.phpt, expect_017.phpt).
+    if k.as_bytes() == b"zend.assertions" {
+        let to = goro_runtime::convert::str_to_int(&v) == -1;
+        if to != (goro_runtime::convert::str_to_int(&old) == -1) {
+            vm.warn("zend.assertions may be completely enabled or disabled only in php.ini")?;
+            return Ok(Value::Bool(false));
+        }
+    }
     // max_memory_limit is a startup-only setting; memory_limit is a
     // quantity capped by it, and can't go below the memory in use (tests
     // tests/basic/gh17951_runtime_change_*; observed on PHP 8.5).
