@@ -205,6 +205,17 @@ pub fn run(opts: CgiOptions) -> i32 {
     {
         let _ = std::io::stdin().take(n as u64).read_to_end(&mut body);
     }
+    if body.len() > POST_MEMORY_LIMIT && !can_spool(&vm) {
+        crate::request_vars::startup_warning(
+            &mut vm,
+            "Unable to create temporary file, Check permissions in temporary files directory.",
+        );
+        crate::request_vars::startup_warning(
+            &mut vm,
+            "POST data can't be buffered; all data discarded",
+        );
+        body.clear();
+    }
 
     // $_SERVER: the CGI environment, then what PHP adds.
     let s = |v: &[u8]| Value::Str(PhpStr::from(v.to_vec()));
@@ -324,12 +335,7 @@ pub fn run(opts: CgiOptions) -> i32 {
     if ini_on(&vm, b"zlib.output_compression", false)
         && vm.functions.contains_key(&PhpStr::from("ob_gzhandler"))
     {
-        vm.out.buffers.push(crate::vm::output::ObBuffer::new(
-            Some(Value::Str(PhpStr::from("ob_gzhandler"))),
-            0,
-            crate::vm::output::PHP_OUTPUT_HANDLER_STDFLAGS,
-            PhpStr::from("zlib output compression"),
-        ));
+        crate::builtins::zlib::start_output_compression(&mut vm);
     }
     crate::builtins::output::start_ini_handler(&mut vm);
     let status = vm.run_script(&src, &path);
@@ -342,6 +348,32 @@ pub fn run(opts: CgiOptions) -> i32 {
 }
 
 const POWERED_BY: &[u8] = b"X-Powered-By: PHP/8.5.4";
+
+/// A request body larger than this goes to a temporary file in
+/// sys_temp_dir; when none can be made, the body is discarded with
+/// warnings (test sapi/cgi/tests/bug69487.phpt, a 16387-byte body).
+const POST_MEMORY_LIMIT: usize = 16384;
+
+/// Whether a temporary file can be made for the body.
+fn can_spool(vm: &Vm) -> bool {
+    let dir = vm
+        .get_ini(b"sys_temp_dir")
+        .filter(|d| !d.is_empty())
+        .map(|d| PathBuf::from(std::ffi::OsStr::from_bytes(&d)))
+        .unwrap_or_else(std::env::temp_dir);
+    let p = dir.join(format!(".goro-post-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&p);
+            true
+        }
+        Err(e) => e.kind() == std::io::ErrorKind::AlreadyExists,
+    }
+}
 
 /// The response as the settings make it, unless already sent:
 /// X-Powered-By (expose_php) and the default Content-type

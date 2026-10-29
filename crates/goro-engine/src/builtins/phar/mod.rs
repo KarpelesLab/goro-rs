@@ -5,6 +5,7 @@
 //! manual, tests ext/phar/tests and observations on PHP 8.5.
 
 mod classes;
+mod web;
 mod wrapper;
 
 use std::cell::RefCell;
@@ -71,7 +72,10 @@ fn path_hook(vm: &mut Vm, p: &[u8]) -> Option<Vec<u8>> {
         cand.extend_from_slice(p);
         let cand = norm_inner(&cand);
         let l = s.borrow();
-        if l.a.get(&cand).is_some() || l.a.is_dir(&cand) && !cand.is_empty() {
+        if l.a.get(&cand).is_some()
+            || l.a.is_dir(&cand) && !cand.is_empty()
+            || wrapper::mounted(&l.mounts, &cand).is_some()
+        {
             let mut u = b"phar://".to_vec();
             u.extend_from_slice(&key);
             u.push(b'/');
@@ -182,6 +186,8 @@ pub struct PharState {
     pub explicit: std::collections::HashSet<Vec<u8>>,
     /// Phar::interceptFileFuncs() was called.
     pub intercept: bool,
+    /// The $_SERVER entries Phar::mungServer() named.
+    pub mung: Vec<Vec<u8>>,
     /// php.ini turned phar.readonly / phar.require_hash off.
     pub sys_readonly_off: bool,
     pub sys_require_hash_off: bool,

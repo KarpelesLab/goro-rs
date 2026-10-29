@@ -69,7 +69,7 @@ pub(crate) fn read_entry(vm: &mut Vm, s: &Shared, inner: &[u8]) -> Result<Vec<u8
 }
 
 /// The external file mounted at `inner` (or under a mounted directory).
-fn mounted(mounts: &[(Vec<u8>, Vec<u8>)], inner: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn mounted(mounts: &[(Vec<u8>, Vec<u8>)], inner: &[u8]) -> Option<Vec<u8>> {
     for (m, ext) in mounts {
         if inner == &m[..] {
             return Some(ext.clone());
