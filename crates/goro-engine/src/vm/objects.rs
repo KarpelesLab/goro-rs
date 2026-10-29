@@ -382,7 +382,7 @@ impl Vm {
             }
             PropLookup::Hidden(p) => {
                 if self.has_magic_get(&cls) && !self.guarded(o, name, 0) {
-                    return self.magic_get(o, &cls, name);
+                    return self.magic_get_quiet(o, &cls, name, quiet);
                 }
                 self.throw(
                     "Error",
@@ -414,7 +414,7 @@ impl Vm {
                     Some(v) => Ok(v.into_deref()),
                     None => {
                         if self.has_magic_get(&cls) && !self.guarded(o, name, 0) {
-                            return self.magic_get(o, &cls, name);
+                            return self.magic_get_quiet(o, &cls, name, quiet);
                         }
                         if let Some(h) = cls.native.dyn_prop
                             && let Some(r) = h(self, o, name, crate::class::DynPropOp::Read)
@@ -454,6 +454,19 @@ impl Vm {
         self.prop_guards
             .iter()
             .any(|(h, n, k)| *h == o.handle() && n == name && *k == kind)
+    }
+
+    /// `$o->p ?? x` asks `__isset` before `__get` (tests Zend/tests/
+    /// magic_methods/bug75420*, bug71359).
+    fn magic_get_quiet(&mut self, o: &ObjRef, cls: &Class, name: &PhpStr, quiet: bool) -> R<Value> {
+        if quiet
+            && cls.magic.borrow().isset.is_some()
+            && !self.guarded(o, name, 2)
+            && !self.magic_isset(o, cls, name, false)?
+        {
+            return Ok(Value::Null);
+        }
+        self.magic_get(o, cls, name)
     }
 
     fn magic_get(&mut self, o: &ObjRef, cls: &Class, name: &PhpStr) -> R<Value> {
