@@ -336,6 +336,15 @@ fn ob_iconv_handler(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let r = ic::iconv(&from, &to, &s, &mut d);
     diags(vm, a, d)?;
+    // the response says which charset it is in (test
+    // ext/iconv/tests/gh7953.phpt: also when ob_clean() is the only call)
+    if vm.out.sapi.web() && !vm.out.sapi.sent {
+        let mut h = b"Content-Type: ".to_vec();
+        h.extend_from_slice(&mime);
+        h.extend_from_slice(b"; charset=");
+        h.extend_from_slice(&to);
+        super::headers::add_header(vm, &h, true, 0)?;
+    }
     Ok(r.map_or(Value::Str(s), sv))
 }
 

@@ -130,7 +130,7 @@ fn limit_vars(vm: &mut Vm, data: &[u8], seps: &[u8]) -> Vec<u8> {
 }
 
 /// A "PHP Request Startup" warning.
-fn startup_warning(vm: &mut Vm, msg: &str) {
+pub(crate) fn startup_warning(vm: &mut Vm, msg: &str) {
     let _ = vm.raise_at(
         crate::vm::errors::E_WARNING,
         &format!("PHP Request Startup: {msg}"),
