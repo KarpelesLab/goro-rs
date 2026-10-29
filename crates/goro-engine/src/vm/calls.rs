@@ -2216,12 +2216,15 @@ impl Vm {
             (Ok(_), true) if self.err.defer_depth == 0 => Err(self.err.deferred.take().unwrap()),
             (r, _) => r,
         };
+        // ext/pcntl: signals queued while async delivery is on run here,
+        // with the call still on the stack (test Zend/tests/fibers/
+        // signal-async.phpt).
+        let r = match r {
+            Ok(v) => crate::builtins::pcntl::after_native_call(self).map(|_| v),
+            e => e,
+        };
         self.ex.native_calls.pop();
         self.give_args_vec(args);
-        // ext/pcntl: signals queued while async delivery is on run here.
-        if r.is_ok() {
-            crate::builtins::pcntl::after_native_call(self)?;
-        }
         r
     }
 

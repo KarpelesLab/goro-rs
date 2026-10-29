@@ -487,6 +487,10 @@ pub fn dispatch(vm: &mut Vm) -> R<()> {
     PENDING.store(false, Ordering::Release);
     ASYNC_PENDING.store(false, Ordering::Release);
     let mut r = Ok(());
+    // Handlers can't switch fibers, as in tick functions (tests
+    // Zend/tests/fibers/signal-async.phpt, signal-dispatch.phpt).
+    let in_tick = vm.in_tick;
+    vm.in_tick = true;
     while let Some(info) = pop_signal() {
         let h = vm.ext::<Handlers>().map.get(&info.signo).cloned();
         let Some(h) = h else { continue };
@@ -499,6 +503,7 @@ pub fn dispatch(vm: &mut Vm) -> R<()> {
             break;
         }
     }
+    vm.in_tick = in_tick;
     DISPATCHING.store(false, Ordering::Release);
     r
 }
