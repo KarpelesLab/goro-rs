@@ -1576,6 +1576,16 @@ fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub(crate) fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
     let mut out = Vec::new();
+    // A plain file: room for what is left at once, so the buffer doesn't
+    // double past it (memory_limit counts the peak; test
+    // ext/gd/tests/bug72339).
+    if let Backing::File(f) = &mut s.backing
+        && s.read_filters.is_empty()
+        && let (Ok(m), Ok(p)) = (f.metadata(), f.stream_position())
+        && m.is_file()
+    {
+        let _ = out.try_reserve_exact((m.len().saturating_sub(p) as usize) + 1);
+    }
     let mut buf = [0u8; 8192];
     loop {
         match s.read_some(vm, &mut buf) {

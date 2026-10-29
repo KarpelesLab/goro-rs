@@ -100,8 +100,15 @@ const SET_ORDER: i64 = 2;
 #[derive(Default)]
 struct PcreState {
     cache: HashMap<PhpStr, Rc<Regex>>,
+    /// Heap the cached compiled patterns take (as the allocator counts it).
+    cache_bytes: usize,
     last_error: i32,
 }
+
+/// The compiled-pattern cache holds up to 4096 patterns (PHP manual:
+/// PCRE; test ext/pcre/tests/cache_limit) and, since memory_limit counts
+/// it, up to this much heap.
+const CACHE_MAX_BYTES: usize = 16 << 20;
 
 fn set_error(vm: &mut Vm, code: i32) {
     vm.ext::<PcreState>().last_error = code;
@@ -112,13 +119,17 @@ fn regex(vm: &mut Vm, a: &Args, pat: &PhpStr) -> R<Option<Rc<Regex>>> {
     if let Some(r) = vm.ext::<PcreState>().cache.get(pat) {
         return Ok(Some(r.clone()));
     }
+    let before = goro_runtime::mem::used();
     match php_compile(pat) {
         Ok(re) => {
             let re = Rc::new(re);
+            let size = goro_runtime::mem::used().saturating_sub(before);
             let st = vm.ext::<PcreState>();
-            if st.cache.len() >= 4096 {
+            if st.cache.len() >= 4096 || st.cache_bytes + size > CACHE_MAX_BYTES {
                 st.cache.clear();
+                st.cache_bytes = 0;
             }
+            st.cache_bytes += size;
             st.cache.insert(pat.clone(), re.clone());
             Ok(Some(re))
         }
