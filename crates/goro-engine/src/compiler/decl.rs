@@ -3031,6 +3031,7 @@ pub fn parse_native_sig(
         in_chain: false,
         in_const_stmt: false,
         nullsafe_jumps: Vec::new(),
+        dead_spans: Vec::new(),
     };
     c.f.method_name = PhpStr::new(fd.name.name);
     let spec = FnSpec {
