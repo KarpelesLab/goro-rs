@@ -748,6 +748,15 @@ impl Vm {
             if f.flags & frame_flags::GLOBAL != 0 {
                 continue;
             }
+            // A constant expression evaluated by another one shows only the
+            // outer "[constant expression]" frame (test
+            // Zend/tests/constants/bug41633_3).
+            if code.flags & crate::bytecode::fflags::CONST_EXPR != 0
+                && i > 0
+                && ex.frames[i - 1].code().flags & crate::bytecode::fflags::CONST_EXPR != 0
+            {
+                continue;
+            }
             // Call site: in the caller frame, unless called from a native
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =

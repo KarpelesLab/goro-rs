@@ -115,6 +115,8 @@ impl Vm {
             fold_constants: true,
             const_cache: Vec::new(),
             halt_offsets: HashMap::new(),
+            const_eval_names: Vec::new(),
+            const_fetch_spelling: None,
             halt_shift: None,
             dump_stack: Vec::new(),
             weakrefs: HashMap::new(),

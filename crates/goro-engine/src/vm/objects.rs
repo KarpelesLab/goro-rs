@@ -2420,7 +2420,15 @@ impl Vm {
                 &format!("Undefined constant {}::{}", w, n.to_string_lossy()),
             );
         }
-        self.class_constant(cls, n)
+        let spelled = match class {
+            ClassSpec::SelfRef => Some("self"),
+            ClassSpec::Parent => Some("parent"),
+            _ => None,
+        };
+        let saved = std::mem::replace(&mut self.const_fetch_spelling, spelled);
+        let r = self.class_constant(cls, n);
+        self.const_fetch_spelling = saved;
+        r
     }
 
     /// `Cls::NAME`.
@@ -2499,19 +2507,29 @@ impl Vm {
         match st {
             ConstState::Value(v) => Ok(v),
             ConstState::Evaluating => {
-                let cn = unsafe { (*c.class).name.dname() };
+                // The error names the innermost constant being evaluated,
+                // as its fetch wrote it ("self::B"; tests Zend/tests/
+                // constants/bug41633_3, array_unpack/classes).
+                let name = match self.const_eval_names.last() {
+                    Some(n) => n.clone(),
+                    None => format!("{}::{}", unsafe { (*c.class).name.dname() }, c.name.dname()),
+                };
                 self.throw(
                     "Error",
-                    &format!(
-                        "Cannot declare self-referencing constant {}::{}",
-                        cn,
-                        c.name.dname()
-                    ),
+                    &format!("Cannot declare self-referencing constant {}", name),
                 )
             }
             ConstState::Pending(ce) => {
                 *c.value.borrow_mut() = ConstState::Evaluating;
+                let spelled = self.const_fetch_spelling.take();
+                let cn = match spelled {
+                    Some(s) => s.to_string(),
+                    None => unsafe { (*c.class).name.dname() }.to_string(),
+                };
+                self.const_eval_names
+                    .push(format!("{}::{}", cn, c.name.dname()));
                 let r = self.eval_const_expr(&ce, c.class);
+                self.const_eval_names.pop();
                 match r {
                     Ok(v) => {
                         if let Some(t) = &c.ty {
@@ -2704,6 +2722,23 @@ impl Vm {
     pub fn class_defaults(&mut self, cls: &Rc<Class>) -> R<Vec<Value>> {
         if let Some(d) = cls.defaults.get() {
             return Ok(d.clone());
+        }
+        // A class's first instantiation resolves all its constants and
+        // static property defaults (observed on PHP 8.5: `new` of a class
+        // with an undefined constant in a constant throws; test
+        // ext/opcache/tests/invalid_new_dce).
+        if cls.kind == crate::class::ClassKind::Class {
+            let pending: Vec<Rc<crate::class::ClassConst>> = cls
+                .consts
+                .borrow()
+                .iter()
+                .filter(|c| matches!(*c.value.borrow(), ConstState::Pending(_)))
+                .cloned()
+                .collect();
+            for c in pending {
+                self.eval_class_const(&c)?;
+            }
+            self.ensure_statics(cls)?;
         }
         let props: Vec<Rc<PropInfo>> = cls.props.borrow().clone();
         let mut v = vec![Value::Null; cls.num_slots.get() as usize];
