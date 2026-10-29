@@ -948,7 +948,11 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     match vm.lookup_constant(&name)? {
         Some(v) => {
-            vm.const_deprecated(&name)?;
+            // #[\Deprecated] constants warn here too (test Zend/tests/
+            // constants/const_deprecation.phpt).
+            if vm.const_attrs.is_empty() || !vm.user_const_deprecated(&name)? {
+                vm.const_deprecated(&name)?;
+            }
             Ok(v)
         }
         None => vm.throw(
