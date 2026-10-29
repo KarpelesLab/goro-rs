@@ -205,9 +205,16 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let name = self.name_from(&t);
                 let (args, has_args) = if self.at(T::LParen) {
+                    let pstart = self.pos;
                     match self.arguments()? {
                         Args::List(v) => (v, true),
-                        Args::FirstClassCallable => (&[][..], true),
+                        Args::FirstClassCallable => {
+                            // Test Zend/tests/first_class_callable/
+                            // first_class_callable_assert2.phpt.
+                            let sp = self.span_from(pstart);
+                            self.compile_error("Cannot create Closure as attribute argument", sp);
+                            (&[][..], true)
+                        }
                     }
                 } else {
                     (&[][..], false)
