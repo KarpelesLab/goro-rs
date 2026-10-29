@@ -78,7 +78,26 @@ pub(crate) fn mb_http_input(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let c = if t.len() == 1 { t.first() } else { None };
     match c.map(|c| c.to_ascii_uppercase()) {
-        Some(b'G' | b'P' | b'C' | b'S') => Ok(last_input(vm)),
+        Some(c @ (b'G' | b'P' | b'C')) => {
+            let i = match c {
+                b'G' => 0,
+                b'P' => 1,
+                _ => 2,
+            };
+            match st(vm).request_input[i] {
+                Some(Output::Pass) => Ok(Value::from("pass")),
+                Some(Output::Enc(e)) => Ok(Value::from(e.name())),
+                None => Ok(last_input(vm)),
+            }
+        }
+        Some(b'S') => Ok(last_input(vm)),
+        Some(b'I' | b'L') if st(vm).http_input_pass => {
+            if c.is_some_and(|c| c.eq_ignore_ascii_case(&b'I')) {
+                Ok(Value::Array(PhpArray::from_values([Value::from("pass")])))
+            } else {
+                Ok(Value::from("pass"))
+            }
+        }
         Some(b'I') => {
             let l = st(vm).http_input.clone();
             Ok(names_array(&l))
@@ -350,7 +369,8 @@ pub(crate) fn mb_parse_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     st(vm).last_input = Some(from);
-    let arr = super::super::string::parse_query(&raw, &seps);
+    let depth = super::super::string::nesting_limit(vm);
+    let arr = super::super::string::parse_query(&raw, &seps, depth);
     fn conv(vm: &mut Vm, arr: &PhpArray, to: Encoding, from: Encoding) -> PhpArray {
         let mut out = PhpArray::new();
         for (key, v) in arr.iter() {

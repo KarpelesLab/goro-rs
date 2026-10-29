@@ -54,6 +54,11 @@ pub struct Limits {
     /// max_multipart_body_parts; negative: max_input_vars +
     /// max_file_uploads (PHP manual: max_multipart_body_parts).
     pub max_parts: i64,
+    /// The lead bytes of a multibyte input encoding whose second bytes
+    /// may be `\\` or a quote (Shift_JIS...): with
+    /// mbstring.encoding_translation, a quoted parameter keeps them
+    /// (test tests/basic/029.phpt).
+    pub mb_lead: Option<fn(u8) -> bool>,
 }
 
 fn size_ini(vm: &Vm, k: &[u8], d: i64) -> i64 {
@@ -70,6 +75,7 @@ impl Limits {
             max_file_uploads: size_ini(vm, b"max_file_uploads", 20),
             max_input_vars: size_ini(vm, b"max_input_vars", 1000),
             max_parts: size_ini(vm, b"max_multipart_body_parts", -1),
+            mb_lead: None,
         }
     }
 
@@ -111,7 +117,12 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, &'static str> {
 }
 
 /// A parameter of a Content-Disposition value (`name="x"`).
+#[cfg(test)]
 fn disposition_param(v: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+    disposition_param_mb(v, key, None)
+}
+
+fn disposition_param_mb(v: &[u8], key: &[u8], lead: Option<fn(u8) -> bool>) -> Option<Vec<u8>> {
     let mut i = 0;
     while i < v.len() {
         while i < v.len() && (v[i] == b';' || v[i].is_ascii_whitespace()) {
@@ -134,6 +145,11 @@ fn disposition_param(v: &[u8], key: &[u8]) -> Option<Vec<u8>> {
             let q = v[i];
             i += 1;
             while i < v.len() && v[i] != q {
+                if lead.is_some_and(|f| f(v[i])) && i + 1 < v.len() {
+                    val.extend_from_slice(&v[i..i + 2]);
+                    i += 2;
+                    continue;
+                }
                 if v[i] == b'\\' && i + 1 < v.len() && (v[i + 1] == q || v[i + 1] == b'\\') {
                     i += 1;
                 }
@@ -296,8 +312,8 @@ pub fn parse(
             ));
         }
         let disposition = disposition.unwrap_or_default();
-        let name = disposition_param(&disposition, b"name");
-        let filename = disposition_param(&disposition, b"filename");
+        let name = disposition_param_mb(&disposition, b"name", limits.mb_lead);
+        let filename = disposition_param_mb(&disposition, b"filename", limits.mb_lead);
         if name.is_none() && filename.is_none() {
             return Err("File Upload Mime headers garbled".into());
         }
@@ -335,7 +351,13 @@ pub fn parse(
                 if log.progress.is_none() && log.armed.as_deref() == Some(&name[..]) {
                     log.progress = Some(content.to_vec());
                 }
-                register_variable(post, &name, Value::Str(PhpStr::from(content.to_vec())));
+                let depth = crate::builtins::string::nesting_limit(vm);
+                register_variable(
+                    post,
+                    &name,
+                    Value::Str(PhpStr::from(content.to_vec())),
+                    depth,
+                );
             }
             Some(_) if !uploads_on => {}
             Some(_) if name.as_ref().is_some_and(|n| !well_formed(n)) => {}
@@ -410,7 +432,7 @@ pub fn parse(
                             n.extend_from_slice(k);
                             n.push(b']');
                             n.extend_from_slice(rest);
-                            register_variable(files, &n, v);
+                            register_variable(files, &n, v, -1);
                         }
                     }
                     None => {

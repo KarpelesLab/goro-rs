@@ -1817,7 +1817,19 @@ fn parse_url(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// Registers `name=value` into `arr` as PHP registers request variables
 /// (PHP manual: Variables From External Sources): `a[b][]` nesting, `.`
 /// and space in the base name become `_`, an unmatched `[` too.
-pub(crate) fn register_variable(arr: &mut PhpArray, name: &[u8], value: Value) {
+/// max_input_nesting_level (PHP manual: Description of core php.ini
+/// directives): how many `[...]` groups a variable name may have.
+pub(crate) fn nesting_limit(vm: &Vm) -> i64 {
+    vm.get_ini(b"max_input_nesting_level")
+        .map(|v| goro_runtime::convert::str_to_int(v.trim_ascii()))
+        .unwrap_or(64)
+}
+
+/// Registers a request (or parse_str()) variable. A name with more than
+/// `max_depth` index groups removes the variable it names instead (tests
+/// tests/basic/bug61000.phpt, ext/mbstring/tests/bug63447_003.phpt;
+/// observed on PHP 8.5 with parse_str()).
+pub(crate) fn register_variable(arr: &mut PhpArray, name: &[u8], value: Value, max_depth: i64) {
     // Leading spaces are dropped.
     let mut name = name;
     while let Some((&b' ', rest)) = name.split_first() {
@@ -1861,13 +1873,18 @@ pub(crate) fn register_variable(arr: &mut PhpArray, name: &[u8], value: Value) {
         }
     }
     let _ = malformed_tail;
+    // spaces, dots and (after an unmatched one) brackets become '_' (test
+    // tests/basic/bug78236.phpt; observed on PHP 8.5: "a[b[c" is "a_b_c")
     for c in base.iter_mut() {
-        if *c == b' ' || *c == b'.' {
+        if matches!(*c, b' ' | b'.' | b'[') {
             *c = b'_';
         }
     }
-    // Once the first '[' is converted, later '.' stay (handled above).
     let key = Key::from_bytes(&base);
+    if max_depth >= 0 && indexes.len() as i64 > max_depth {
+        arr.remove(key.as_ref());
+        return;
+    }
     if indexes.is_empty() {
         arr.insert(key, value);
         return;
@@ -1910,7 +1927,7 @@ pub(crate) fn register_variable(arr: &mut PhpArray, name: &[u8], value: Value) {
 }
 
 /// Parses a query string into an array (parse_str()).
-pub(crate) fn parse_query(s: &[u8], seps: &[u8]) -> PhpArray {
+pub(crate) fn parse_query(s: &[u8], seps: &[u8], max_depth: i64) -> PhpArray {
     let mut arr = PhpArray::new();
     for part in s.split(|c| seps.contains(c)) {
         if part.is_empty() {
@@ -1922,7 +1939,7 @@ pub(crate) fn parse_query(s: &[u8], seps: &[u8]) -> PhpArray {
         };
         let name = std_ext::url::urldecode(n);
         let val = std_ext::url::urldecode(v);
-        register_variable(&mut arr, &name, sv(val));
+        register_variable(&mut arr, &name, sv(val), max_depth);
     }
     arr
 }
@@ -1931,7 +1948,7 @@ fn parse_str(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let seps = vm
         .get_ini(b"arg_separator.input")
         .unwrap_or_else(|| PhpStr::from("&"));
-    let arr = parse_query(a.bytes(0), &seps);
+    let arr = parse_query(a.bytes(0), &seps, nesting_limit(vm));
     a.set_ref(1, Value::Array(arr));
     Ok(Value::Null)
 }
