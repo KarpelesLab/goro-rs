@@ -76,10 +76,19 @@ fn main() {
     let code = std::thread::Builder::new()
         .name("php".into())
         .stack_size(STACK_SIZE)
-        .spawn(move || cli(args))
-        .expect("cannot start engine thread")
-        .join()
-        .unwrap_or(255);
+        .spawn(move || {
+            let pid = std::process::id();
+            let code = cli(args);
+            // A child of pcntl_fork() has no main thread to return to.
+            if std::process::id() != pid {
+                std::process::exit(code);
+            }
+            code
+        })
+        .expect("cannot start engine thread");
+    // Process signals go to the engine thread (ext/pcntl handlers).
+    goro_engine::builtins::pcntl::block_signals_in_this_thread();
+    let code = code.join().unwrap_or(255);
     std::process::exit(code);
 }
 

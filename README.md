@@ -129,6 +129,20 @@ the XML extensions each pass 87-100% of their tests that run.
   pattern tried (~3.6k compressed outputs, ~3.6k behaviour cases recorded
   from PHP 8.5); compression at 1.0-1.3x and decompression at 1.3-1.5x
   PHP's throughput.
+- ext/session (engine module): the session_* functions, the files save
+  handler (save_path depth and mode, flock locking, gc, lazy write), user
+  handlers (SessionHandler and the SessionHandler* interfaces, PHP's
+  callback return rules and call order), the php, php_binary and
+  php_serialize serializers sharing one value table, strict mode, ID
+  generation, the cookie and cache limiter headers, the 8.4/8.5
+  deprecations, and the URL rewriter of use_trans_sid and
+  output_add_rewrite_var(): 234 of the 237 ext/session tests that run.
+- Smaller engine modules: ext/posix, ext/calendar, ext/ctype,
+  ext/tokenizer (token_get_all and PhpToken over goro-syntax's lexer),
+  ext/gettext (GNU MO catalogs), shmop and System V IPC, ext/pcntl
+  (signals, async signals, exec) and ext/readline without a terminal; all
+  their tests that run pass except pcntl_unshare (3) and an interactive
+  readline test.
 - ext/bz2 (engine module on compcol's bzip2, byte-identical to libbzip2):
   `bz*` functions, `compress.bzip2://` and the `bzip2.*` filters
   (21 of 22 tests; the other needs a 4 GB string).

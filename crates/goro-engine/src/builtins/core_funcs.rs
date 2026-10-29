@@ -2479,6 +2479,15 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn setlocale(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let r = setlocale_value(vm, a)?;
+    // ext/gettext looks translations up in the locale set here.
+    if let Value::Str(name) = &r {
+        super::gettext::note_setlocale(a.int(0), name);
+    }
+    Ok(r)
+}
+
+fn setlocale_value(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // The candidates in order: strings, arrays of them, null (test
     // strings/gh18823_*.phpt for the argument types).
     let mut cands: Vec<PhpStr> = Vec::new();
@@ -2614,6 +2623,8 @@ impl Vm {
     /// Op::Tick: every `every` statements the tick functions run (PHP
     /// manual: declare, ticks).
     pub(crate) fn tick(&mut self, every: u32) -> R<()> {
+        // ext/pcntl delivers queued signals on ticks.
+        crate::builtins::pcntl::on_tick(self)?;
         self.tick_count += 1;
         if self.tick_funcs.is_empty()
             || self.in_tick

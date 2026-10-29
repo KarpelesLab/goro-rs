@@ -5,6 +5,7 @@ pub mod array;
 pub mod bcmath;
 pub mod browscap;
 pub mod bz2;
+pub mod calendar;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
@@ -19,6 +20,7 @@ pub mod fiber;
 pub mod file;
 pub mod filter;
 pub mod gd;
+pub mod gettext;
 pub mod gmp;
 pub mod hash;
 pub mod headers;
@@ -43,9 +45,12 @@ pub mod password;
 pub mod pcntl;
 pub mod pcre;
 pub mod phar;
+pub mod posix;
 pub mod random;
+pub mod readline;
 pub mod reflection;
 pub mod serialize;
+pub mod session;
 pub mod simplexml;
 pub mod sockets;
 pub mod sodium;
@@ -55,6 +60,8 @@ pub mod stdmisc;
 pub mod streams;
 pub mod string;
 pub mod strmisc;
+pub mod sysv;
+pub mod tokenizer;
 pub mod uri;
 pub mod userstream;
 pub mod var;
@@ -83,6 +90,7 @@ pub fn modules() -> Vec<&'static Module> {
         &sockets::MODULE,
         &http::MODULE,
         &pcntl::MODULE,
+        &posix::MODULE,
         &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,
@@ -110,6 +118,15 @@ pub fn modules() -> Vec<&'static Module> {
         &bz2::MODULE,
         &phar::MODULE,
         &ctype::MODULE,
+        &calendar::MODULE,
+        &tokenizer::MODULE,
+        &gettext::MODULE,
+        &readline::MODULE,
+        &sysv::SHMOP,
+        &sysv::SYSVSEM,
+        &sysv::SYSVSHM,
+        &sysv::SYSVMSG,
+        &sysv::FTOK,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
@@ -126,6 +143,8 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlreader::MODULE,
         &simplexml::MODULE,
         &openssl::MODULE,
+        &session::MODULE,
+        &session::rewrite::MODULE,
         &gd::MODULE,
         &exif::MODULE,
         &curl::MODULE,
