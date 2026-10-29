@@ -445,18 +445,20 @@ pub fn init_fault(
         }
         None => {}
     }
-    if let Some(a) = actor {
-        vm.set_prop_raw(o, b"faultactor", Value::Str(PhpStr::from(a)));
-    }
-    if !matches!(detail, Value::Null) {
-        vm.set_prop_raw(o, b"detail", detail);
-    }
-    if let Some(n) = name {
-        vm.set_prop_raw(o, b"_name", Value::Str(PhpStr::from(n)));
-    }
-    if !matches!(header_fault, Value::Null) {
-        vm.set_prop_raw(o, b"headerfault", header_fault);
-    }
+    // Every property is (re)set, so a second constructor call starts
+    // over (test SoapFault/gh14586.phpt).
+    vm.set_prop_raw(
+        o,
+        b"faultactor",
+        actor.map(|a| Value::Str(PhpStr::from(a))).unwrap_or(Value::Null),
+    );
+    vm.set_prop_raw(o, b"detail", detail);
+    vm.set_prop_raw(
+        o,
+        b"_name",
+        name.map(|n| Value::Str(PhpStr::from(n))).unwrap_or(Value::Null),
+    );
+    vm.set_prop_raw(o, b"headerfault", header_fault);
     // The language defaults to "en" (observed on PHP 8.5).
     let l = if lang.is_empty() { "en" } else { lang };
     vm.set_prop_raw(o, b"lang", Value::Str(PhpStr::from(l)));

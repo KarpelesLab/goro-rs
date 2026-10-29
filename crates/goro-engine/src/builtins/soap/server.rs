@@ -752,9 +752,19 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
         d.in_handle = true;
         d.out_headers.clear();
     });
+    // Output of the service is buffered: a fault discards it (observed
+    // on PHP 8.5; test bugs/bug42214.phpt).
+    let level = vm.out.buffers.len();
+    vm.call_value(&Value::Str(PhpStr::from("ob_start")), vec![])?;
     push_mode(ErrMode::Throw("Server"));
     let r = process(vm, &this, &request);
     pop_mode();
+    // exit() (SoapServer::fault() included) keeps what was written.
+    let discard = matches!(r, Ok(Out::Fault(..)) | Ok(Out::Plain(..)) | Err(Unwind::Throw(_)));
+    while vm.out.buffers.len() > level {
+        let f = if discard { "ob_end_clean" } else { "ob_end_flush" };
+        vm.call_value(&Value::Str(PhpStr::from(f)), vec![])?;
+    }
     let headers = with(&this, |d| {
         d.in_handle = false;
         std::mem::take(&mut d.out_headers)
@@ -771,8 +781,13 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
             } else {
                 // Other exceptions become Server faults (observed on PHP
                 // 8.5; tests server014.phpt, bugs/bug31422.phpt).
-                let msg = vm.get_prop_raw(&e, b"message");
-                let msg = vm.to_php_str(&msg)?.to_string_lossy();
+                let send = with(&this, |d| d.send_errors).unwrap_or(true);
+                let msg = if send {
+                    let msg = vm.get_prop_raw(&e, b"message");
+                    vm.to_php_str(&msg)?.to_string_lossy()
+                } else {
+                    "Internal Error".to_string()
+                };
                 Out::Plain("Server", msg)
             }
         }

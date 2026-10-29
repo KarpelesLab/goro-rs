@@ -843,7 +843,11 @@ fn model(
                 return Ok(());
             }
             let multi = m.max != 1 || sdl.types[e].max != 1 || dx.rep > 0;
-            if multi && (nodes.len() > 1 || dx.features & SOAP_SINGLE_ELEMENT_ARRAYS != 0) {
+            let single_nil = nodes.len() == 1 && is_nil(d, nodes[0]);
+            if multi
+                && (nodes.len() > 1
+                    || (dx.features & SOAP_SINGLE_ELEMENT_ARRAYS != 0 && !single_nil))
+            {
                 let mut arr = PhpArray::new();
                 for c in nodes {
                     used.push(c);

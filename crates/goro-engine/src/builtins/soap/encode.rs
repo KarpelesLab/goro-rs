@@ -333,7 +333,7 @@ pub fn to_xml(
             };
             if cx.version == 2 {
                 let a = cx.doc.qname(Some(el), NS_SOAP12_ENC, "ref");
-                cx.doc.set_attr(el, &a, &id);
+                cx.doc.set_attr(el, &a, &format!("#{id}"));
             } else {
                 cx.doc.set_attr(el, "href", &format!("#{id}"));
             }
@@ -344,15 +344,17 @@ pub fn to_xml(
     // An object whose class the classmap gives a (derived) WSDL type is
     // written as that type (test classmap003.phpt).
     let mut enc = enc;
+    let mut switched = None;
     if let Value::Object(o) = &v
-        && let Some(Enc::Type(t)) = enc
+        && enc.is_some()
         && let Some(sdl) = cx.sdl.clone()
         && let Some((ns, n)) = classmap_type(vm, cx, o)
         && let Some(Enc::Type(t2)) = sdl.find_type(&ns, &n)
-        && t2 != t
+        && !matches!(enc, Some(Enc::Type(t)) if t == t2 || elem_type(&sdl, t) == Some(t2))
         && sdl.types[t2].kind == Kind::Complex
     {
         enc = Some(Enc::Type(t2));
+        switched = Some((ns, n));
     }
     cx.depth += 1;
     let r = match enc {
@@ -361,7 +363,30 @@ pub fn to_xml(
         Some(Enc::Type(t)) => type_to_xml(vm, cx, t, &v, el, literal),
     };
     cx.depth -= 1;
+    // A literal message names the substituted type (observed on PHP 8.5;
+    // test bugs/gh18640.phpt).
+    if r.is_ok()
+        && literal
+        && let Some((ns, n)) = switched
+    {
+        cx.set_type(el, &ns, &n);
+    }
     r
+}
+
+/// The type an element declaration has.
+fn elem_type(sdl: &Sdl, t: TId) -> Option<TId> {
+    if sdl.types[t].kind != Kind::Element {
+        return None;
+    }
+    match sdl.types[sdl.deref_element(t)]
+        .base
+        .as_ref()
+        .and_then(|b| sdl.resolve(b))
+    {
+        Some(Enc::Type(b)) => Some(b),
+        _ => None,
+    }
 }
 
 /// Whether an encoding writes a struct (objects shared by reference).
@@ -1396,7 +1421,19 @@ fn own_attrs_to_xml(
             continue;
         }
         let enc = a.typ.as_ref().and_then(|x| sdl.resolve(x));
-        let text = simple_text(vm, cx, sdl, enc, &val)?;
+        let text = if let Value::Object(_) = &val {
+            // An object: encoded on a detached node, its text used (none:
+            // no attribute; observed on PHP 8.5; test bugs/gh18640.phpt).
+            let tmp = cx.doc.new_el("attr");
+            cx.doc.els[tmp].parent = Some(el);
+            to_xml(vm, cx, enc, &val, tmp, true)?;
+            if cx.doc.has_element_kids(tmp) || cx.doc.is_empty(tmp) {
+                continue;
+            }
+            cx.doc.text_of(tmp)
+        } else {
+            simple_text(vm, cx, sdl, enc, &val)?
+        };
         if let Some(f) = &a.fixed
             && f != &text
         {
@@ -1498,7 +1535,9 @@ fn model_inner(
             if let Some(a) = get_field(vm, v, "any")? {
                 match &a {
                     Value::Str(s) => {
-                        cx.doc.add_raw(el, &s.to_string_lossy());
+                        let raw = s.to_string_lossy();
+                        declare_raw_prefixes(cx, el, &raw);
+                        cx.doc.add_raw(el, &raw);
                     }
                     Value::Array(arr) => {
                         for (k, x) in arr.iter() {
@@ -1521,6 +1560,25 @@ fn model_inner(
                 }
             }
             Ok(true)
+        }
+    }
+}
+
+/// Markup inserted as is: the well-known prefixes it uses get declared
+/// on the envelope (observed on PHP 8.5, which parses it in the
+/// document's context; test bugs/bug30106.phpt).
+fn declare_raw_prefixes(cx: &mut Cx, el: El, raw: &str) {
+    for (p, uri) in [
+        ("xsd", NS_XSD),
+        ("xsi", NS_XSI),
+        ("SOAP-ENC", NS_SOAP11_ENC),
+    ] {
+        let tag = format!("<{p}:");
+        let attr = format!(" {p}:");
+        if (raw.contains(&tag) || raw.contains(&attr))
+            && !raw.contains(&format!("xmlns:{p}="))
+        {
+            cx.doc.ensure_ns(Some(el), uri);
         }
     }
 }

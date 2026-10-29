@@ -158,7 +158,7 @@ fn fetch(vm: &mut Vm, a: &Args, u: &str) -> Result<Vec<u8>, String> {
         let p = u.strip_prefix("file://").unwrap_or(u);
         let path = vm.fs_path(p.as_bytes());
         return std::fs::read(&path)
-            .map_err(|_| format!("failed to load \"{u}\": No such file or directory"));
+            .map_err(|_| format!("failed to load \"{u}\": No such file or directory\n"));
     }
     if let Some(url) = super::http::parse_url(u)
         && super::http::refuse_remote(&url.host)
@@ -167,7 +167,7 @@ fn fetch(vm: &mut Vm, a: &Args, u: &str) -> Result<Vec<u8>, String> {
     }
     match super::super::file::open_stream(vm, a, u.as_bytes(), b"rb", true) {
         Ok(Some(mut s)) => Ok(super::super::file::read_rest(vm, &mut s)),
-        _ => Err(format!("failed to load external entity \"{u}\"")),
+        _ => Err(format!("failed to load \"{u}\": No such file or directory\n")),
     }
 }
 
