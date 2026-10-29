@@ -71,41 +71,35 @@ pub fn post_tests(b: &[u8], out: &mut Vec<Found>) {
 }
 
 /// SIMH magtape (SIMH "Magtape Representation and Handling"): records of
-/// a 32-bit little-endian length word, the data padded to an even size,
-/// and the length again; zero words are tape marks. A record running past
-/// the buffer is accepted after a whole record, or for buffers over 64 KiB
-/// (observed on PHP 8.5).
+/// a 32-bit little-endian word (flags in the top byte, the length in the
+/// low 24 bits), the data padded to an even size and the same word again;
+/// zero words are tape marks, all-ones the end of medium. At least one
+/// whole record is needed; a record cut by the end of the buffer ends the
+/// walk (observed on PHP 8.5).
 fn simh(b: &[u8]) -> bool {
     let mut p = 0usize;
     let mut records = 0;
-    let mut marks = 0;
-    while p + 4 <= b.len() {
+    let mut steps = 0;
+    while p + 4 <= b.len() && steps < 256 {
+        steps += 1;
         let w = le32(b, p).unwrap_or(0);
         if w == 0 {
-            marks += 1;
             p += 4;
             continue;
         }
-        if w == 0xffff_ffff || w == 0xffff_fffe {
+        if w == 0xffff_ffff {
             break;
         }
-        let len = (w & 0x0fff_ffff) as usize;
-        let padded = len + (len & 1);
-        let end = p + 4 + padded;
+        let len = (w & 0x00ff_ffff) as usize;
+        let end = p + 4 + len + (len & 1);
         if end + 4 > b.len() {
-            if records > 0 || b.len() > 65537 + 64 {
-                return true;
-            }
-            return false;
+            break;
         }
         if le32(b, end) != Some(w) {
             return false;
         }
         records += 1;
         p = end + 4;
-        if records + marks > 64 {
-            break;
-        }
     }
     records > 0
 }
@@ -408,7 +402,8 @@ fn zip(b: &[u8]) -> Option<Found> {
     if !b.starts_with(b"PK\x03\x04") || b.len() < 30 {
         return None;
     }
-    let need = le16(b, 4)?;
+    // The low byte is the version, the high byte the host system.
+    let need = b[4] as u16;
     let method = le16(b, 8)?;
     let csize = le32(b, 18)? as usize;
     let nlen = le16(b, 26)? as usize;

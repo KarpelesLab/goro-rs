@@ -67,12 +67,24 @@ const CP037: [u8; 256] = [
 /// Strict UTF-8 decoding (no overlongs, surrogates or values past
 /// U+10FFFF); None when invalid.
 fn decode_utf8(b: &[u8]) -> Option<Vec<u32>> {
-    let s = std::str::from_utf8(b).ok()?;
+    let s = match std::str::from_utf8(b) {
+        Ok(s) => s,
+        // A sequence cut by the end of the examined bytes.
+        Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
+            std::str::from_utf8(&b[..e.valid_up_to()]).ok()?
+        }
+        Err(_) => return None,
+    };
     Some(s.chars().map(|c| c as u32).collect())
 }
 
+/// The encoding is decided on the first 64 KiB (observed on PHP 8.5: a
+/// file whose first non-ASCII byte comes later is "ASCII text").
+const ENCODING_MAX: usize = 65536;
+
 impl TextInfo {
     pub fn analyze(b: &[u8]) -> TextInfo {
+        let b = &b[..b.len().min(ENCODING_MAX)];
         let bin = TextInfo {
             enc: Enc::Binary,
             chars: Vec::new(),

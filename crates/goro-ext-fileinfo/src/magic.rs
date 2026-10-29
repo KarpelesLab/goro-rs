@@ -315,47 +315,18 @@ fn raw_token(s: &[u8]) -> usize {
     i.min(s.len())
 }
 
-/// Translates a magic regex (escapes as written in the file) into the
-/// pattern given to the PCRE-compatible engine: `\ ` is a blank and the
-/// C escapes `\n`, `\t` and octal or hex bytes keep their meaning.
-fn regex_source(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        let c = raw[i];
-        if c == b'\\' && i + 1 < raw.len() {
-            let e = raw[i + 1];
-            match e {
-                b' ' => {
-                    out.push(b' ');
-                    i += 2;
-                    continue;
-                }
-                b'0'..=b'7' => {
-                    // An octal byte: emitted as \x{..} so it is never read
-                    // as a back reference.
-                    let mut v = 0u32;
-                    let mut j = i + 1;
-                    let mut n = 0;
-                    while n < 3 && j < raw.len() && (b'0'..=b'7').contains(&raw[j]) {
-                        v = v * 8 + (raw[j] - b'0') as u32;
-                        j += 1;
-                        n += 1;
-                    }
-                    out.extend_from_slice(format!("\\x{{{:x}}}", v & 0xff).as_bytes());
-                    i = j;
-                    continue;
-                }
-                _ => {
-                    out.push(c);
-                    out.push(e);
-                    i += 2;
-                    continue;
-                }
-            }
+/// The pattern given to the PCRE-compatible engine (PHP's libmagic
+/// matches regex rules with PCRE): the field after magic escape decoding
+/// (`\\.` is an escaped dot, `\^` an anchor), with unprintable bytes
+/// written as `\x{..}`.
+fn regex_source(dec: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dec.len());
+    for &c in dec {
+        if (0x20..0x7f).contains(&c) {
+            out.push(c);
+        } else {
+            out.extend_from_slice(format!("\\x{{{:x}}}", c).as_bytes());
         }
-        out.push(c);
-        i += 1;
     }
     out
 }
@@ -573,7 +544,7 @@ impl Parser {
         let (mut kind, mut endian, unsigned) = match type_table(&tname) {
             Some((k, e)) => (k, e, false),
             None => match tname.strip_prefix('u').and_then(type_table) {
-                Some((k, e)) if k.is_numeric() => (k, e, true),
+                Some((k, e)) if k.is_numeric() || k.is_string() => (k, e, true),
                 _ => {
                     self.warn(format!(
                         "type `{}' invalid",
@@ -615,14 +586,10 @@ impl Parser {
                 while j < rest.len() && !is_ws(rest[j]) && rest[j] != b'/' {
                     let c = rest[j];
                     if c.is_ascii_digit() {
-                        let st = j;
-                        while j < rest.len() && rest[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                        line.range = std::str::from_utf8(&rest[st..j])
-                            .ok()
-                            .and_then(|d| d.parse().ok())
-                            .unwrap_or(0);
+                        // Ranges may be written in hex ("search/0x1000").
+                        let (v, n) = parse_num(&rest[j..]).unwrap_or((0, 1));
+                        line.range = v.max(0) as u64;
+                        j += n;
                         continue;
                     }
                     let ok = match (kind, c) {
@@ -782,7 +749,8 @@ impl Parser {
             _ if kind.is_numeric() => {
                 if matches!(t.first(), Some(b'=' | b'<' | b'>' | b'!' | b'&' | b'^')) {
                     line.reln = t[0];
-                    k = 1;
+                    // Blanks may follow the operator ("< 10", "& 1").
+                    k = skip_ws(t, 1);
                 }
                 if line.reln == b'=' && is_x(t, k) {
                     line.reln = b'x';
@@ -827,7 +795,7 @@ impl Parser {
                     k += 1;
                 } else {
                     let n = raw_token(&t[k..]);
-                    let src = regex_source(&t[k..k + n]);
+                    let src = regex_source(&parse_escaped(&t[k..k + n]).0);
                     let mut fl = RxFlags::MULTILINE;
                     if line.sflags & SF_LC != 0 {
                         fl |= RxFlags::CASELESS;

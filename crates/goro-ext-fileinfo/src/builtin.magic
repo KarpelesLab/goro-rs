@@ -103,16 +103,12 @@
 4	string	ftyp	ISO Media
 >8	string	qt\040\040	\b, Apple QuickTime movie, Apple QuickTime (.MOV/QT)
 !:mime	video/quicktime
-!:ext	mov/qt
 >8	string	mp42	\b, MP4 v2 [ISO 14496-14]
 !:mime	video/mp4
-!:ext	mp4
 >8	string	isom	\b, MP4 Base Media v1 [ISO 14496-12:2003]
 !:mime	video/mp4
-!:ext	mp4
 >8	string	mp41	\b, MP4 v1 [ISO 14496-1:ch13]
 !:mime	video/mp4
-!:ext	mp4
 >8	string	M4A\040	\b, Apple iTunes ALAC/AAC-LC (.M4A) Audio
 !:mime	audio/x-m4a
 !:ext	m4a
@@ -132,8 +128,6 @@
 
 # Ogg (RFC 3533)
 0	string	OggS	Ogg data
-!:mime	audio/ogg
-!:ext	ogg
 
 # FLAC (FLAC format specification, stream marker)
 0	string	fLaC	FLAC audio bitstream data
@@ -170,7 +164,6 @@
 >4	search/4096	\x42\x82
 >>&1	string	webm	WebM
 !:mime	video/webm
-!:ext	webm
 >>&1	string	matroska	Matroska data
 !:mime	video/x-matroska
 !:ext	mkv/mka/mks/mk3d
@@ -180,7 +173,6 @@
 # WOFF (W3C WOFF File Format 1.0, 3. WOFF Header)
 0	string	wOFF	Web Open Font Format
 !:mime	font/woff
-!:ext	woff
 >4	belong	0x00010000	\b, TrueType
 >4	string	OTTO	\b, CFF
 >4	string	true	\b, TrueType
@@ -204,7 +196,6 @@
 # gzip (RFC 1952 2.3.1)
 0	string	\x1f\x8b	gzip compressed data
 !:mime	application/gzip
-!:ext	gz/tgz/tpz/zabw/svgz/adz/kmy/xcfgz
 # bzip2 (stream header "BZh" and the block size digit)
 0	string	BZh
 >3	byte	>0x30
@@ -283,12 +274,10 @@
 !:ext	rar/cbr
 # 7-Zip (7z format: signature header)
 0	string	7z\xbc\xaf\x27\x1c	7-zip archive data,
-!:mime	application/x-7z-compressed
-!:ext	7z/cb7
 >6	byte	x	version %d
 >7	byte	x	\b.%d
 # ar (POSIX ar archive magic)
-0	string	!<arch>\n	current ar archive
+0	string	=!<arch>\n	current ar archive
 !:mime	application/x-archive
 !:ext	a/lib/ar
 # ARJ (ARJ technical information: main header)
@@ -371,31 +360,32 @@
 !:mime	text/x-file
 0	string/t	--TEST--	PHP core test
 !:ext	phpt
+# PHP scripts start with an open tag (PHP manual: Basic syntax)
 0	regex/c	\^<\\?(php|[\ \t\r\n])	PHP script
 !:mime	text/x-php
-0	regex	\^<\\?php	PHP script
-!:mime	text/x-php
-0	string/t	<?xml\ version=
->&0	search/4096	<svg	SVG Scalable Vector Graphics image
+# XML 1.0/1.1 declaration (W3C XML 2.8); SVG root element (W3C SVG 1.1)
+0	string/t	\<?xml\ version=
+>&0	search/4096	\<svg	SVG Scalable Vector Graphics image
 !:mime	image/svg+xml
 !:ext	svg
 >&0	default	x
->>15	string	1.0	XML 1.0 document
+>>15	string/t	1.0	XML 1.0 document
 !:mime	text/xml
->>15	string	1.1	XML 1.1 document
+>>15	string/t	1.1	XML 1.1 document
 !:mime	text/xml
 >>15	default	x	XML document
 !:mime	text/xml
-0	string/t	<svg	SVG Scalable Vector Graphics image
+0	string/t	\<svg	SVG Scalable Vector Graphics image
 !:mime	image/svg+xml
 !:ext	svg
-0	search/1/c	<!doctype\ html	HTML document
+# HTML (WHATWG HTML 13.1: the DOCTYPE, the html element)
+0	search/1/c	\<!doctype\ html	HTML document
 !:mime	text/html
-0	search/1/c	<html	HTML document
+0	search/1/c	\<html	HTML document
 !:mime	text/html
 0	string/t	0\ HEAD	GEDCOM genealogy text
 !:mime	text/x-gedcom
->0	search/4096	GEDC\n2\ VERS\
+>0	search/4096	GEDC\n2\ VERS\040
 >>&0	string	x	version %s
 0	string/b	#!\ /usr/bin/perl	Perl script text executable
 !:mime	text/x-perl
@@ -417,9 +407,9 @@
 0	string/t	diff\ 	diff output
 !:mime	text/x-diff
 !:ext	diff/patch
-0	string/t	begin\
+0	string/t	begin\040
 >6	regex	\^[0-7]{3}\ 	uuencoded or xxencoded text
 >>10	string	x	\b, file name "%s"
-0	string/t	-----BEGIN\ PGP\ MESSAGE-	PGP message
+0	string	-----BEGIN\ PGP\ MESSAGE-	PGP message
 !:mime	application/pgp-encrypted
 !:ext	asc
