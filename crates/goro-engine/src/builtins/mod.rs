@@ -52,6 +52,7 @@ pub mod reflection;
 pub mod serialize;
 pub mod session;
 pub mod simplexml;
+pub mod socketext;
 pub mod sockets;
 pub mod sodium;
 pub mod spl;
@@ -88,6 +89,7 @@ pub fn modules() -> Vec<&'static Module> {
         &fiber::MODULE,
         &file::MODULE,
         &sockets::MODULE,
+        &socketext::MODULE,
         &http::MODULE,
         &pcntl::MODULE,
         &posix::MODULE,
