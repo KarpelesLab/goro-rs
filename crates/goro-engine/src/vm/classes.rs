@@ -2652,11 +2652,11 @@ impl Vm {
             return Ok(());
         }
         cls.statics_ready.set(true);
-        if let Some(p) = cls.parent.clone() {
-            if let Err(e) = self.ensure_statics(&p) {
-                cls.statics_ready.set(false);
-                return Err(e);
-            }
+        if let Some(p) = cls.parent.clone()
+            && let Err(e) = self.ensure_statics(&p)
+        {
+            cls.statics_ready.set(false);
+            return Err(e);
         }
         // A class's constants are resolved before its static properties
         // (observed on PHP 8.5: `A::$s` fails on an undefined constant in
