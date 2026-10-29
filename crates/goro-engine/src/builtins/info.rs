@@ -185,7 +185,13 @@ fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
         out.push_str(&format!("\nCore\n\nPHP Version => {version}\n"));
         directives(vm, &core_ini, &mut out);
         for (name, inis) in &mods {
-            out.push_str(&format!("\n{name}\n\n{name} support => enabled\n"));
+            // ext/gettext's line (test gettext_phpinfo.phpt).
+            let support = if *name == "gettext" { "GetText Support" } else { "" };
+            if support.is_empty() {
+                out.push_str(&format!("\n{name}\n\n{name} support => enabled\n"));
+            } else {
+                out.push_str(&format!("\n{name}\n\n{support} => enabled\n"));
+            }
             directives(vm, inis, &mut out);
         }
         out.push_str("\nAdditional Modules\n\nModule Name\n");

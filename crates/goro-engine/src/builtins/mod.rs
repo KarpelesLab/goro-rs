@@ -15,6 +15,7 @@ pub mod exec;
 pub mod fiber;
 pub mod file;
 pub mod filter;
+pub mod gettext;
 pub mod gmp;
 pub mod hash;
 pub mod headers;
@@ -103,6 +104,7 @@ pub fn modules() -> Vec<&'static Module> {
         &ctype::MODULE,
         &calendar::MODULE,
         &tokenizer::MODULE,
+        &gettext::MODULE,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,

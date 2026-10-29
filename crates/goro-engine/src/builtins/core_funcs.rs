@@ -2436,7 +2436,16 @@ fn uniqid(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(s)))
 }
 
-fn setlocale(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn setlocale(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let r = setlocale_value(vm, a)?;
+    // ext/gettext looks translations up in the locale set here.
+    if let Value::Str(name) = &r {
+        super::gettext::note_setlocale(a.int(0), name);
+    }
+    Ok(r)
+}
+
+fn setlocale_value(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let l = a.val(1);
     let s = match &l {
         Value::Str(s) => s.clone(),
