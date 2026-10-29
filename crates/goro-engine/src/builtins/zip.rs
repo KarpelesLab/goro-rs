@@ -302,7 +302,47 @@ pub static MODULE: Module = Module {
     ..Module::EMPTY
 };
 
-static WRAPPER: NativeWrapper = NativeWrapper::new(wrapper_open);
+static WRAPPER: NativeWrapper = NativeWrapper {
+    url_stat: Some(wrapper_stat),
+    ..NativeWrapper::new(wrapper_open)
+};
+
+/// url_stat for `zip://archive#entry`: entries named with a trailing
+/// slash, or prefixing other entries, are directories (test
+/// ext/fileinfo/tests/finfo_file_stream_001.phpt: finfo_file() reports
+/// "directory" for "zip://...#dir/").
+fn wrapper_stat(vm: &mut Vm, url: &[u8], _flags: i64) -> R<Option<goro_runtime::PhpArray>> {
+    let rest = &url[b"zip://".len().min(url.len())..];
+    let Some(h) = rest.iter().rposition(|&c| c == b'#') else {
+        return Ok(None);
+    };
+    let (path, entry) = (&rest[..h], &rest[h + 1..]);
+    let Ok(data) = std::fs::read(resolve(vm, path)) else {
+        return Ok(None);
+    };
+    let Ok(arc) = zf::parse(&data, zf::ReadOptions::default()) else {
+        return Ok(None);
+    };
+    let (is_dir, size) = match arc.locate(entry) {
+        Some(i) => (entry.ends_with(b"/"), arc.entries[i].size),
+        None => {
+            let mut d = entry.to_vec();
+            if !d.ends_with(b"/") {
+                d.push(b'/');
+            }
+            if arc.entries.iter().any(|e| e.name.starts_with(&d)) {
+                (true, 0)
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    let mut st = goro_runtime::PhpArray::new();
+    let mode: i64 = if is_dir { 0o040755 } else { 0o100644 };
+    st.insert("mode".into(), Value::Int(mode));
+    st.insert("size".into(), Value::Int(size as i64));
+    Ok(Some(st))
+}
 
 fn init(vm: &mut Vm) {
     register_wrapper(vm, "zip", &WRAPPER);

@@ -641,6 +641,10 @@ impl Parser {
                             line.sflags |= SF_BIN;
                             true
                         }
+                        (Kind::Regex, b'T') => {
+                            line.sflags |= SF_TRIM;
+                            true
+                        }
                         (Kind::Regex, _) | (Kind::Indirect, _) | (Kind::Der, _) => false,
                         (_, b'W') => {
                             line.sflags |= SF_W;
