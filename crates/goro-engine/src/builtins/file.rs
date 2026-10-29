@@ -1025,7 +1025,12 @@ pub fn open_stream(
             "Argument #1 ($filename) must not contain any null bytes",
         );
     }
-    let path = filename.strip_prefix(b"file://").unwrap_or(filename);
+    // the scheme is case-insensitive (test stream_get_meta_data_file_variation4.phpt)
+    let path = if filename.len() >= 7 && filename[..7].eq_ignore_ascii_case(b"file://") {
+        &filename[7..]
+    } else {
+        filename
+    };
     if path.len() != filename.len() && !path.starts_with(b"/") {
         if !quiet {
             vm.warn(&format!(
@@ -1867,6 +1872,13 @@ fn stream_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     }
     with_stream(vm, a, 0, |vm, s| {
+        // test streams/bug54946.phpt
+        if !s.readable && matches!(s.backing, Backing::File(_)) {
+            vm.notice_msg(
+                "stream_get_contents(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+            )?;
+            return Ok(Value::Str(PhpStr::empty()));
+        }
         if off >= 0 {
             do_seek(vm, s, off, 0);
         }
@@ -3229,6 +3241,18 @@ fn glob(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn list_dir(vm: &Vm, d: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+    // glob://PATTERN lists the names matched, inside open_basedir (PHP
+    // manual: glob:// wrapper; tests streams/gh17067.phpt,
+    // streams/glob-wrapper.phpt)
+    if d.len() >= 7 && d[..7].eq_ignore_ascii_case(b"glob://") {
+        let mut found = Vec::new();
+        glob_one(vm, &d[7..], 0, &mut found);
+        return Ok(found
+            .into_iter()
+            .filter(|p| vm.basedir_allows(p))
+            .map(|p| basename_bytes(&p, b""))
+            .collect());
+    }
     let mut names: Vec<Vec<u8>> = vec![b".".to_vec(), b"..".to_vec()];
     for e in std::fs::read_dir(vm.fs_path(d))? {
         names.push(e?.file_name().into_vec());
