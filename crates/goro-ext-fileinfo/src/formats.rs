@@ -168,7 +168,9 @@ type Check = fn(&[u8]) -> Option<Found>;
 
 /// Native checks of the default database, before its magic rules.
 pub fn native(b: &[u8], _ti: &TextInfo, out: &mut Vec<Found>) {
-    let checks: &[Check] = &[jpeg, id3, pdf, zip, gpkg, openpgp, ext_fs, bcachefs, dsdiff];
+    let checks: &[Check] = &[
+        jpeg, id3, pdf, zip, gpkg, openpgp, ext_fs, bcachefs, dsdiff, tiff, sfnt, ico, xpm, webp,
+    ];
     for c in checks {
         if let Some(f) = c(b) {
             out.push(f);
@@ -180,7 +182,7 @@ pub fn native(b: &[u8], _ti: &TextInfo, out: &mut Vec<Found>) {
 /// Native checks of the default database for formats without a magic
 /// number, after its magic rules.
 pub fn native_late(b: &[u8], out: &mut Vec<Found>) {
-    if let Some(f) = tga(b) {
+    if let Some(f) = mpeg_bare(b).or_else(|| tga(b)) {
         out.push(f);
     }
 }
@@ -523,8 +525,11 @@ fn jpeg(b: &[u8]) -> Option<Found> {
         }
         p = 4 + seg as usize;
     } else if b.get(3) == Some(&0xe1) && b.get(6..12) == Some(b"Exif\0\0") {
+        // Exif 2.3 4.5.4: APP1 holds a TIFF structure after "Exif\0\0".
         let seg = be16(b, 4).unwrap_or(0);
-        d.push_str(", Exif standard");
+        d.push_str(", Exif standard: [");
+        d.push_str(&tiff_desc(&b[12..]).unwrap_or_default());
+        d.push(']');
         p = 4 + seg as usize;
     }
     // Following segments: comments and the frame header.
@@ -541,11 +546,21 @@ fn jpeg(b: &[u8]) -> Option<Found> {
         }
         let len = be16(b, p + 2).unwrap_or(0) as usize;
         match m {
+            0xe1 if b.get(p + 4..p + 10) == Some(b"Exif\0\0") => {
+                d.push_str(", Exif Standard: [");
+                let end = (p + 2 + len).min(b.len()).max(p + 10);
+                d.push_str(&tiff_desc(&b[p + 10..end]).unwrap_or_default());
+                d.push(']');
+            }
             0xfe => {
                 let st = p + 4;
                 let en = (p + 2 + len).min(b.len()).max(st);
                 let c = &b[st..en];
-                let c: Vec<u8> = c.iter().copied().take_while(|&x| x != 0).collect();
+                let c: Vec<u8> = c
+                    .iter()
+                    .copied()
+                    .take_while(|&x| x != 0 && x != b'\n')
+                    .collect();
                 d.push_str(", comment: \"");
                 d.push_str(&String::from_utf8_lossy(&c));
                 d.push('"');
@@ -581,6 +596,314 @@ fn jpeg(b: &[u8]) -> Option<Found> {
     ))
 }
 
+// ----------------------------------------------------------------- TIFF
+
+/// A TIFF structure (TIFF 6.0 section 2: header and first IFD; baseline
+/// tags of section 8), as described by PHP 8.5's finfo.
+pub fn tiff_desc(t: &[u8]) -> Option<String> {
+    let le = match t.get(..4)? {
+        b"II*\0" => true,
+        b"MM\0*" => false,
+        _ => return None,
+    };
+    let r16 = |at: usize| if le { le16(t, at) } else { be16(t, at) };
+    let r32 = |at: usize| if le { le32(t, at) } else { be32(t, at) };
+    let mut d = format!(
+        "TIFF image data, {}",
+        if le { "little-endian" } else { "big-endian" }
+    );
+    let Some(ifd) = r32(4) else {
+        return Some(d);
+    };
+    let ifd = ifd as usize;
+    let Some(n) = r16(ifd) else {
+        return Some(d);
+    };
+    d.push_str(&format!(", direntries={}", n));
+    let text = |e: usize| -> Option<String> {
+        let count = r32(e + 4)? as usize;
+        let at = if count <= 4 {
+            e + 8
+        } else {
+            r32(e + 8)? as usize
+        };
+        let s = t.get(at..)?;
+        let s: Vec<u8> = s
+            .iter()
+            .copied()
+            .take(127)
+            .take_while(|&c| c != 0)
+            .collect();
+        Some(String::from_utf8_lossy(&s).into_owned())
+    };
+    for k in 0..n as usize {
+        let e = ifd + 2 + 12 * k;
+        let (Some(tag), Some(ty)) = (r16(e), r16(e + 2)) else {
+            break;
+        };
+        // A SHORT value sits in the first half of the value field.
+        let val = if ty == 3 {
+            r16(e + 8).map(|v| v as u32)
+        } else {
+            r32(e + 8)
+        };
+        let Some(val) = val else { break };
+        // Single-valued tags with another count end the walk (observed on
+        // PHP 8.5).
+        if matches!(tag, 0x100 | 0x101 | 0x103) && r32(e + 4) != Some(1) {
+            break;
+        }
+        match tag {
+            0x100 => d.push_str(&format!(", width={}", val)),
+            0x101 => d.push_str(&format!(", height={}", val)),
+            0x102 => d.push_str(&format!(", bps={}", val)),
+            0x103 => {
+                let c = match val {
+                    1 => "none".to_string(),
+                    5 => "LZW".to_string(),
+                    7 => "JPEG".to_string(),
+                    8 => "deflate".to_string(),
+                    32773 => "PackBits".to_string(),
+                    v => v.to_string(),
+                };
+                d.push_str(&format!(", compression={}", c));
+            }
+            0x106 => {
+                let p = match val {
+                    0 => "WhiteIsZero".to_string(),
+                    1 => "BlackIsZero".to_string(),
+                    2 => "RGB".to_string(),
+                    3 => "RGB Palette".to_string(),
+                    4 => "Transparency Mask".to_string(),
+                    5 => "CMYK".to_string(),
+                    6 => "YCbCr".to_string(),
+                    8 => "CIELab".to_string(),
+                    v => v.to_string(),
+                };
+                d.push_str(&format!(", PhotometricInterpretation={}", p));
+            }
+            0x10d | 0x10e | 0x10f | 0x110 | 0x131 | 0x132 => {
+                let name = match tag {
+                    0x10d => "name",
+                    0x10e => "description",
+                    0x10f => "manufacturer",
+                    0x110 => "model",
+                    0x131 => "software",
+                    _ => "datetime",
+                };
+                if let Some(s) = text(e) {
+                    d.push_str(&format!(", {}={}", name, s));
+                }
+            }
+            0x112 => match val {
+                1 => d.push_str(", orientation=upper-left"),
+                v => d.push_str(&format!(", orientation=[*{}*]", v)),
+            },
+            0x11a => d.push_str(&format!(", xresolution={}", val)),
+            0x11b => d.push_str(&format!(", yresolution={}", val)),
+            0x128 => d.push_str(&format!(", resolutionunit={}", val)),
+            0x8298 => {
+                if let Some(s) = text(e) {
+                    d.push_str(&format!(", copyright={}", s));
+                }
+            }
+            0x8825 => d.push_str(", GPS-Data"),
+            // Known tags shown without a value.
+            0xfe | 0x10a | 0x213 | 0x8769 => {}
+            // The walk ends at the first other tag (observed on PHP 8.5:
+            // plain TIFF files stop at StripOffsets).
+            _ => break,
+        }
+    }
+    Some(d)
+}
+
+fn tiff(b: &[u8]) -> Option<Found> {
+    let d = tiff_desc(b)?;
+    Some(found(d, Some("image/tiff"), Some("tif/tiff"), None))
+}
+
+// ------------------------------------------------- fonts, icons, pixmaps
+
+/// TrueType/OpenType (OpenType specification: table directory, 'name'
+/// table header and first name record's platform).
+fn sfnt(b: &[u8]) -> Option<Found> {
+    if be32(b, 0)? != 0x0001_0000 && b.get(..4)? != b"true" {
+        return None;
+    }
+    let n = be16(b, 4)? as usize;
+    if n == 0 || n > 512 {
+        return None;
+    }
+    let first = b.get(12..16)?;
+    if !first.iter().all(|c| c.is_ascii_graphic() || *c == b' ') {
+        return None;
+    }
+    let mut d = format!(
+        "TrueType Font data, {} tables, 1st \"{}\"",
+        n,
+        String::from_utf8_lossy(first)
+    );
+    for k in 0..n {
+        let r = 12 + 16 * k;
+        if b.get(r..r + 4) == Some(b"name") {
+            let off = be32(b, r + 8)? as usize;
+            if let Some(cnt) = be16(b, off + 2) {
+                d.push_str(&format!(", {} names", cnt));
+                match be16(b, off + 6) {
+                    Some(0) => d.push_str(", Unicode"),
+                    Some(1) => d.push_str(", Macintosh"),
+                    Some(3) => d.push_str(", Microsoft"),
+                    _ => {}
+                }
+            }
+            break;
+        }
+    }
+    Some(found(d, Some("font/sfnt"), None, None))
+}
+
+/// Windows icons (ICONDIR and the first ICONDIRENTRY).
+fn ico(b: &[u8]) -> Option<Found> {
+    if b.get(..4)? != b"\0\0\x01\0" {
+        return None;
+    }
+    let n = le16(b, 4)?;
+    if n == 0 || n > 255 || *b.get(9)? != 0 || le16(b, 10)? > 1 || le16(b, 12)? > 32 {
+        return None;
+    }
+    let w = if b[6] == 0 { 256 } else { b[6] as u32 };
+    let h = if b[7] == 0 { 256 } else { b[7] as u32 };
+    let mut d = format!(
+        "MS Windows icon resource - {} icon{}, {}x{}",
+        n,
+        if n > 1 { "s" } else { "" },
+        w,
+        h
+    );
+    if b[8] > 0 {
+        d.push_str(&format!(", {} colors", b[8]));
+    }
+    let bpp = le16(b, 12)?;
+    if bpp > 0 {
+        d.push_str(&format!(", {} bits/pixel", bpp));
+    }
+    Some(found(
+        d,
+        Some("image/vnd.microsoft.icon"),
+        Some("ico"),
+        None,
+    ))
+}
+
+/// X PixMap (XPM3: "/* XPM */" and the values string "w h ncolors cpp").
+fn xpm(b: &[u8]) -> Option<Found> {
+    if !b.starts_with(b"/* XPM */") {
+        return None;
+    }
+    let mut d = String::from("X pixmap image text");
+    if let Some(br) = find(&b[..b.len().min(4096)], b"{") {
+        let rest = &b[br..b.len().min(br + 512)];
+        if let Some(q) = rest.iter().position(|&c| c == b'"') {
+            let s: Vec<u8> = rest[q + 1..]
+                .iter()
+                .copied()
+                .take_while(|&c| c != b'"')
+                .collect();
+            let v: Vec<&str> = std::str::from_utf8(&s)
+                .unwrap_or("")
+                .split_ascii_whitespace()
+                .collect();
+            if v.len() >= 4 {
+                d.push_str(&format!(
+                    ", {} x {} x {}, {} chars/pixel",
+                    v[0], v[1], v[2], v[3]
+                ));
+            }
+        }
+    }
+    Some(found(d, Some("image/x-xpixmap"), Some("xpm"), None))
+}
+
+/// WebP (WebP Container Specification; lossy "VP8 " frames per RFC 6386
+/// 9.1 frame header and 9.2 color space and clamping bits).
+fn webp(b: &[u8]) -> Option<Found> {
+    if b.get(..4)? != b"RIFF" || b.get(8..12)? != b"WEBP" {
+        return None;
+    }
+    let mut d = String::from("RIFF (little-endian) data, Web/P image");
+    if b.get(12..16) == Some(b"VP8L") {
+        d.push_str(", lossless");
+    }
+    if b.get(12..16) == Some(b"VP8X") {
+        // Extended format: feature flags, then the canvas size minus one
+        // as 24-bit values.
+        let fl = *b.get(20)?;
+        if fl & 0x20 != 0 {
+            d.push_str(", ICC profile");
+        }
+        let w = le32(b, 24)? & 0xff_ffff;
+        let h = le32(b, 27)? & 0xff_ffff;
+        d.push_str(&format!(", {}+1x{}+1", w, h));
+    }
+    if b.get(12..16) == Some(b"VP8 ") && b.get(23..26) == Some(b"\x9d\x01\x2a") {
+        let w = le16(b, 26)?;
+        let h = le16(b, 28)?;
+        let scale = |s: u16| match s >> 14 {
+            0 => "none",
+            1 => "5/4",
+            2 => "5/3",
+            _ => "2",
+        };
+        d.push_str(&format!(
+            ", VP8 encoding, {}x{}, Scaling: [{}]x[{}]",
+            w & 0x3fff,
+            h & 0x3fff,
+            scale(w),
+            scale(h)
+        ));
+        // The first two booleans of the first partition (probability
+        // 1/2): color_space then clamping_type (RFC 6386 7.3 decoder).
+        if let (Some(&b0), Some(&b1)) = (b.get(30), b.get(31)) {
+            let mut value = ((b0 as u32) << 8) | b1 as u32;
+            let mut range = 255u32;
+            let mut bits = [0u32; 2];
+            for bit in &mut bits {
+                let split = 1 + (((range - 1) * 128) >> 8);
+                let big = split << 8;
+                if value >= big {
+                    *bit = 1;
+                    range -= split;
+                    value -= big;
+                } else {
+                    range = split;
+                }
+                while range < 128 {
+                    value <<= 1;
+                    range <<= 1;
+                }
+            }
+            d.push_str(if bits[0] == 0 {
+                ", YUV color"
+            } else {
+                ", bad color specification"
+            });
+            d.push_str(if bits[1] == 0 {
+                ", decoders should clamp"
+            } else {
+                ", no clamping necessary"
+            });
+        }
+    }
+    Some(found(d, Some("image/webp"), Some("webp"), None))
+}
+
+/// MPEG audio without an ID3 tag: a frame header at the start.
+fn mpeg_bare(b: &[u8]) -> Option<Found> {
+    let d = mpeg_frame(b, false)?;
+    Some(found(d, Some("audio/mpeg"), None, None))
+}
+
 // ------------------------------------------------------------ ID3 / MP3
 
 const BITRATES: [[u32; 16]; 5] = [
@@ -605,17 +928,25 @@ const BITRATES: [[u32; 16]; 5] = [
 
 /// An MPEG audio frame header (ISO/IEC 11172-3 2.4.1.3, 13818-3).
 pub fn mpeg_audio(h: &[u8]) -> Option<String> {
+    mpeg_frame(h, true)
+}
+
+/// `strict`: reserved bit rate and sample rate indexes refuse the header;
+/// otherwise those fields are left out (observed on PHP 8.5).
+fn mpeg_frame(h: &[u8], strict: bool) -> Option<String> {
     if h.len() < 4 || h[0] != 0xff || h[1] & 0xe0 != 0xe0 {
         return None;
     }
     let ver = (h[1] >> 3) & 3;
     let layer = (h[1] >> 1) & 3;
-    if ver == 1 || layer == 0 {
+    // Without an ID3 tag, layer I headers are not trusted (observed on
+    // PHP 8.5: such files are "data").
+    if ver == 1 || layer == 0 || (!strict && layer == 3) {
         return None;
     }
     let bri = (h[2] >> 4) as usize;
     let sri = ((h[2] >> 2) & 3) as usize;
-    if bri == 15 || sri == 3 {
+    if strict && (bri == 15 || sri == 3) {
         return None;
     }
     let lname = match layer {
@@ -640,12 +971,13 @@ pub fn mpeg_audio(h: &[u8]) -> Option<String> {
         2 => [22050, 24000, 16000],
         _ => [11025, 12000, 8000],
     };
-    let sr = rates[sri];
-    let srs = if sr.is_multiple_of(1000) {
-        format!("{} kHz", sr / 1000)
-    } else {
-        format!("{} kHz", sr as f64 / 1000.0)
-    };
+    let srs = rates.get(sri).map(|&sr| {
+        if sr.is_multiple_of(1000) {
+            format!("{} kHz", sr / 1000)
+        } else {
+            format!("{} kHz", sr as f64 / 1000.0)
+        }
+    });
     let mode = match h[3] >> 6 {
         0 => "Stereo",
         1 => "JntStereo",
@@ -653,10 +985,13 @@ pub fn mpeg_audio(h: &[u8]) -> Option<String> {
         _ => "Monaural",
     };
     let mut s = format!("MPEG ADTS, layer {}, {}", lname, vname);
-    if bri != 0 {
+    if bri != 0 && bri != 15 {
         s.push_str(&format!(", {} kbps", BITRATES[table][bri]));
     }
-    s.push_str(&format!(", {}, {}", srs, mode));
+    if let Some(r) = srs {
+        s.push_str(&format!(", {}", r));
+    }
+    s.push_str(&format!(", {}", mode));
     Some(s)
 }
 
@@ -880,18 +1215,35 @@ fn tga(b: &[u8]) -> Option<Found> {
     if w == 0 || h == 0 {
         return None;
     }
-    let kind = match ty {
+    // Image descriptor: alpha bits (0-3), right-to-left (4), top-to-bottom
+    // (5).
+    let alpha = b[17] & 0x0f;
+    let kind = match ty & 3 {
         1 => "Map",
+        2 if alpha > 0 => "RGBA",
         2 => "RGB",
-        3 => "Mono",
-        9 => "Map - RLE",
-        10 => "RGB - RLE",
-        _ => "Mono - RLE",
+        _ => "Mono",
     };
-    let mut d = format!("Targa image data - {} {} x {} x {}", kind, w, h, depth);
+    let rle = if ty & 8 != 0 { " - RLE" } else { "" };
+    let mut d = format!(
+        "Targa image data - {}{} {} x {} x {}",
+        kind, rle, w, h, depth
+    );
     let (x, y) = (le16(b, 8)?, le16(b, 10)?);
-    if x != 0 || y != 0 {
-        d.push_str(&format!(" +{} +{}", x, y));
+    if x != 0 {
+        d.push_str(&format!(" +{}", x));
+    }
+    if y != 0 {
+        d.push_str(&format!(" +{}", y));
+    }
+    if alpha > 0 {
+        d.push_str(&format!(" - {}-bit alpha", alpha));
+    }
+    if b[17] & 0x20 != 0 {
+        d.push_str(" - top");
+    }
+    if b[17] & 0x10 != 0 {
+        d.push_str(" - right");
     }
     Some(found(
         d,

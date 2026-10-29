@@ -316,12 +316,15 @@ impl<'a> Ctx<'a> {
                     if l.flip {
                         self.flip = !self.flip;
                     }
+                    let before = f.desc.len();
                     let r = self.run_lines(&ne.lines, o, f, true);
                     self.flip = saved;
-                    let matched = r?;
+                    let matched = r? && f.desc.len() > before;
                     self.names -= 1;
                     // Children of a `use` run only when the named rule
-                    // matched something (magic(5)).
+                    // printed something (observed on PHP 8.5: a checker
+                    // rule without messages leaves its `default` sibling
+                    // children unreached).
                     if !matched {
                         if lv == 0 {
                             return Ok(false);
