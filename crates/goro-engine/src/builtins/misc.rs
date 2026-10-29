@@ -340,7 +340,7 @@ fn ini_flag(vm: &Vm, name: &[u8]) -> i64 {
 /// Whether setting `k` to `v` changes a deprecated assert.* setting from
 /// its default (observed on PHP 8.5: "assert.bail INI setting is
 /// deprecated" for `ini_set("assert.bail", "1")`, not for "0").
-fn assert_ini_truthy(v: &[u8]) -> bool {
+pub(crate) fn assert_ini_truthy(v: &[u8]) -> bool {
     let l = v.to_ascii_lowercase();
     match &l[..] {
         b"on" | b"yes" | b"true" => true,
@@ -432,6 +432,20 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
         let _ = vm.raise_at(
             crate::vm::errors::E_DEPRECATED,
             "Directive 'allow_url_include' is deprecated",
+            goro_runtime::PhpStr::from("Unknown"),
+            0,
+        );
+    }
+    // test ext/standard/tests/file/auto_detect_line_endings_1.phpt
+    if ini
+        .iter()
+        .rev()
+        .find(|(n, _)| n.as_slice() == b"auto_detect_line_endings")
+        .is_some_and(|(_, v)| assert_ini_truthy(v))
+    {
+        let _ = vm.raise_at(
+            crate::vm::errors::E_DEPRECATED,
+            "auto_detect_line_endings is deprecated",
             goro_runtime::PhpStr::from("Unknown"),
             0,
         );

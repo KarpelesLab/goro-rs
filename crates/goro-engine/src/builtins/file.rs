@@ -89,6 +89,10 @@ pub static MODULE: Module = Module {
         ("function stream_get_wrappers(): array", stream_get_wrappers),
         ("function stream_is_local($stream): bool", ret_true),
         (
+            "function stream_supports_lock($stream): bool",
+            stream_supports_lock,
+        ),
+        (
             "function file_get_contents(string $filename, bool $use_include_path = false, $context = null, int $offset = 0, ?int $length = null): string|false",
             file_get_contents,
         ),
@@ -263,8 +267,8 @@ pub static MODULE: Module = Module {
             "function str_getcsv(string $string, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\"): array",
             str_getcsv,
         ),
-        ("function fsync($stream): bool", fflush),
-        ("function fdatasync($stream): bool", fflush),
+        ("function fsync($stream): bool", fsync),
+        ("function fdatasync($stream): bool", fsync),
     ],
     constants: &[
         ("SEEK_SET", ConstVal::Int(0)),
@@ -326,9 +330,19 @@ pub static MODULE: Module = Module {
         ("STREAM_META_ACCESS", ConstVal::Int(6)),
     ],
     init: Some(init),
+    on_ini_set: Some(on_ini_set),
     listed: false,
     ..Module::EMPTY
 };
+
+/// ini_set("auto_detect_line_endings", on): deprecated (observed on PHP
+/// 8.5; test auto_detect_line_endings_2.phpt).
+fn on_ini_set(vm: &mut Vm, k: &[u8], v: &[u8]) -> R<bool> {
+    if k == b"auto_detect_line_endings" && super::misc::assert_ini_truthy(v) {
+        vm.deprecated("auto_detect_line_endings is deprecated")?;
+    }
+    Ok(true)
+}
 
 /// The backing of a stream.
 pub enum Backing {
@@ -585,6 +599,13 @@ impl Stream {
     }
 }
 
+/// Whether a resource is a (possibly closed) stream.
+pub(crate) fn is_stream_res(r: &ResRef) -> bool {
+    let data = r.res().data.borrow();
+    data.as_ref()
+        .is_some_and(|d| d.downcast_ref::<std::cell::RefCell<Stream>>().is_some())
+}
+
 pub fn new_stream_res(s: Stream) -> ResRef {
     let r = ResRef::new(
         PhpStr::intern(b"stream"),
@@ -710,7 +731,10 @@ pub fn with_stream<T>(
         return vm.fthrow(
             a,
             "TypeError",
-            "supplied resource is not a valid stream resource",
+            &format!(
+                "Argument #{} ($stream) must be an open stream resource",
+                i + 1
+            ),
         );
     };
     // SAFETY: the resource stays alive (held by `v`) for the call.
@@ -897,6 +921,21 @@ pub fn open_stream(
         );
     }
     let path = filename.strip_prefix(b"file://").unwrap_or(filename);
+    if path.len() != filename.len() && !path.starts_with(b"/") {
+        if !quiet {
+            vm.warn(&format!(
+                "{}(): Remote host file access not supported, {}",
+                fname,
+                String::from_utf8_lossy(filename)
+            ))?;
+            vm.warn(&format!(
+                "{}({}): Failed to open stream: no suitable wrapper could be found",
+                fname,
+                String::from_utf8_lossy(filename)
+            ))?;
+        }
+        return Ok(None);
+    }
     if !vm.basedir_allows(path) {
         if !quiet {
             vm.warn(&format!(
@@ -965,9 +1004,25 @@ pub fn open_stream(
     }
 }
 
+/// A file looked up through include_path (`$use_include_path`): the
+/// path to open (PHP manual: fopen(), file_get_contents()).
+fn with_include_path(vm: &Vm, f: &PhpStr, use_it: bool) -> PhpStr {
+    if !use_it || f.windows(3).any(|w| w == b"://") {
+        return f.clone();
+    }
+    match vm.resolve_include(f) {
+        Some(p) => PhpStr::new(p.as_os_str().as_bytes()),
+        None => f.clone(),
+    }
+}
+
 fn fopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.str(0);
     let m = a.str(1);
+    let f = with_include_path(
+        vm,
+        &a.str(0),
+        a.bool_or(2, false) && m.first() == Some(&b'r'),
+    );
     match open_stream(vm, a, &f, &m, false)? {
         Some(s) => Ok(Value::Resource(new_stream_res(s))),
         None => Ok(Value::Bool(false)),
@@ -1120,6 +1175,11 @@ fn fwrite(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn read_line(vm: &mut Vm, s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut b = [0u8; 1];
+    // auto_detect_line_endings: a lone CR ends a line too (PHP manual:
+    // Filesystem runtime configuration)
+    let cr = vm
+        .get_ini(b"auto_detect_line_endings")
+        .is_some_and(|v| super::misc::assert_ini_truthy(&v));
     loop {
         if let Some(m) = max
             && out.len() >= m
@@ -1130,6 +1190,20 @@ fn read_line(vm: &mut Vm, s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>>
             Ok(1) => {
                 out.push(b[0]);
                 if b[0] == b'\n' {
+                    break;
+                }
+                if cr && b[0] == b'\r' {
+                    let mut n = [0u8; 1];
+                    if let Ok(1) = s.read_some(vm, &mut n) {
+                        if n[0] == b'\n' {
+                            out.push(b'\n');
+                        } else if !s.read_filters.is_empty() {
+                            s.filtered.insert(0, n[0]);
+                        } else {
+                            s.pending.insert(0, n[0]);
+                            s.upos -= 1;
+                        }
+                    }
                     break;
                 }
             }
@@ -1163,7 +1237,14 @@ fn fgets(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     }
     with_stream(vm, a, 0, |vm, s| {
-        let r = read_line(vm, s, max.map(|m| (m as usize).saturating_sub(1).max(1)));
+        if !s.readable {
+            vm.notice_msg("fgets(): Read of 8192 bytes failed with errno=9 Bad file descriptor")?;
+            return Ok(Value::Bool(false));
+        }
+        if max == Some(1) {
+            return Ok(Value::Bool(false));
+        }
+        let r = read_line(vm, s, max.map(|m| (m as usize).saturating_sub(1)));
         // Detect EOF right after the last line for memory/file streams.
         if let Backing::Memory { data, pos } = &s.backing
             && *pos >= data.len()
@@ -1179,6 +1260,10 @@ fn fgets(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn fgetc(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |vm, s| {
+        if !s.readable {
+            vm.notice_msg("fgetc(): Read of 8192 bytes failed with errno=9 Bad file descriptor")?;
+            return Ok(Value::Bool(false));
+        }
         let mut b = [0u8; 1];
         match s.read_some(vm, &mut b) {
             Ok(1) => Ok(Value::Str(PhpStr::from_byte(b[0]))),
@@ -1219,6 +1304,36 @@ fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 || matches!(s.backing, Backing::Memory { .. }) && at_end
                 || matches!(s.backing, Backing::Native(_)) && at_end && s.pending.is_empty(),
         ))
+    })
+}
+
+/// fsync(), fdatasync(): plain files and descriptors only.
+fn fsync(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let data_only = a.fname() == "fdatasync";
+    with_stream(vm, a, 0, |vm, s| {
+        let _ = s.write_all(vm, b"");
+        let fd = match &s.backing {
+            Backing::File(f) => {
+                use std::os::fd::AsRawFd;
+                f.as_raw_fd()
+            }
+            Backing::Stdin => 0,
+            Backing::Stdout => 1,
+            Backing::Stderr => 2,
+            _ => {
+                vm.fwarn(a, "Can't fsync this stream!")?;
+                return Ok(Value::Bool(false));
+            }
+        };
+        vm.out.flush();
+        let rc = unsafe {
+            if data_only {
+                libc::fdatasync(fd)
+            } else {
+                libc::fsync(fd)
+            }
+        };
+        Ok(Value::Bool(rc == 0))
     })
 }
 
@@ -1486,6 +1601,17 @@ fn fstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let op = a.int(1);
+    with_stream(vm, a, 0, |_, _| Ok(()))?;
+    if op & 3 == 0 {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN",
+        );
+    }
+    if a.has(2) {
+        a.set_ref(2, Value::Int(0));
+    }
     with_stream(vm, a, 0, |vm, s| {
         if matches!(s.backing, Backing::User { .. }) {
             let r = super::userstream::simple(vm, s, b"stream_lock", vec![Value::Int(op)])?;
@@ -1498,7 +1624,37 @@ fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }));
         }
-        Ok(Value::Bool(true))
+        let Backing::File(f) = &s.backing else {
+            return Ok(Value::Bool(false));
+        };
+        use std::os::fd::AsRawFd;
+        let mut how = match op & 3 {
+            1 => libc::LOCK_SH,
+            2 => libc::LOCK_EX,
+            _ => libc::LOCK_UN,
+        };
+        if op & 4 != 0 {
+            how |= libc::LOCK_NB;
+        }
+        if unsafe { libc::flock(f.as_raw_fd(), how) } == 0 {
+            return Ok(Value::Bool(true));
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK) && a.has(2) {
+            a.set_ref(2, Value::Int(1));
+        }
+        Ok(Value::Bool(false))
+    })
+}
+
+fn stream_supports_lock(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    with_stream(vm, a, 0, |vm, s| {
+        if matches!(s.backing, Backing::User { .. }) {
+            let r = super::userstream::simple(vm, s, b"stream_lock", vec![Value::Int(0)])?;
+            return Ok(Value::Bool(r.is_some_and(|v| vm.to_bool(&v))));
+        }
+        Ok(Value::Bool(
+            matches!(s.backing, Backing::File(_)) && !s.wrapper.is_empty(),
+        ))
     })
 }
 
@@ -1712,7 +1868,7 @@ pub fn stat_from_user(st: &PhpArray) -> PhpArray {
 }
 
 fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.str(0);
+    let f = with_include_path(vm, &a.str(0), a.bool_or(1, false));
     let off = a.int_or(3, 0);
     let len = a.opt_int(4);
     if let Some(l) = len
@@ -1751,6 +1907,15 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
     let flags = a.int_or(2, 0);
     let data = a.val(1);
+    if let Value::Resource(r) = a.val(3)
+        && r.res().kind.borrow().as_bytes() != b"stream-context"
+    {
+        return vm.fthrow(
+            a,
+            "TypeError",
+            "supplied resource is not a valid Stream-Context resource",
+        );
+    }
     let bytes: Vec<u8> = match &data {
         Value::Array(arr) => {
             let mut out = Vec::new();
@@ -1759,9 +1924,14 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             out
         }
+        Value::Resource(r) if !is_stream_res(r) => {
+            return vm.fthrow(
+                a,
+                "TypeError",
+                "supplied resource is not a valid stream resource",
+            );
+        }
         Value::Resource(_) => {
-            let mut s = a.vals.clone();
-            let _ = &mut s;
             let tmp_args = Args {
                 this: None,
                 vals: &mut vec![data.clone()],
@@ -1770,6 +1940,11 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 named: None,
             };
             with_stream(vm, &tmp_args, 0, |vm, st| Ok(read_rest(vm, st)))?
+        }
+        // an object without __toString() writes nothing (observed on
+        // PHP 8.5; test file_put_contents.phpt)
+        Value::Object(o) if vm.class_of(o).find_method(b"__tostring").is_none() => {
+            return Ok(Value::Bool(false));
         }
         Value::Object(_) => {
             let s = vm.to_php_str(&data)?;
@@ -1795,9 +1970,11 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.str(0);
     let flags = a.int_or(1, 0);
-    if !(0..=31).contains(&flags) {
+    let f = with_include_path(vm, &a.str(0), flags & 1 != 0);
+    // FILE_USE_INCLUDE_PATH, FILE_IGNORE_NEW_LINES, FILE_SKIP_EMPTY_LINES,
+    // FILE_NO_DEFAULT_CONTEXT
+    if flags < 0 || flags & !(1 | 2 | 4 | 16) != 0 {
         return vm.fthrow(
             a,
             "ValueError",
@@ -1831,7 +2008,7 @@ fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.str(0);
+    let f = with_include_path(vm, &a.str(0), a.bool_or(1, false));
     let Some(mut s) = open_stream(vm, a, &f, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
@@ -1954,6 +2131,32 @@ fn copy(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let from = a.str(0);
     let to = a.str(1);
+    let local = |p: &[u8]| !p.windows(3).any(|w| w == b"://") || p.starts_with(b"file://");
+    if local(&from) && local(&to) {
+        let fp = vm.fs_path(from.strip_prefix(b"file://").unwrap_or(&from));
+        let tp = vm.fs_path(to.strip_prefix(b"file://").unwrap_or(&to));
+        if let Ok(m) = std::fs::metadata(&fp) {
+            if m.is_dir() {
+                vm.fwarn(
+                    a,
+                    "The first argument to copy() function cannot be a directory",
+                )?;
+                return Ok(Value::Bool(false));
+            }
+            if let Ok(t) = std::fs::metadata(&tp) {
+                if t.is_dir() {
+                    vm.fwarn(
+                        a,
+                        "The second argument to copy() function cannot be a directory",
+                    )?;
+                    return Ok(Value::Bool(false));
+                }
+                if t.dev() == m.dev() && t.ino() == m.ino() {
+                    return Ok(Value::Bool(false));
+                }
+            }
+        }
+    }
     let Some(mut s) = open_stream(vm, a, &from, b"rb", false)? else {
         return Ok(Value::Bool(false));
     };
@@ -3428,6 +3631,52 @@ pub fn csv_parse(
     fields
 }
 
+/// Whether a record ends inside an enclosure (it goes on on the next
+/// line), following csv_parse().
+fn csv_open(data: &[u8], sep: u8, enc: Option<u8>, esc: Option<u8>) -> bool {
+    let Some(e) = enc else {
+        return false;
+    };
+    let n = data.len();
+    let mut i = 0;
+    loop {
+        let mut j = i;
+        while j < n && (data[j] == b' ' || data[j] == b'\t') && data[j] != e {
+            j += 1;
+        }
+        if j < n && data[j] == e {
+            i = j + 1;
+            loop {
+                if i >= n {
+                    return true;
+                }
+                let c = data[i];
+                if Some(c) == esc && esc != Some(e) && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if c == e {
+                    if i + 1 < n && data[i + 1] == e {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        while i < n && data[i] != sep && data[i] != b'\n' && data[i] != b'\r' {
+            i += 1;
+        }
+        if i < n && data[i] == sep {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+}
+
 fn csv_opts(vm: &mut Vm, a: &Args, base: usize) -> R<(u8, Option<u8>, Option<u8>)> {
     let sep = a.opt_str(base).unwrap_or_else(|| PhpStr::from(","));
     let enc = a.opt_str(base + 1).unwrap_or_else(|| PhpStr::from("\""));
@@ -3462,6 +3711,12 @@ fn csv_opts(vm: &mut Vm, a: &Args, base: usize) -> R<(u8, Option<u8>, Option<u8>
             ),
         );
     }
+    if !a.has(base + 2) {
+        vm.fdeprecated(
+            a,
+            "the $escape parameter must be provided as its default value will change",
+        )?;
+    }
     Ok((sep[0], Some(enc[0]), esc.first().copied()))
 }
 
@@ -3477,22 +3732,34 @@ fn fputcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn fgetcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let len = a.opt_int(1).unwrap_or(0);
+    if len < 0 {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            &format!(
+                "Argument #2 ($length) must be between 0 and {}",
+                i64::MAX - 1
+            ),
+        );
+    }
     let (sep, enc, esc) = csv_opts(vm, a, 2)?;
     with_stream(vm, a, 0, |vm, s| {
-        // Read a logical line (enclosures may span lines).
+        // Read a logical line (enclosures may span lines), at most
+        // $length bytes when given.
         let mut buf = Vec::new();
         let mut in_enc = false;
-        while let Some(line) = read_line(vm, s, None) {
-            for &c in &line {
-                if Some(c) == enc {
-                    in_enc = !in_enc;
-                }
-            }
+        let max = (len > 0).then_some(len as usize);
+        // (a line cut inside an enclosure goes on unlimited, test
+        // bug12556.phpt)
+        while let Some(line) = read_line(vm, s, if buf.is_empty() { max } else { None }) {
             buf.extend_from_slice(&line);
+            in_enc = csv_open(&buf, sep, enc, esc);
             if !in_enc {
                 break;
             }
         }
+        let _ = in_enc;
         if buf.is_empty() {
             return Ok(Value::Bool(false));
         }

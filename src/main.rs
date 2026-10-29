@@ -549,12 +549,20 @@ fn split_ini(v: &[u8]) -> (Vec<u8>, Vec<u8>) {
                     i += 1;
                 }
                 val = out;
-            } else if val.first() != Some(&b'"')
-                && let Some(c) = val.iter().position(|&c| c == b';')
-            {
-                val.truncate(c);
+            } else if val.first() != Some(&b'"') {
+                if let Some(c) = val.iter().position(|&c| c == b';') {
+                    val.truncate(c);
+                }
                 while val.last().is_some_and(|c| c.is_ascii_whitespace()) {
                     val.pop();
+                }
+                // bare boolean words are "1" or "" (observed on PHP 8.5:
+                // `-d display_errors=on` reads back as "1"; test
+                // auto_detect_line_endings_1.phpt)
+                match val.to_ascii_lowercase().as_slice() {
+                    b"on" | b"yes" | b"true" => val = b"1".to_vec(),
+                    b"off" | b"no" | b"false" | b"none" | b"null" => val.clear(),
+                    _ => {}
                 }
             }
             (v[..p].to_vec(), val)
