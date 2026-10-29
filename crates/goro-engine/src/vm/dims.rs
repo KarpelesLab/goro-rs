@@ -7,7 +7,7 @@
 use crate::class::{DisplayName, TypeName};
 use std::rc::Rc;
 
-use goro_runtime::{Key, ObjRef, PhpArray, PhpRef, PhpStr, Value};
+use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, PhpStr, Value};
 
 use super::{R, Vm};
 use crate::bytecode::*;
@@ -565,9 +565,11 @@ impl Vm {
     }
 
     pub(crate) fn op_write(&mut self, path: u32, res: Reg) -> R<()> {
-        let code = self.code_ref();
-        let p = code.paths[path as usize].clone();
-        self.run_path(&p, res)
+        let p: *const WritePath = &self.code_ref().paths[path as usize];
+        // SAFETY: the path belongs to the running frame's code, which the
+        // frame keeps alive (it holds the function) until the instruction
+        // completes, whatever user code the walk runs; no copy needed.
+        self.run_path(unsafe { &*p }, res)
     }
 
     /// Pointer to a variable's value for writing (creating it as null).
@@ -682,16 +684,27 @@ impl Vm {
         if n > MAX {
             return Ok(false);
         }
-        let mut keys: [Option<Key>; MAX] = [None, None, None, None];
+        // The keys, borrowed from their operands (which nothing below
+        // writes before the end): ints, or strings normalised as array
+        // keys are.
+        let mut keys: [KeyRef<'static>; MAX] = [KeyRef::Int(0); MAX];
         for (i, e) in path.elems.iter().enumerate() {
             let PathElem::Dim(k) = *e else {
                 return Ok(false);
             };
-            keys[i] = Some(match self.peek(k) {
-                Some(Value::Int(i)) => Key::Int(*i),
-                Some(Value::Str(s)) => Key::from_php_str(s),
+            let v: *const Value = match self.peek(k) {
+                Some(v) => v,
+                None => return Ok(false),
+            };
+            // SAFETY: see above; the operand outlives the walk.
+            keys[i] = match unsafe { &*v } {
+                Value::Int(i) => KeyRef::Int(*i),
+                Value::Str(s) => match goro_runtime::array::canonical_int(s) {
+                    Some(i) => KeyRef::Int(i),
+                    None => KeyRef::Str(s),
+                },
                 _ => return Ok(false),
-            });
+            };
         }
         // The operand of the action, checked before anything is written.
         match path.action {
@@ -718,8 +731,7 @@ impl Vm {
             Some(v) => v as *mut Value,
             None => return Ok(false),
         };
-        for k in keys.iter().take(n - 1) {
-            let k = k.as_ref().unwrap().as_ref();
+        for &k in keys.iter().take(n - 1) {
             let Value::Array(a) = (unsafe { &mut *cur }) else {
                 return Ok(false);
             };
@@ -732,45 +744,42 @@ impl Vm {
         let Value::Array(a) = (unsafe { &mut *cur }) else {
             return Ok(false);
         };
-        let key = keys[n - 1].take().unwrap();
+        let key = keys[n - 1];
         match path.action {
             PathAction::Assign(v) => {
-                if matches!(a.get(key.as_ref()), Some(Value::Ref(_))) {
+                if matches!(a.get(key), Some(Value::Ref(_))) {
                     return Ok(false);
                 }
                 let val = self.get(v)?;
                 if res != NONE {
                     self.put(res, val.clone());
                 }
-                // `cur` is still valid: reading the operand ran no code.
+                // `cur` and the keys are still valid: reading the operand
+                // ran no code and wrote no other slot.
                 let Value::Array(a) = (unsafe { &mut *cur }) else {
                     unreachable!()
                 };
-                let old = a.make_mut().assign(key, val);
+                let old = a.make_mut().assign(key.to_owned(), val);
                 drop(old);
             }
             PathAction::AssignOp(op, v) => {
-                let Some(old) = a.get(key.as_ref()) else {
+                let d = a.make_mut();
+                let Some(slot) = d.get_mut(key) else {
                     return Ok(false);
                 };
                 if op == Bin::Concat {
-                    if !matches!(old, Value::Str(_)) {
+                    let Value::Str(s) = slot else {
                         return Ok(false);
-                    }
+                    };
                     let Some(Value::Str(y)) = self.peek(v) else {
                         unreachable!()
                     };
-                    let y = y.clone();
-                    let Some(Value::Str(s)) = a.make_mut().get_mut(key.as_ref()) else {
-                        unreachable!()
-                    };
-                    s.push_bytes(&y);
+                    s.push_bytes(y);
                     let r = if res != NONE {
                         Some(Value::Str(s.clone()))
                     } else {
                         None
                     };
-                    drop(y);
                     self.drop_tmp(v);
                     if let Some(r) = r {
                         self.put(res, r);
@@ -779,34 +788,33 @@ impl Vm {
                     let Some(y) = self.peek(v) else {
                         unreachable!()
                     };
-                    let Some(r) = super::exec::fast_arith(op, old, y) else {
+                    let Some(r) = super::exec::fast_arith(op, slot, y) else {
                         return Ok(false);
                     };
-                    let slot = a.make_mut().get_mut(key.as_ref()).unwrap();
                     // The old value is a number: nothing to drop.
-                    unsafe { std::ptr::write(slot, r.clone()) };
+                    unsafe { std::ptr::write(slot, r) };
                     if res != NONE {
+                        let r = slot.clone();
                         self.put(res, r);
                     }
                 }
             }
             PathAction::IncDec(op) => {
-                let Some(Value::Int(x)) = a.get(key.as_ref()) else {
+                let d = a.make_mut();
+                let Some(Value::Int(x)) = d.get_mut(key) else {
                     return Ok(false);
                 };
-                let x = *x;
+                let old = *x;
                 let Some(nv) = (if op.is_inc() {
-                    x.checked_add(1)
+                    old.checked_add(1)
                 } else {
-                    x.checked_sub(1)
+                    old.checked_sub(1)
                 }) else {
                     return Ok(false);
                 };
-                if let Some(Value::Int(s)) = a.make_mut().get_mut(key.as_ref()) {
-                    *s = nv;
-                }
+                *x = nv;
                 if res != NONE {
-                    self.put(res, Value::Int(if op.is_post() { x } else { nv }));
+                    self.put(res, Value::Int(if op.is_post() { old } else { nv }));
                 }
             }
             _ => unreachable!(),
