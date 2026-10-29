@@ -158,13 +158,62 @@ pub trait NativeStream {
     fn wrapper_data(&self) -> Option<Value> {
         None
     }
+    /// fstat(): a stat array in a user wrapper's shape, if the stream has
+    /// one.
+    fn stat(&self) -> Option<PhpArray> {
+        None
+    }
 }
 
-/// A stream wrapper implemented in Rust.
+/// A stream wrapper implemented in Rust. The path operations are optional
+/// (PHP manual: streamWrapper, the same operations for user wrappers):
+/// without one, the file functions treat the URL as before (a plain path).
 pub struct NativeWrapper {
     /// Opens `url` with fopen's `mode`; warns (unless `quiet`) and returns
     /// none on failure, as fopen() does.
     pub open: fn(&mut Vm, &Args, &[u8], &[u8], bool) -> R<Option<Stream>>,
+    /// url_stat(url, flags): a stat array in a user wrapper's shape (keys
+    /// "mode", "size"... or 0..12), none when there is no such file.
+    /// `flags` are STREAM_URL_STAT_LINK (1) | STREAM_URL_STAT_QUIET (2).
+    pub url_stat: Option<fn(&mut Vm, &[u8], i64) -> R<Option<PhpArray>>>,
+    /// unlink(url): warns itself on failure.
+    pub unlink: Option<fn(&mut Vm, &Args, &[u8]) -> R<bool>>,
+    /// rename(from, to).
+    pub rename: Option<fn(&mut Vm, &Args, &[u8], &[u8]) -> R<bool>>,
+    /// mkdir(url, mode, options) with STREAM_MKDIR_RECURSIVE (1).
+    pub mkdir: Option<fn(&mut Vm, &Args, &[u8], i64, i64) -> R<bool>>,
+    /// rmdir(url).
+    pub rmdir: Option<fn(&mut Vm, &Args, &[u8]) -> R<bool>>,
+    /// opendir(url): the entry names, none (after a warning) on failure.
+    pub opendir: Option<fn(&mut Vm, &Args, &[u8]) -> R<Option<Vec<Vec<u8>>>>>,
+    /// touch() (option 1, value [mtime, atime] or empty) and chmod()
+    /// (option 6, value the mode), as stream_metadata.
+    pub metadata: Option<fn(&mut Vm, &Args, &[u8], i64, &Value) -> R<bool>>,
+    /// include/require of a URL: the source and the name the included
+    /// file runs under, none when it can't be read.
+    pub include: Option<IncludeHook>,
+}
+
+/// include/require of a URL: `(vm, "include"..., url, quiet)` gives the
+/// source and the name the included file runs under, or none (after a
+/// warning unless `quiet`) when it can't be read.
+pub type IncludeHook = fn(&mut Vm, &str, &[u8], bool) -> R<Option<(Vec<u8>, Vec<u8>)>>;
+
+impl NativeWrapper {
+    /// A wrapper that only opens streams.
+    pub const fn new(open: fn(&mut Vm, &Args, &[u8], &[u8], bool) -> R<Option<Stream>>) -> Self {
+        NativeWrapper {
+            open,
+            url_stat: None,
+            unlink: None,
+            rename: None,
+            mkdir: None,
+            rmdir: None,
+            opendir: None,
+            metadata: None,
+            include: None,
+        }
+    }
 }
 
 /// Which side of a stream a filter is attached to.
@@ -241,6 +290,8 @@ pub struct StreamRegistry {
     filters: Vec<(&'static str, FilterFactory)>,
     /// stream_filter_register(): (name or `family.*`, class name).
     user_filters: Vec<(Vec<u8>, PhpStr)>,
+    include_filters: Vec<IncludeFilter>,
+    path_hooks: Vec<PathHook>,
 }
 
 /// Registers a stream wrapper for `scheme` (lower case, without `://`).
@@ -248,6 +299,62 @@ pub fn register_wrapper(vm: &mut Vm, scheme: &str, w: &'static NativeWrapper) {
     vm.ext::<StreamRegistry>()
         .wrappers
         .insert(scheme.as_bytes().to_ascii_lowercase(), w);
+}
+
+/// Splits include_path on ':' but not inside a URL's "scheme://"
+/// (PHP manual: include_path; "phar://" entries).
+/// Rewrites a relative path a file function opens (phar's
+/// interceptFileFuncs: relative to the running archive); none keeps it.
+pub type PathHook = fn(&mut Vm, &[u8]) -> Option<Vec<u8>>;
+
+/// Registers a path hook.
+pub fn register_path_hook(vm: &mut Vm, f: PathHook) {
+    vm.ext::<StreamRegistry>().path_hooks.push(f);
+}
+
+/// A relative path as the path hooks rewrite it.
+pub(crate) fn rewrite_path(vm: &mut Vm, p: &[u8]) -> Option<Vec<u8>> {
+    if p.is_empty() || p.starts_with(b"/") || p.windows(3).any(|w| w == b"://") {
+        return None;
+    }
+    let reg = vm.ext::<StreamRegistry>();
+    if reg.path_hooks.is_empty() {
+        return None;
+    }
+    let hs = reg.path_hooks.clone();
+    hs.into_iter().find_map(|f| f(vm, p))
+}
+
+pub fn split_include_path(p: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    let mut i = 0;
+    while i < p.len() {
+        if p[i] == b':' && !p[i..].starts_with(b"://") {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(p[i]);
+        }
+        i += 1;
+    }
+    out.push(cur);
+    out.retain(|d| !d.is_empty());
+    out
+}
+
+/// A hook that may replace the source of an included file (phar: an
+/// archive's stub); none keeps it.
+pub type IncludeFilter = fn(&mut Vm, &[u8], &[u8]) -> Option<Vec<u8>>;
+
+/// Registers an include filter.
+pub fn register_include_filter(vm: &mut Vm, f: IncludeFilter) {
+    vm.ext::<StreamRegistry>().include_filters.push(f);
+}
+
+/// Runs the include filters on a file's source.
+pub(crate) fn include_filter(vm: &mut Vm, path: &[u8], src: &[u8]) -> Option<Vec<u8>> {
+    let fs = vm.ext::<StreamRegistry>().include_filters.clone();
+    fs.into_iter().find_map(|f| f(vm, path, src))
 }
 
 /// Registers a filter name (`zlib.inflate`) or family (`convert.iconv.*`,
@@ -457,6 +564,23 @@ fn stream_filter_remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
         // SAFETY: `stream` keeps the resource alive for the call.
         let mut s = unsafe { (*cell).borrow_mut() };
         let mut gone: Vec<AttachedFilter> = Vec::new();
+        // A write filter removed is closed: what it gives back goes through
+        // the filters after it to the stream (test
+        // ext/bz2/tests/bug81092.phpt: a complete bzip2 stream).
+        if let Some(i) = s.write_filters.iter().position(|f| f.id == id) {
+            let mut f = s.write_filters.remove(i);
+            let mut out = Vec::new();
+            let ok = f.filter.filter(vm, &[], true, &mut out)?;
+            if ok && !out.is_empty() {
+                let mut rest = std::mem::take(&mut s.write_filters);
+                let r = run_chain(vm, &mut rest[i..], &out, false);
+                s.write_filters = rest;
+                if let Some(data) = r? {
+                    let _ = s.write_raw(vm, &data);
+                }
+            }
+            gone.push(f);
+        }
         let st = &mut *s;
         for chain in [&mut st.read_filters, &mut st.write_filters] {
             let mut i = 0;

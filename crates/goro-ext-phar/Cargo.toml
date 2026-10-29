@@ -1,0 +1,11 @@
+[package]
+name = "goro-ext-phar"
+description = "PHP phar extension: phar, tar and zip archive formats, signatures, stubs"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+goro-ext-zlib = { path = "../goro-ext-zlib" }
+compcol = { version = "0.7", default-features = false, features = ["alloc", "std", "bzip2"] }
+purecrypto = { version = "0.10", default-features = false, features = ["hash", "std"] }

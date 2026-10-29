@@ -282,6 +282,9 @@ impl Vm {
     /// status.
     pub fn run_script(&mut self, src: &[u8], path: &[u8]) -> i32 {
         self.arm_memory_limit();
+        // a script a wrapper runs another way (a tar/zip phar: its stub)
+        let filtered = crate::builtins::streams::include_filter(self, path, src);
+        let src = filtered.as_deref().unwrap_or(src);
         // PHP manual (php.ini directives): auto_prepend_file and
         // auto_append_file are parsed before/after the main file, as with
         // require.

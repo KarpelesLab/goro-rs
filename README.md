@@ -129,6 +129,20 @@ the XML extensions each pass 87-100% of their tests that run.
   pattern tried (~3.6k compressed outputs, ~3.6k behaviour cases recorded
   from PHP 8.5); compression at 1.0-1.3x and decompression at 1.3-1.5x
   PHP's throughput.
+- ext/bz2 (engine module on compcol's bzip2, byte-identical to libbzip2):
+  `bz*` functions, `compress.bzip2://` and the `bzip2.*` filters
+  (21 of 22 tests; the other needs a 4 GB string).
+- `goro-ext-zip`: the ZIP format (PKWARE APPNOTE) for ext/zip: reading
+  with libzip's consistency checks and error codes, writing with ZIP64,
+  store/deflate/bzip2/xz/zstd, traditional PKWARE and WinZip AES
+  encryption (purecrypto); `ZipArchive`, `zip://` and the `zip_*`
+  functions pass 105 of the 107 ext/zip tests (2 need ZTS or are manual).
+- `goro-ext-phar`: the phar, tar and zip archive formats as ext/phar reads
+  and writes them (manifest, stubs, MD5/SHA/OpenSSL signatures, entry and
+  whole-file compression), rewriting archives made by PHP 8.5 byte for
+  byte; `Phar`, `PharData`, `PharFileInfo` and the `phar://` wrapper
+  (includes, stat, directories, rename/unlink, interceptFileFuncs) pass
+  368 of the 443 ext/phar tests that run.
 - `goro-ext-filter`: ext/filter on runtime values: every filter of
   `filter_list()` (the int, float, bool, regexp, domain, URL, e-mail, IP
   and MAC validators with all their flags and options, the sanitizers,

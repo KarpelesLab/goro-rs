@@ -20,6 +20,8 @@ members = [
     "crates/goro-ext-sodium",
     "crates/goro-xml",
     "crates/goro-ext-openssl",
+    "crates/goro-ext-phar",
+    "crates/goro-ext-zip",
     "crates/goro-ext-intl",
     "crates/goro-ext-gd",
     "crates/goro-ext-exif",
