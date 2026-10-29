@@ -22,6 +22,7 @@ members = [
     "crates/goro-ext-openssl",
     "crates/goro-ext-intl",
     "crates/goro-ext-gd",
+    "crates/goro-ext-exif",
 ]
 
 [workspace.package]
