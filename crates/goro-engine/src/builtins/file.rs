@@ -1906,11 +1906,15 @@ fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(total as i64))
 }
 
+/// "unlink(path): No such file or directory" (tests
+/// ext/standard/tests/file/unlink_variation*.phpt).
 fn fs_warn(vm: &mut Vm, a: &Args, what: &[u8], e: &std::io::Error) -> R<Value> {
-    vm.fwarn(
-        a,
-        &format!("{}: {}", String::from_utf8_lossy(what), io_err_msg(e)),
-    )?;
+    vm.warn(&format!(
+        "{}({}): {}",
+        a.fname(),
+        String::from_utf8_lossy(what),
+        io_err_msg(e)
+    ))?;
     Ok(Value::Bool(false))
 }
 
