@@ -25,9 +25,65 @@ pub static MODULE: Module = Module {
         "__php_incomplete_class",
         "<?php #[AllowDynamicProperties] final class __PHP_Incomplete_Class {}",
     )],
+    hooks: &[("__php_incomplete_class", incomplete_hooks)],
     listed: false,
     ..Module::EMPTY
 };
+
+/// The class an incomplete object stands for ("unknown" without one).
+pub(crate) fn incomplete_class_name(o: &ObjRef) -> String {
+    match o
+        .obj()
+        .props
+        .borrow()
+        .get_str(&PhpStr::from("__PHP_Incomplete_Class_Name"))
+    {
+        Some(Value::Str(s)) => s.to_string_lossy(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// The message about an operation on an incomplete object (observed on
+/// PHP 8.5; tests ext/standard/tests/serialize/incomplete_class,
+/// serialization_objects_005).
+pub(crate) fn incomplete_msg(what: &str, o: &ObjRef) -> String {
+    format!(
+        "The script tried to {} on an incomplete object. Please ensure that the class definition \"{}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition",
+        what,
+        incomplete_class_name(o)
+    )
+}
+
+/// Property access on __PHP_Incomplete_Class objects: reads warn and give
+/// null, writes fail.
+fn incomplete_hooks() -> crate::class::NativeHooks {
+    crate::class::NativeHooks {
+        prop: Some(|vm, o, name, acc| {
+            use crate::class::ObjAccess;
+            if name.as_bytes() == b"__PHP_Incomplete_Class_Name" {
+                return None;
+            }
+            Some(match acc {
+                ObjAccess::Write(_) | ObjAccess::Unset => {
+                    vm.throw("Error", &incomplete_msg("modify a property", o))
+                }
+                acc => {
+                    let f = vm.active_function_name();
+                    let msg = format!("{}(): {}", f, incomplete_msg("access a property", o));
+                    match vm.warn(&msg) {
+                        Err(e) => Err(e),
+                        Ok(()) => Ok(match acc {
+                            ObjAccess::Isset => Value::Bool(false),
+                            ObjAccess::Empty => Value::Bool(true),
+                            _ => Value::Null,
+                        }),
+                    }
+                }
+            })
+        }),
+        ..Default::default()
+    }
+}
 
 #[derive(Default)]
 struct Ser {

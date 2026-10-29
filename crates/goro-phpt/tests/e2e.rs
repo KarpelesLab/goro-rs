@@ -30,6 +30,7 @@ fn config(root: &Path) -> Config {
         tmp: std::env::temp_dir(),
         mem_limit: None,
         heavy: false,
+        online: false,
     }
 }
 

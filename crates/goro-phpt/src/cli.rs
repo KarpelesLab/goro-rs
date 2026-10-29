@@ -37,6 +37,7 @@ options:
   --mem-limit MB      address-space limit of each test process (default 6144;
                       0: none)
   --heavy             also run tests needing several GB of memory or disk
+  --online            also run tests reaching hosts on the Internet
   --min-free-gb GB    refuse to start when less memory is available (default
                       30; 0: no check)
 
@@ -59,6 +60,7 @@ struct Options {
     mem_limit_mb: u64,
     min_free_gb: u64,
     heavy: bool,
+    online: bool,
     paths: Vec<PathBuf>,
 }
 
@@ -83,6 +85,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         mem_limit_mb: 6144,
         min_free_gb: 30,
         heavy: false,
+        online: false,
         paths: Vec::new(),
     };
     let mut it = args.iter();
@@ -98,6 +101,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
             "-q" | "--quiet" => o.quiet = true,
             "--keep" => o.keep = true,
             "--heavy" => o.heavy = true,
+            "--online" => o.online = true,
             "--mem-limit" => {
                 let v = value(&mut it, "--mem-limit")?;
                 o.mem_limit_mb = v
@@ -384,6 +388,7 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         tmp: std::env::temp_dir(),
         mem_limit: (o.mem_limit_mb > 0).then_some(o.mem_limit_mb << 20),
         heavy: o.heavy,
+        online: o.online,
     };
     let jobs = schedule::jobs(&files);
     let all: Mutex<(Vec<TestResult>, Counts)> =
