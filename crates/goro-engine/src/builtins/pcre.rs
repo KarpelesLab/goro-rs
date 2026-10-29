@@ -141,10 +141,10 @@ fn regex(vm: &mut Vm, a: &Args, pat: &PhpStr) -> R<Option<Rc<Regex>>> {
     }
 }
 
-fn ini_u32(vm: &Vm, k: &[u8], d: u32) -> u32 {
-    match vm.get_ini(k) {
+fn ini_u32(vm: &Vm, k: &PhpStr, d: u32) -> u32 {
+    match vm.ini.values.get(k) {
         Some(v) => {
-            let n = goro_runtime::convert::str_to_int(&v);
+            let n = goro_runtime::convert::str_to_int(v);
             if n < 0 {
                 u32::MAX
             } else {
@@ -153,6 +153,16 @@ fn ini_u32(vm: &Vm, k: &[u8], d: u32) -> u32 {
         }
         None => d,
     }
+}
+
+thread_local! {
+    /// The ini names read on every call, interned once (their hashes are
+    /// precomputed: a lookup allocates and hashes nothing).
+    static LIMIT_KEYS: [PhpStr; 3] = [
+        PhpStr::intern(b"pcre.backtrack_limit"),
+        PhpStr::intern(b"pcre.recursion_limit"),
+        PhpStr::intern(b"pcre.jit"),
+    ];
 }
 
 fn limits_for(vm: &Vm, pat: &[u8]) -> Limits {
@@ -166,17 +176,21 @@ fn limits_for(vm: &Vm, pat: &[u8]) -> Limits {
 }
 
 pub(crate) fn limits(vm: &Vm) -> Limits {
-    let mut l = Limits::new(
-        ini_u32(vm, b"pcre.backtrack_limit", 1_000_000),
-        ini_u32(vm, b"pcre.recursion_limit", 100_000),
-    );
-    if vm
-        .get_ini(b"pcre.jit")
-        .is_some_and(|v| goro_runtime::convert::str_to_int(&v) != 0)
-    {
-        l.jit_stack = Some(Limits::PHP_JIT_STACK);
-    }
-    l
+    LIMIT_KEYS.with(|k| {
+        let mut l = Limits::new(
+            ini_u32(vm, &k[0], 1_000_000),
+            ini_u32(vm, &k[1], 100_000),
+        );
+        if vm
+            .ini
+            .values
+            .get(&k[2])
+            .is_some_and(|v| goro_runtime::convert::str_to_int(v) != 0)
+        {
+            l.jit_stack = Some(Limits::PHP_JIT_STACK);
+        }
+        l
+    })
 }
 
 /// The value of one group in a match array.
