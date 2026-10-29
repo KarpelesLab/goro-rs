@@ -3,6 +3,7 @@
 
 pub mod array;
 pub mod bcmath;
+pub mod browscap;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
@@ -92,6 +93,7 @@ pub fn modules() -> Vec<&'static Module> {
         &net::MODULE,
         &dir::MODULE,
         &stdmisc::MODULE,
+        &browscap::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,
