@@ -389,10 +389,11 @@ impl Vm {
             // hook (phar://): include_path entries of that wrapper, then
             // the directory of the calling script (PHP manual: Phar, using
             // Phar archives).
-            let mut dirs: Vec<Vec<u8>> = crate::builtins::streams::split_include_path(&self.ini.include_path)
-                .into_iter()
-                .filter(|d| d.windows(3).any(|w| w == b"://"))
-                .collect();
+            let mut dirs: Vec<Vec<u8>> =
+                crate::builtins::streams::split_include_path(&self.ini.include_path)
+                    .into_iter()
+                    .filter(|d| d.windows(3).any(|w| w == b"://"))
+                    .collect();
             let cur = self.cur_file();
             if let Some(p) = cur.iter().rposition(|&c| c == b'/')
                 && cur.windows(3).any(|w| w == b"://")
@@ -457,7 +458,11 @@ impl Vm {
         let src = match std::fs::read(&resolved) {
             // an archive a wrapper runs another way (a tar- or zip-based
             // phar runs its stub; PHP manual: Phar)
-            Ok(s) => match crate::builtins::streams::include_filter(self, canon.as_os_str().as_bytes(), &s) {
+            Ok(s) => match crate::builtins::streams::include_filter(
+                self,
+                canon.as_os_str().as_bytes(),
+                &s,
+            ) {
                 Some(f) => f,
                 None => s,
             },

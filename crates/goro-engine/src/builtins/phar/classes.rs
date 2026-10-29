@@ -630,7 +630,10 @@ fn offset_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let raw = vm.to_php_str(&a.val(0))?;
     let n = local_name(&raw);
     if goro_ext_phar::is_meta_name(&n)
-        && !matches!(&n[..], b".phar/stub.php" | b".phar/alias.txt" | b".phar/signature.bin")
+        && !matches!(
+            &n[..],
+            b".phar/stub.php" | b".phar/alias.txt" | b".phar/signature.bin"
+        )
     {
         return vm.throw(
             "BadMethodCallException",
@@ -1228,7 +1231,10 @@ fn converted_name(key: &[u8], ext: &[u8]) -> Vec<u8> {
             break;
         };
         let comp = base[d + 1..].to_ascii_lowercase();
-        if matches!(&comp[..], b"phar" | b"tar" | b"zip" | b"tgz" | b"tbz" | b"gz" | b"bz2") {
+        if matches!(
+            &comp[..],
+            b"phar" | b"tar" | b"zip" | b"tgz" | b"tbz" | b"gz" | b"bz2"
+        ) {
             end = slash + d;
         } else {
             break;
@@ -1519,7 +1525,9 @@ fn h_add_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     }
     let data = vm.to_php_str(&a.val(1))?.to_vec();
-    s.borrow_mut().a.put(Entry::file(&name, data, 0, new_perms()));
+    s.borrow_mut()
+        .a
+        .put(Entry::file(&name, data, 0, new_perms()));
     Ok(Value::Bool(true))
 }
 

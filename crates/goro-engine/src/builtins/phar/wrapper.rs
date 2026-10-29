@@ -780,7 +780,11 @@ fn opendir(vm: &mut Vm, a: &Args, url: &[u8]) -> R<Option<Vec<Vec<u8>>>> {
     }
     // names longer than a path can be are left out (test
     // GHSA-jqcx-ccgc-xwhv.phpt)
-    let mut names: Vec<Vec<u8>> = l.a.list_dir(&inner).into_iter().filter(|n| n.len() < 4096).collect();
+    let mut names: Vec<Vec<u8>> =
+        l.a.list_dir(&inner)
+            .into_iter()
+            .filter(|n| n.len() < 4096)
+            .collect();
     // mounted directories show at the root
     for (m, _) in &l.mounts {
         let parent = match m.iter().rposition(|&c| c == b'/') {

@@ -990,7 +990,11 @@ fn fopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if f.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
     }
-    let f = match a.bool_or(2, false).then(|| wrapper_include_path(vm, &f)).flatten() {
+    let f = match a
+        .bool_or(2, false)
+        .then(|| wrapper_include_path(vm, &f))
+        .flatten()
+    {
         Some(p) if !vm.fs_path(&f).exists() => p,
         _ => f,
     };
@@ -1747,7 +1751,11 @@ fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if f.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
     }
-    let f = match a.bool_or(1, false).then(|| wrapper_include_path(vm, &f)).flatten() {
+    let f = match a
+        .bool_or(1, false)
+        .then(|| wrapper_include_path(vm, &f))
+        .flatten()
+    {
         Some(p) if !vm.fs_path(&f).exists() => p,
         _ => f,
     };
@@ -1873,7 +1881,11 @@ fn file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn readfile(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
-    let f = match a.bool_or(1, false).then(|| wrapper_include_path(vm, &f)).flatten() {
+    let f = match a
+        .bool_or(1, false)
+        .then(|| wrapper_include_path(vm, &f))
+        .flatten()
+    {
         Some(p) if !vm.fs_path(&f).exists() => p,
         _ => f,
     };
