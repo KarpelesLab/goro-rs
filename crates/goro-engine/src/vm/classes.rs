@@ -1120,16 +1120,31 @@ impl Vm {
             );
         }
         let existing = cls.prop_map.borrow().get(&p.name).cloned();
+        // Internal stubs mark write-once properties with #[WriteOnce]
+        // (test ext/pdo/tests/pdo_036.phpt: PDOStatement::$queryString).
+        let write_once =
+            decl.file.is_empty() && p.attrs.iter().any(|a| a.name.as_bytes() == b"WriteOnce");
+        let (pflags, pattrs) = if write_once {
+            let rest: Vec<_> = p
+                .attrs
+                .iter()
+                .filter(|a| a.name.as_bytes() != b"WriteOnce")
+                .cloned()
+                .collect();
+            (p.flags | mflags::WRITE_ONCE, Rc::from(rest))
+        } else {
+            (p.flags, p.attrs.clone())
+        };
         let info = |slot: u32| PropInfo {
             name: p.name.clone(),
             slot,
-            flags: p.flags,
+            flags: pflags,
             ty: p.ty.clone(),
             class: cp,
             get: get.clone(),
             set: set.clone(),
             doc: p.doc.clone(),
-            attrs: p.attrs.clone(),
+            attrs: pattrs.clone(),
             default: p.default.clone(),
         };
         if let Some(idxs) = existing {
@@ -2875,6 +2890,7 @@ pub(crate) fn copy_hooks(h: &NativeHooks) -> NativeHooks {
         dim: h.dim,
         destroy: h.destroy,
         static_this: h.static_this,
+        new_check: h.new_check,
     }
 }
 

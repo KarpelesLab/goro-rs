@@ -140,6 +140,7 @@ class PDO {
 const PDO_STATEMENT: &str = r#"<?php
 #[NotCloneable]
 class PDOStatement implements IteratorAggregate {
+    #[WriteOnce]
     public string $queryString;
     public function bindColumn(string|int $column, mixed &$var, int $type = PDO::PARAM_STR, int $maxLength = 0, mixed $driverOptions = null): bool {}
     public function bindParam(string|int $param, mixed &$var, int $type = PDO::PARAM_STR, int $maxLength = 0, mixed $driverOptions = null): bool {}
@@ -167,7 +168,6 @@ const PDO_ROW: &str = r#"<?php
 #[NotSerializable]
 final class PDORow {
     public string $queryString;
-    public function __construct() {}
 }"#;
 
 const PDO_SQLITE: &str = r#"<?php
@@ -258,7 +258,6 @@ pub static MODULE: Module = Module {
         ("pdostatement::setattribute", stmt::set_attribute),
         ("pdostatement::setfetchmode", fetch::set_fetch_mode),
         ("pdostatement::getiterator", fetch::get_iterator),
-        ("pdorow::__construct", fetch::row_construct),
     ],
     hooks: &[
         ("pdo", core::dbh_hooks),
