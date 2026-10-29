@@ -52,7 +52,7 @@ record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
 php-src test suite (8.5.4), share of the tests that run: **91.2%** overall
-(15,146 passing, 1,467 failing, 4,836 skipped), as of 2026-10-29.
+(15,302 passing, 1,470 failing, 4,677 skipped), as of 2026-10-29.
 The extension libraries below are wired into the engine; ext/random,
 mbstring, iconv, zlib, bcmath, gmp, filter, sodium, uri, openssl, intl and
 the XML extensions each pass 87-100% of their tests that run.
