@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-sqlite"
+description = "SQLite connections for PHP's ext/sqlite3 and pdo_sqlite: statements, parameters, errors and open flags on graphitesql"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+graphitesql = "0.1.7"

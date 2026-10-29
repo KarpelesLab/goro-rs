@@ -48,6 +48,7 @@ pub mod reflection;
 pub mod serialize;
 pub mod simplexml;
 pub mod sockets;
+pub mod sqlite_common;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;

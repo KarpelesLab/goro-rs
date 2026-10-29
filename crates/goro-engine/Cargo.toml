@@ -28,6 +28,7 @@ goro-ext-intl = { path = "../goro-ext-intl" }
 goro-ext-gd = { path = "../goro-ext-gd" }
 goro-ext-exif = { path = "../goro-ext-exif" }
 goro-ext-curl = { path = "../goro-ext-curl" }
+goro-ext-sqlite = { path = "../goro-ext-sqlite" }
 libc = "0.2"
 corosensei = "0.2"
 compcol = { version = "0.7", default-features = false, features = ["alloc", "std", "bzip2"] }
