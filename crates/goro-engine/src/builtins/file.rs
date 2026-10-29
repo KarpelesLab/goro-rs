@@ -1531,6 +1531,9 @@ fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
     }
     s.eof = false;
     s.pending.clear();
+    // read filters start over after a seek (test streams/bug64166.phpt)
+    s.filters_closed = false;
+    s.filtered.clear();
     // Seeking flushes the write filters (observed on PHP 8.5).
     if !s.write_filters.is_empty()
         && let Err(e) = super::streams::flush_write_filters(vm, s)
