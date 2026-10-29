@@ -1227,22 +1227,28 @@ fn decompress_files(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn converted_name(key: &[u8], ext: &[u8]) -> Vec<u8> {
     // the archive extensions at the end go (test bug74196.phpt:
     // "x.1.2.3.phar.tar.gz" decompresses to "x.1.2.3.phar.tar")
+    // the name loses everything from its first archive extension
+    // ("x.phar.php" -> "x"; test phar_decompress.phpt)
     let slash = key.iter().rposition(|&c| c == b'/').map_or(0, |p| p + 1);
+    let base = &key[slash..];
     let mut end = key.len();
-    loop {
-        let base = &key[slash..end];
-        let Some(d) = base.iter().rposition(|&c| c == b'.').filter(|&d| d > 0) else {
-            break;
-        };
-        let comp = base[d + 1..].to_ascii_lowercase();
-        if matches!(
-            &comp[..],
-            b"phar" | b"tar" | b"zip" | b"tgz" | b"tbz" | b"gz" | b"bz2"
-        ) {
-            end = slash + d;
-        } else {
-            break;
+    let mut i = 1;
+    while i < base.len() {
+        if base[i] == b'.' {
+            let rest = &base[i + 1..];
+            let comp_end = rest.iter().position(|&c| c == b'.').unwrap_or(rest.len());
+            let comp = rest[..comp_end].to_ascii_lowercase();
+            if matches!(&comp[..], b"phar" | b"tar" | b"zip" | b"tgz" | b"tbz") {
+                end = slash + i;
+                break;
+            }
         }
+        i += 1;
+    }
+    if end == key.len()
+        && let Some(d) = base.iter().skip(1).position(|&c| c == b'.')
+    {
+        end = slash + d + 1;
     }
     let mut out = key[..end].to_vec();
     if !ext.starts_with(b".") {

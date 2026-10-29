@@ -103,8 +103,8 @@ pub(crate) fn include_filter(_vm: &mut Vm, path: &[u8], src: &[u8]) -> Option<Ve
     }
     let opts = ParseOptions::default();
     let a = Archive::parse(path, src, &opts).ok()?;
-    goro_ext_phar::stub::find_halt(&a.stub)?;
-    Some(a.stub)
+    // the stub runs even without __HALT_COMPILER() (test tar/tar_004.phpt)
+    (!a.stub.is_empty()).then_some(a.stub)
 }
 
 /// phar.readonly and phar.require_hash can be turned on at run time but
