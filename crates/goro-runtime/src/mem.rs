@@ -8,6 +8,9 @@
 //! the shutdown sequence; going past the headroom too ends the process
 //! from the hook.
 //!
+//! Small blocks come from per-thread size-class free lists (see the
+//! "small blocks" section); larger ones from the system allocator.
+//!
 //! The counters are plain relaxed loads and stores, not read-modify-write
 //! operations: the interpreter allocates from one thread, and an
 //! occasional lost update from a helper thread only blurs the count.
@@ -75,11 +78,112 @@ fn credit(size: usize) {
     USED.store(USED.load(Relaxed).saturating_sub(size), Relaxed);
 }
 
+// ---------------------------------------------------------------- small blocks
+//
+// Blocks of up to `SMALL_MAX` bytes (alignment up to 16) come from
+// per-thread free lists, one per size class, refilled by carving 256 KiB
+// chunks taken from the system allocator, as a request-oriented PHP heap
+// does. Freed small blocks go back on the freeing thread's list and are
+// reused; chunks are not returned to the system. The size class is found
+// from the layout alone, which `dealloc` and `realloc` receive too, so
+// blocks carry no header. Accounting (`charge`/`credit`) is by requested
+// size, as before, so memory_limit sees the same numbers.
+
+const SMALL_MAX: usize = 512;
+const NCLASS: usize = 16;
+const CHUNK: usize = 256 << 10;
+
+/// Size of each class: 16-byte steps to 128, 32 to 256, 64 to 512.
+const CLASS_SIZE: [usize; NCLASS] = [
+    16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512,
+];
+
+#[inline(always)]
+fn class_of(size: usize) -> usize {
+    if size <= 128 {
+        size.max(1).div_ceil(16) - 1
+    } else if size <= 256 {
+        8 + (size - 129) / 32
+    } else {
+        12 + (size - 257) / 64
+    }
+}
+
+#[inline(always)]
+fn is_small(layout: &Layout) -> bool {
+    layout.size() <= SMALL_MAX && layout.align() <= 16
+}
+
+struct Pool {
+    free: [*mut u8; NCLASS],
+    bump: *mut u8,
+    end: *mut u8,
+}
+
+thread_local! {
+    static POOL: std::cell::UnsafeCell<Pool> = const {
+        std::cell::UnsafeCell::new(Pool {
+            free: [std::ptr::null_mut(); NCLASS],
+            bump: std::ptr::null_mut(),
+            end: std::ptr::null_mut(),
+        })
+    };
+}
+
+#[inline(always)]
+fn small_alloc(size: usize) -> *mut u8 {
+    let c = class_of(size);
+    POOL.with(|p| {
+        // SAFETY: the pool is this thread's; nothing re-enters it.
+        let p = unsafe { &mut *p.get() };
+        let head = p.free[c];
+        if !head.is_null() {
+            // SAFETY: a free block holds the next free block's address.
+            p.free[c] = unsafe { *(head as *mut *mut u8) };
+            return head;
+        }
+        carve(p, CLASS_SIZE[c])
+    })
+}
+
+#[inline(never)]
+fn carve(p: &mut Pool, sz: usize) -> *mut u8 {
+    if (p.end as usize) - (p.bump as usize) < sz {
+        // SAFETY: a non-zero, valid layout.
+        let chunk = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, 16)) };
+        if chunk.is_null() {
+            return chunk;
+        }
+        p.bump = chunk;
+        // SAFETY: within the chunk.
+        p.end = unsafe { chunk.add(CHUNK) };
+    }
+    let b = p.bump;
+    // SAFETY: `sz` bytes are left in the chunk.
+    p.bump = unsafe { b.add(sz) };
+    b
+}
+
+#[inline(always)]
+fn small_free(ptr: *mut u8, size: usize) {
+    let c = class_of(size);
+    POOL.with(|p| {
+        // SAFETY: as in small_alloc; every block has room for a pointer.
+        let p = unsafe { &mut *p.get() };
+        unsafe { *(ptr as *mut *mut u8) = p.free[c] };
+        p.free[c] = ptr;
+    })
+}
+
 unsafe impl GlobalAlloc for CountingAlloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         charge(layout.size());
-        let p = unsafe { System.alloc(layout) };
+        let p = if is_small(&layout) {
+            small_alloc(layout.size())
+        } else {
+            unsafe { System.alloc(layout) }
+        };
         if p.is_null() {
             credit(layout.size());
         }
@@ -89,7 +193,15 @@ unsafe impl GlobalAlloc for CountingAlloc {
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         charge(layout.size());
-        let p = unsafe { System.alloc_zeroed(layout) };
+        let p = if is_small(&layout) {
+            let p = small_alloc(layout.size());
+            if !p.is_null() {
+                unsafe { std::ptr::write_bytes(p, 0, layout.size()) };
+            }
+            p
+        } else {
+            unsafe { System.alloc_zeroed(layout) }
+        };
         if p.is_null() {
             credit(layout.size());
         }
@@ -98,7 +210,11 @@ unsafe impl GlobalAlloc for CountingAlloc {
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) };
+        if is_small(&layout) {
+            small_free(ptr, layout.size());
+        } else {
+            unsafe { System.dealloc(ptr, layout) };
+        }
         credit(layout.size());
     }
 
@@ -108,7 +224,29 @@ unsafe impl GlobalAlloc for CountingAlloc {
         if new_size > old {
             charge(new_size - old);
         }
-        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        // SAFETY: the caller guarantees a valid new layout.
+        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        let p = match (is_small(&layout), is_small(&new_layout)) {
+            (false, false) => unsafe { System.realloc(ptr, layout, new_size) },
+            (true, true) if class_of(old) == class_of(new_size) => ptr,
+            (small_old, small_new) => {
+                let q = if small_new {
+                    small_alloc(new_size)
+                } else {
+                    unsafe { System.alloc(new_layout) }
+                };
+                if !q.is_null() {
+                    // SAFETY: both blocks hold at least the smaller size.
+                    unsafe { std::ptr::copy_nonoverlapping(ptr, q, old.min(new_size)) };
+                    if small_old {
+                        small_free(ptr, old);
+                    } else {
+                        unsafe { System.dealloc(ptr, layout) };
+                    }
+                }
+                q
+            }
+        };
         if p.is_null() {
             if new_size > old {
                 credit(new_size - old);
