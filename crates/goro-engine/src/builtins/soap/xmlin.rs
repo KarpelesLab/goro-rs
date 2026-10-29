@@ -148,6 +148,15 @@ impl InDoc {
         }
     }
 
+    /// Serializes a node with the namespaces it uses declared on it.
+    pub fn to_xml_fixup(&self, n: NodeId) -> String {
+        let opts = goro_xml::serialize::SaveOptions {
+            fixup_ns: true,
+            ..Default::default()
+        };
+        goro_xml::serialize::to_string(&self.arena, n, &opts)
+    }
+
     /// Serializes a node as libxml does (no declaration).
     pub fn to_xml(&self, n: NodeId) -> String {
         let opts = goro_xml::serialize::SaveOptions::default();

@@ -265,15 +265,8 @@ pub fn to_xml(
     }
     // A user typemap's to_xml.
     if let Some((ns, name)) = enc_qname(cx, enc)
-        && let Some(f) = cx
-            .typemap
-            .iter()
-            .find(|t| t.ns == ns && t.name == name)
-            .and_then(|t| t.to_xml.clone())
+        && apply_typemap(vm, cx, &ns, &name, &v, el, literal)?
     {
-        let r = vm.call_value(&f, vec![v.clone()])?;
-        let s = vm.to_php_str(&r)?;
-        replace_with_xml(cx, el, &s.to_string_lossy(), literal);
         return Ok(());
     }
     if let Value::Null = v {
@@ -437,18 +430,72 @@ fn enc_qname(cx: &Cx, enc: Option<Enc>) -> Option<(String, String)> {
     }
 }
 
-/// Replaces `el` with the markup a typemap's to_xml returned (its root
-/// element is kept, renamed... as PHP does: the returned node is used).
-fn replace_with_xml(cx: &mut Cx, el: El, xml: &str, _literal: bool) {
-    let s = xml.trim();
-    let s = match s.strip_prefix("<?xml") {
-        Some(rest) => match rest.find("?>") {
-            Some(i) => rest[i + 2..].trim_start(),
-            None => s,
-        },
-        None => s,
+/// A typemap's to_xml for type (ns, name): its markup replaces `el`; in
+/// encoded messages the root gets xsi:type, with the xsi prefix the
+/// markup declares (observed on PHP 8.5; tests typemap002.phpt,
+/// typemap013.phpt).
+#[allow(clippy::too_many_arguments)]
+fn apply_typemap(
+    vm: &mut Vm,
+    cx: &mut Cx,
+    ns: &str,
+    name: &str,
+    v: &Value,
+    el: El,
+    literal: bool,
+) -> R<bool> {
+    let Some(f) = cx
+        .typemap
+        .iter()
+        .find(|t| t.ns == ns && t.name == name)
+        .and_then(|t| t.to_xml.clone())
+    else {
+        return Ok(false);
     };
-    replace_raw(cx, el, s);
+    let r = vm.call_value(&f, vec![v.clone()])?;
+    let s = vm.to_php_str(&r)?.to_string_lossy();
+    let s = s.trim();
+    let mut s = match s.strip_prefix("<?xml") {
+        Some(rest) => match rest.find("?>") {
+            Some(i) => rest[i + 2..].trim_start().to_string(),
+            None => s.to_string(),
+        },
+        None => s.to_string(),
+    };
+    if !literal && let Some(end) = root_tag_end(&s) {
+        let tag = &s[..end];
+        let decl = format!("=\"{NS_XSI}\"");
+        let prefix = tag.find(&decl).and_then(|i| {
+            let before = &tag[..i];
+            before.rfind("xmlns:").map(|j| before[j + 6..].to_string())
+        });
+        let prefix = match prefix {
+            Some(p) => p,
+            None => cx.doc.ensure_ns(Some(el), NS_XSI),
+        };
+        let t = cx.doc.qname(Some(el), ns, name);
+        let at = if s[..end].ends_with('/') { end - 1 } else { end };
+        s.insert_str(at, &format!(" {prefix}:type=\"{t}\""));
+    }
+    replace_raw(cx, el, &s);
+    Ok(true)
+}
+
+/// The offset of the `>` ending the root start tag.
+fn root_tag_end(s: &str) -> Option<usize> {
+    let mut q: Option<char> = None;
+    for (i, c) in s.char_indices().skip(1) {
+        match q {
+            Some(x) if c == x => q = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => q = Some(c),
+                '>' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
 }
 
 /// Replaces element `el` in its parent with raw markup.
@@ -544,6 +591,11 @@ fn soapvar_to_xml(vm: &mut Vm, cx: &mut Cx, o: &ObjRef, el: El, literal: bool) -
     if code == types::XSD_ANYXML {
         let s = vm.to_php_str(&val)?;
         replace_raw(cx, el, &s.to_string_lossy());
+        return Ok(());
+    }
+    if let Some(t) = &stype
+        && apply_typemap(vm, cx, sns.as_deref().unwrap_or(""), t, &val, el, literal)?
+    {
         return Ok(());
     }
     if enc.is_none() && (code == types::UNKNOWN_TYPE || code == 0) && stype.is_none() {

@@ -208,7 +208,7 @@ fn typemap_from_xml(vm: &mut Vm, dx: &mut Dx, ns: &str, name: &str, n: NodeId) -
     let Some(f) = f else {
         return guess(vm, dx, n);
     };
-    let xml = dx.d.to_xml(n);
+    let xml = dx.d.to_xml_fixup(n);
     vm.call_value(&f, vec![Value::Str(PhpStr::from(xml))])
 }
 
