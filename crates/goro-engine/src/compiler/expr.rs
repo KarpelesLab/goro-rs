@@ -1960,7 +1960,10 @@ impl<'a> Compiler<'a> {
                         let var = self.cv(v);
                         self.emit(Op::SendNamedVar { var, name });
                     }
-                    _ if is_ref_capable(&a.value) && !contains_nullsafe(&a.value) => {
+                    _ if is_ref_capable(&a.value)
+                        && !contains_nullsafe(&a.value)
+                        && !temp_rooted(&a.value) =>
+                    {
                         let j = self.emit(Op::JmpNamedArgByRef { name, t: 0 });
                         let v = self.expr(&a.value)?;
                         self.free(v);
@@ -2018,7 +2021,10 @@ impl<'a> Compiler<'a> {
                     self.free(r);
                     self.emit(Op::SendRef { src: r, arg: i });
                 }
-                _ if is_ref_capable(&a.value) && !contains_nullsafe(&a.value) => {
+                _ if is_ref_capable(&a.value)
+                    && !contains_nullsafe(&a.value)
+                    && !temp_rooted(&a.value) =>
+                {
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
                     let v = self.expr(&a.value)?;
                     self.free(v);
@@ -2259,11 +2265,19 @@ impl<'a> Compiler<'a> {
                 if contains_nullsafe(e) {
                     return self.err("Can't use nullsafe operator in write context", e.span.line);
                 }
-                let v = self.expr(e)?;
-                Ok(LPath {
-                    base: PathBase::Tmp(v),
-                    elems: Vec::new(),
-                })
+                // A temporary value can't be written through (observed on
+                // PHP 8.5: `(new A)->p = 1`, `[1][0] = 2`; tests
+                // Zend/tests/gh12102_*).
+                if matches!(e.kind, ExprKind::Clone { .. }) {
+                    return self.err(
+                        "Cannot use result of built-in function in write context",
+                        e.span.line,
+                    );
+                }
+                self.err(
+                    "Cannot use temporary expression in write context",
+                    e.span.line,
+                )
             }
         }
     }
@@ -3259,6 +3273,24 @@ fn writes_directly(e: &Expr<'_>) -> bool {
         }
         ExprKind::StaticCall(sc) => !matches!(sc.args, Args::FirstClassCallable),
         _ => false,
+    }
+}
+
+/// Whether an access chain starts at a temporary value (a literal, `new`,
+/// an operator's result...) rather than a variable or a call: such places
+/// can be read but not written.
+pub(crate) fn temp_rooted(e: &Expr<'_>) -> bool {
+    match &e.kind {
+        ExprKind::Prop { obj, .. } => temp_rooted(obj),
+        ExprKind::Index { base, .. } => temp_rooted(base),
+        ExprKind::Variable(_)
+        | ExprKind::VariableVariable(_)
+        | ExprKind::StaticProp(_)
+        | ExprKind::Call { .. }
+        | ExprKind::MethodCall { .. }
+        | ExprKind::StaticCall(_)
+        | ExprKind::CallExpr { .. } => false,
+        _ => true,
     }
 }
 

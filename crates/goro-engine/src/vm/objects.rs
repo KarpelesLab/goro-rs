@@ -801,7 +801,13 @@ impl Vm {
             match self.peek(obj) {
                 Some(Value::Object(o)) => o.clone(),
                 _ => {
-                    let v = self.get(obj)?;
+                    // An undefined variable is null here without the
+                    // warning (observed on PHP 8.5; test Zend/tests/bug75921).
+                    let v = if obj & (CONST | TMP) == 0 && self.peek(obj).is_none() {
+                        Value::Null
+                    } else {
+                        self.get(obj)?
+                    };
                     match v {
                         Value::Object(o) => o,
                         other => {
