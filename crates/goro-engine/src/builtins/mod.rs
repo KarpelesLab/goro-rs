@@ -4,6 +4,7 @@
 pub mod array;
 pub mod bcmath;
 pub mod bz2;
+pub mod calendar;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
@@ -96,6 +97,7 @@ pub fn modules() -> Vec<&'static Module> {
         &bz2::MODULE,
         &phar::MODULE,
         &ctype::MODULE,
+        &calendar::MODULE,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
