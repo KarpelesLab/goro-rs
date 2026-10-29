@@ -46,6 +46,9 @@ struct Rewriter {
     vars: Vec<(Vec<u8>, Vec<u8>)>,
     handler: Option<ObjRef>,
     carry: Vec<u8>,
+    /// The action of the last form was allowed: a form without one
+    /// follows it (test output_add_rewrite_var_basic3.phpt).
+    last_form_denied: bool,
 }
 
 #[derive(Default)]
@@ -70,19 +73,10 @@ fn rw(vm: &mut Vm, w: Which) -> &mut Rewriter {
     }
 }
 
-/// Whether the rewriter's handler is on the output buffer stack.
-fn handler_active(vm: &mut Vm, w: Which) -> bool {
-    let Some(h) = rw(vm, w).handler.clone() else {
-        return false;
-    };
-    vm.out.buffers.iter().any(|b| {
-        matches!(&b.callback, Some(Value::Object(o)) if o.handle() == h.handle())
-    })
-}
-
-/// Pushes the rewriter's output handler if it is not running.
+/// Pushes the rewriter's output handler, once per request: a handler
+/// that was removed is not started again (test url_rewriting_basic3.phpt).
 fn ensure_handler(vm: &mut Vm, w: Which) -> R<()> {
-    if handler_active(vm, w) || vm.out.deactivated {
+    if rw(vm, w).handler.is_some() || vm.out.deactivated {
         return Ok(());
     }
     let f: crate::func::NativeFn = match w {
@@ -156,8 +150,11 @@ fn handle(vm: &mut Vm, a: &mut Args, w: Which) -> R<Value> {
         return Ok(Value::Str(PhpStr::from(data)));
     }
     let cfg = Config::load(vm, w, vars);
-    let (out, rest) = rewrite(&cfg, &data, fin);
-    rw(vm, w).carry = rest;
+    let mut denied = rw(vm, w).last_form_denied;
+    let (out, rest) = rewrite(&cfg, &data, fin, &mut denied);
+    let r = rw(vm, w);
+    r.carry = rest;
+    r.last_form_denied = denied;
     Ok(Value::Str(PhpStr::from(out)))
 }
 
@@ -344,7 +341,7 @@ fn is_name(c: u8) -> bool {
 
 /// Rewrites `data`; an unfinished tag at the end is returned to hold back
 /// unless `fin`.
-fn rewrite(cfg: &Config, data: &[u8], fin: bool) -> (Vec<u8>, Vec<u8>) {
+fn rewrite(cfg: &Config, data: &[u8], fin: bool, denied: &mut bool) -> (Vec<u8>, Vec<u8>) {
     let mut out = Vec::with_capacity(data.len() + 64);
     let mut i = 0;
     let n = data.len();
@@ -447,7 +444,12 @@ fn rewrite(cfg: &Config, data: &[u8], fin: bool) -> (Vec<u8>, Vec<u8>) {
                 .iter()
                 .find(|(an, _, _, q)| an == b"action" && *q != 1)
                 .map(|(_, vs, ve, _)| &data[*vs..*ve]);
-            if action.is_none_or(|u| cfg.allowed(u)) {
+            let ok = match action {
+                Some(u) => cfg.allowed(u),
+                None => !*denied,
+            };
+            *denied = !ok;
+            if ok {
                 out.extend_from_slice(&cfg.inputs);
             }
         }
