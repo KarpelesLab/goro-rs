@@ -30,6 +30,7 @@ pub mod mail;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
+pub mod net;
 pub mod openssl;
 pub mod output;
 pub mod password;
@@ -86,6 +87,7 @@ pub fn modules() -> Vec<&'static Module> {
         &misc::MODULE,
         &image::MODULE,
         &mail::MODULE,
+        &net::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,

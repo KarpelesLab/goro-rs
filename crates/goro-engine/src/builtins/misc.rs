@@ -744,7 +744,16 @@ fn services() -> Vec<(Vec<u8>, i64, Vec<u8>, Vec<Vec<u8>>)> {
     out
 }
 
-fn getservbyname(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn getservbyname(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    for (i, n) in [(0, "service"), (1, "protocol")] {
+        if a.bytes(i).contains(&0) {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                &format!("Argument #{} (${n}) must not contain any null bytes", i + 1),
+            );
+        }
+    }
     let (svc, proto) = (a.bytes(0).to_vec(), a.bytes(1).to_vec());
     for (name, port, p, aliases) in services() {
         if p == proto && (name == svc || aliases.contains(&svc)) {
@@ -754,7 +763,14 @@ fn getservbyname(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(false))
 }
 
-fn getservbyport(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn getservbyport(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if a.bytes(1).contains(&0) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($protocol) must not contain any null bytes",
+        );
+    }
     let (port, proto) = (a.int(0), a.bytes(1).to_vec());
     for (name, p, pr, _) in services() {
         if p == port && pr == proto {
