@@ -1170,6 +1170,25 @@ impl Vm {
         self.exit_status = 255;
     }
 
+    /// An uncaught exception reported as a warning ("Warning: Uncaught
+    /// ..."): assert.bail after a failing assert callback (tests
+    /// Zend/tests/assert/gh16293_001.phpt, gh16293_002.phpt).
+    pub(crate) fn warn_uncaught(&mut self, ex: &ObjRef) {
+        let Ok(s) = self.exception_to_string(ex) else {
+            return;
+        };
+        let file = self.get_prop_raw(ex, b"file");
+        let file = file.as_str().cloned().unwrap_or_default();
+        let line = match self.get_prop_raw(ex, b"line") {
+            Value::Int(n) => n,
+            _ => 0,
+        };
+        let msg = format!("Uncaught {}\n  thrown", s);
+        if self.ini.error_reporting & E_WARNING != 0 {
+            self.display_error(E_WARNING, &msg, file.as_bytes(), line as u32);
+        }
+    }
+
     pub fn exception_to_string(&mut self, ex: &ObjRef) -> R<String> {
         let v = self.call_method(ex, b"__tostring", Vec::new())?;
         Ok(match v {
