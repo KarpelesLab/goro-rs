@@ -566,7 +566,10 @@ fn build(
                 stmt_error(vm, st, fname, &e)?;
                 return Ok(None);
             };
-            Ok(Some(vm.call_value(&f, row)?))
+            // A by-reference callback's reference is kept (test
+            // ext/pdo/tests/pdo_fetch_function_return_by_ref).
+            let c = vm.resolve_callable(&f, true)?;
+            Ok(Some(vm.call_callee_raw(c, row)?))
         }
         FETCH_BOUND => Ok(Some(Value::Bool(true))),
         FETCH_LAZY => {
