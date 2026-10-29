@@ -179,7 +179,14 @@ impl Vm {
             Some(v) => Ok(v.clone()),
             None => {
                 self.undefined_var(r)?;
-                Ok(Value::Null)
+                // An attached frame (include) may have bound the variable
+                // to its owner's just now (a function's `global $x` made
+                // it after the include started).
+                Ok(match unsafe { &*self.slot_ptr(r) } {
+                    Some(Value::Ref(rf)) => rf.get(),
+                    Some(v) => v.clone(),
+                    None => Value::Null,
+                })
             }
         }
     }
