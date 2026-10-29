@@ -45,6 +45,7 @@ pub mod sockets;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
+pub mod stdmisc;
 pub mod streams;
 pub mod string;
 pub mod strmisc;
@@ -90,6 +91,7 @@ pub fn modules() -> Vec<&'static Module> {
         &mail::MODULE,
         &net::MODULE,
         &dir::MODULE,
+        &stdmisc::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,

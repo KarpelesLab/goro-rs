@@ -1752,6 +1752,11 @@ fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }));
         }
+        // native streams over a file (compress.zlib://) lock it (test
+        // ext/zlib/tests/zlib_wrapper_flock_basic.phpt)
+        if matches!(s.backing, Backing::Native(_)) {
+            return Ok(Value::Bool(true));
+        }
         let Backing::File(f) = &s.backing else {
             return Ok(Value::Bool(false));
         };

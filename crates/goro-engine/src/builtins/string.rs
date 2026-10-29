@@ -151,7 +151,7 @@ pub static MODULE: Module = Module {
             str_word_count,
         ),
         (
-            "function strtr(string $string, array|string $from, ?string $to = null): string",
+            "function strtr(string $string, array|string|null $from, ?string $to = null): string",
             strtr,
         ),
         ("function addslashes(string $string): string", addslashes),
@@ -962,10 +962,19 @@ fn strtr(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let from = a.val(1);
     if a.len() < 3 {
         let Value::Array(pairs) = from else {
+            // null is refused without the deprecation of a null string
+            // (test strings/strtr_variation8.phpt)
             return vm.fthrow(
                 a,
                 "TypeError",
-                "Argument #2 ($from) must be of type array, string given",
+                &format!(
+                    "Argument #2 ($from) must be of type array, {} given",
+                    if matches!(from, Value::Null) {
+                        "null"
+                    } else {
+                        "string"
+                    }
+                ),
             );
         };
         let mut list = Vec::with_capacity(pairs.len());
@@ -993,7 +1002,13 @@ fn strtr(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 "Argument #2 ($from) must be of type string, array given",
             );
         }
-        _ => unreachable!(),
+        _ => {
+            vm.fdeprecated(
+                a,
+                "Passing null to parameter #2 ($from) of type array|string is deprecated",
+            )?;
+            PhpStr::empty()
+        }
     };
     let to = match to {
         Value::Str(t) => t,

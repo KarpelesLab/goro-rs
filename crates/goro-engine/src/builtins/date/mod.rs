@@ -303,6 +303,26 @@ pub(crate) fn default_tz(vm: &mut Vm) -> TimeZone {
     goro_ext_date::api::default_timezone(&ini.to_string_lossy()).unwrap_or_else(TimeZone::utc)
 }
 
+/// The time stamp of error log lines, "d-M-Y H:i:s e" in the default zone
+/// (the zone named as the ini setting spells it; test
+/// general_functions/bug60723.phpt).
+pub fn log_timestamp(vm: &mut Vm) -> String {
+    let tz = default_tz(vm);
+    let set = vm.ext::<DateState>().default_tz.is_some();
+    let ini = vm.get_ini(b"date.timezone").unwrap_or_default();
+    let name = if !set
+        && !ini.is_empty()
+        && goro_ext_date::api::default_timezone(&ini.to_string_lossy()).is_some()
+    {
+        ini.to_string_lossy()
+    } else {
+        tz.name()
+    };
+    let t = now().0;
+    let d = goro_ext_date::api::strftime(b"%d-%b-%Y %H:%M:%S", t, &tz, false);
+    format!("{} {}", String::from_utf8_lossy(&d), name)
+}
+
 /// Stores the warnings and errors of a parse for getLastErrors().
 pub(crate) fn set_last_errors(vm: &mut Vm, e: LastErrors) {
     vm.ext::<DateState>().last_errors = if e.is_empty() { None } else { Some(e) };
