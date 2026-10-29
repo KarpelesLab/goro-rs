@@ -183,7 +183,7 @@ pub static MODULE: Module = Module {
         ("function lstat(string $filename): array|false", lstat),
         (
             "function clearstatcache(bool $clear_realpath_cache = false, string $filename = \"\"): void",
-            noop,
+            clearstatcache,
         ),
         ("function realpath(string $path): string|false", realpath),
         (
@@ -2315,6 +2315,11 @@ fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let from = a.str(0);
     let to = a.str(1);
+    let sch = |p: &[u8]| super::userstream::scheme(p).unwrap_or_else(|| b"file".to_vec());
+    if sch(&from) != sch(&to) {
+        vm.fwarn(a, "Cannot rename a file across wrapper types")?;
+        return Ok(Value::Bool(false));
+    }
     if let Some(cls) = super::userstream::wrapper_for(vm, &from) {
         return super::userstream::path_op(
             vm,
@@ -2787,9 +2792,11 @@ fn lstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
-fn noop(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+fn clearstatcache(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    super::userstream::clear_stat_cache();
     Ok(Value::Null)
 }
+
 fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Bool(true))
 }

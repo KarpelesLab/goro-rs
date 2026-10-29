@@ -463,6 +463,34 @@ pub fn simple(vm: &mut Vm, s: &Stream, method: &[u8], args: Vec<Value>) -> R<Opt
 
 /// url_stat() of a user wrapper URL.
 pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Option<PhpArray>> {
+    // the last result is cached until clearstatcache() or a change made
+    // through a wrapper (test file/userwrapper.phpt)
+    if let Some(st) = STAT_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(p, _)| p.as_slice() == path)
+            .map(|(_, st)| st.clone())
+    }) {
+        return Ok(Some(st));
+    }
+    let r = url_stat_uncached(vm, class, path, flags)?;
+    if let Some(st) = &r {
+        STAT_CACHE.with(|c| *c.borrow_mut() = Some((path.to_vec(), st.clone())));
+    }
+    Ok(r)
+}
+
+thread_local! {
+    static STAT_CACHE: std::cell::RefCell<Option<(Vec<u8>, PhpArray)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Forgets the cached url_stat() result (clearstatcache()).
+pub fn clear_stat_cache() {
+    STAT_CACHE.with(|c| *c.borrow_mut() = None);
+}
+
+fn url_stat_uncached(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Option<PhpArray>> {
     let o = instance(vm, class, None)?;
     let r = call(
         vm,
@@ -484,7 +512,20 @@ pub fn url_stat(vm: &mut Vm, class: &PhpStr, path: &[u8], flags: i64) -> R<Optio
 
 /// A path operation (unlink, rename, mkdir, rmdir, stream_metadata) on a
 /// user wrapper URL: the method's result as a bool.
+/// A path operation (unlink, rename, mkdir, rmdir, metadata): the stat
+/// cache is dropped first.
 pub fn path_op(vm: &mut Vm, a: &Args, class: &PhpStr, method: &str, args: Vec<Value>) -> R<Value> {
+    clear_stat_cache();
+    path_op_cached(vm, a, class, method, args)
+}
+
+fn path_op_cached(
+    vm: &mut Vm,
+    a: &Args,
+    class: &PhpStr,
+    method: &str,
+    args: Vec<Value>,
+) -> R<Value> {
     let ctx = call_context(a);
     let o = instance(vm, class, Some(ctx))?;
     match call(vm, &o, method.as_bytes(), args)? {
