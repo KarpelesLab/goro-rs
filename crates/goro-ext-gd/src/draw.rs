@@ -790,12 +790,19 @@ impl Image {
             if im.aa_dont_blend >= 0 && im.get_pixel(x, y) == im.aa_dont_blend {
                 return;
             }
-            // Coverage 0..255 lowers the opacity.
-            let opacity = (127 - base_alpha) * cov / 255;
-            let a = 127 - opacity;
-            let c = (color & 0x00ff_ffff) | (a << 24);
+            // The color mixed with the pixel by coverage 0..255, in
+            // 8-bit channels (imagepolygon_aa.png: black over white at
+            // coverage c gives 255 - c).
+            let _ = base_alpha;
             let i = y as usize * im.sx as usize + x as usize;
-            im.tpixels[i] = alpha_blend(im.tpixels[i], c);
+            let d = im.tpixels[i];
+            let mix = |s: i32, t: i32| (s * cov + t * (255 - cov)) / 255;
+            im.tpixels[i] = tc(
+                mix(tc_r(color), tc_r(d)),
+                mix(tc_g(color), tc_g(d)),
+                mix(tc_b(color), tc_b(d)),
+                tc_a(d),
+            );
         };
         if dx.abs() > dy.abs() {
             let (x1, y1, x2, y2) = if dx < 0 {
@@ -961,8 +968,17 @@ pub fn polygon_spans(pts: &[(i32, i32)], ymin: i32, ymax: i32, out: &mut Vec<(i3
 /// the centre (imagearc_basic.png, imagegammacorrect_basic.png).
 pub fn arc_point(cx: i32, cy: i32, w: i32, h: i32, deg: i32) -> (i32, i32) {
     let r = (deg as f64).to_radians();
-    let ct = (r.cos() * 1024.0) as i64;
-    let st = (r.sin() * 1024.0) as i64;
+    // Exact values (cos 120° is -512/1024) are kept exact (bug73614).
+    let q = |v: f64| -> i64 {
+        let v = v * 1024.0;
+        if (v - v.round()).abs() < 1e-9 {
+            v.round() as i64
+        } else {
+            v as i64
+        }
+    };
+    let ct = q(r.cos());
+    let st = q(r.sin());
     (
         cx + ((ct * w as i64 / 2) / 1024) as i32,
         cy + ((st * h as i64 / 2) / 1024) as i32,

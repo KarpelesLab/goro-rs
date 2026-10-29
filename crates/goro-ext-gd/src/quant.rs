@@ -238,7 +238,18 @@ pub fn truecolor_to_palette(im: &mut Image, dither: bool, colors: usize) {
     if dither {
         // Floyd–Steinberg with the error limited to ±16 per channel
         // step (so flat areas don't speckle).
-        let limit = |e: i32| -> i32 { e.clamp(-16, 16) };
+        // Errors up to 16 pass, larger ones are halved, capped at 32.
+        let limit = |e: i32| -> i32 {
+            let a = e.abs();
+            let l = if a < 16 {
+                a
+            } else if a < 48 {
+                16 + (a - 16) / 2
+            } else {
+                32
+            };
+            if e < 0 { -l } else { l }
+        };
         let mut err_cur = vec![[0i32; 3]; w + 2];
         let mut err_next = vec![[0i32; 3]; w + 2];
         for y in 0..h {
