@@ -403,7 +403,8 @@ fn cbpf(vm: &mut Vm, a: &Args, fd: RawFd, k: i64) -> R<Value> {
     struct Ins(u16, u8, u8, u32);
     #[repr(C)]
     struct Prog(u16, *const Ins);
-    const BPF_LD_W_ABS: u16 = 0x00 | 0x00 | 0x20;
+    // BPF_LD | BPF_W | BPF_ABS
+    const BPF_LD_W_ABS: u16 = 0x20;
     const BPF_RET_A: u16 = 0x06 | 0x10;
     let ins = [
         Ins(BPF_LD_W_ABS, 0, 0, (-4096i64 + k) as u32),

@@ -102,11 +102,11 @@ fn conv_name(vm: &mut Vm, c: &mut Ctx, family: i32, v: &Value) -> R<Conv<addr::A
     };
     match family {
         libc::AF_INET | libc::AF_INET6 => {
-            let port = match get(&t, "port") {
+            let port = match get(t, "port") {
                 Some(p) => vm.to_int(&p)? as u16,
                 None => 0,
             };
-            let host = match get(&t, "addr") {
+            let host = match get(t, "addr") {
                 Some(h) => Some(vm.to_php_str(&h)?),
                 None => None,
             };
@@ -130,11 +130,11 @@ fn conv_name(vm: &mut Vm, c: &mut Ctx, family: i32, v: &Value) -> R<Conv<addr::A
                 };
                 return Ok(Ok(addr::inet_sockaddr(ip, port)));
             }
-            let flow = match get(&t, "flowinfo") {
+            let flow = match get(t, "flowinfo") {
                 Some(f) => vm.to_int(&f)? as u32,
                 None => 0,
             };
-            let mut scope = match get(&t, "scope_id") {
+            let mut scope = match get(t, "scope_id") {
                 Some(f) => vm.to_int(&f)? as u32,
                 None => 0,
             };
@@ -163,7 +163,7 @@ fn conv_name(vm: &mut Vm, c: &mut Ctx, family: i32, v: &Value) -> R<Conv<addr::A
             Ok(Ok(addr::inet6_sockaddr(ip, port, flow, scope)))
         }
         libc::AF_UNIX => {
-            let Some(p) = get(&t, "path") else {
+            let Some(p) = get(t, "path") else {
                 return c.fail(vm, "The key 'path' is required");
             };
             let p = vm.to_php_str(&p)?;
@@ -221,7 +221,7 @@ fn conv_cmsg_data(vm: &mut Vm, c: &mut Ctx, level: i32, ty: i32, v: &Value) -> R
             };
             let mut vals = [0i64; 3];
             for (i, k) in ["pid", "uid", "gid"].iter().enumerate() {
-                let Ok(x) = need(vm, c, &t, k)? else {
+                let Ok(x) = need(vm, c, t, k)? else {
                     return Ok(Err(Failed));
                 };
                 vals[i] = vm.to_int(&x)?;
@@ -235,10 +235,10 @@ fn conv_cmsg_data(vm: &mut Vm, c: &mut Ctx, level: i32, ty: i32, v: &Value) -> R
             let Value::Array(t) = v else {
                 return c.fail(vm, "expected an array here");
             };
-            let Ok(addr_v) = need(vm, c, &t, "addr")? else {
+            let Ok(addr_v) = need(vm, c, t, "addr")? else {
                 return Ok(Err(Failed));
             };
-            let Ok(idx_v) = need(vm, c, &t, "ifindex")? else {
+            let Ok(idx_v) = need(vm, c, t, "ifindex")? else {
                 return Ok(Err(Failed));
             };
             let h = vm.to_php_str(&addr_v)?;
@@ -480,8 +480,8 @@ fn control_value(hdr: &libc::msghdr) -> PhpArray {
             let data = match (level, ty) {
                 (libc::SOL_SOCKET, libc::SCM_RIGHTS) => {
                     let mut l = PhpArray::new();
-                    for ch in d.chunks_exact(4) {
-                        let fd = i32::from_ne_bytes([ch[0], ch[1], ch[2], ch[3]]);
+                    for ch in d.as_chunks::<4>().0 {
+                        let fd = i32::from_ne_bytes(*ch);
                         let _ = l.push(super::fd_stream(fd));
                     }
                     Value::Array(l)
@@ -553,7 +553,7 @@ pub fn socket_recvmsg(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let bufsize = match get(&m, "buffer_size") {
         Some(v) => {
             let n = vm.to_int(&v)?;
-            if n < 0 || n > MAX_BUFFER {
+            if !(0..=MAX_BUFFER).contains(&n) {
                 c.path.push("buffer_size".into());
                 let _ = c.fail::<()>(
                     vm,

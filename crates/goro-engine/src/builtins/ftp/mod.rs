@@ -828,10 +828,11 @@ fn ftp_fget(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// Opens the local file of ftp_get(): read/write at the resume position
 /// when autoseek resumes, else truncated.
 fn open_local_get(vm: &mut Vm, a: &Args, c: &Conn, local: &[u8], offset: i64) -> R<Option<Stream>> {
-    if c.autoseek && offset != 0 {
-        if let Some(s) = open_stream(vm, a, local, b"rb+", true)? {
-            return Ok(Some(s));
-        }
+    if c.autoseek
+        && offset != 0
+        && let Some(s) = open_stream(vm, a, local, b"rb+", true)?
+    {
+        return Ok(Some(s));
     }
     open_stream(vm, a, local, b"wb", false)
 }
@@ -1014,6 +1015,7 @@ fn write_data(vm: &mut Vm, data: &mut crate::builtins::sockets::Sock, mut b: &[u
 }
 
 /// Starts an upload (STOR or APPE) from `src`.
+#[allow(clippy::too_many_arguments)]
 fn start_put(
     vm: &mut Vm,
     a: &Args,
@@ -1048,6 +1050,7 @@ fn start_put(
     c.data_cmd(vm, a, cmd, Some(remote))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn put_from(
     vm: &mut Vm,
     a: &Args,
