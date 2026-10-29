@@ -47,6 +47,8 @@ pub struct Cx {
     pub depth: u32,
     /// Inside a repeating model group (its elements repeat too).
     pub rep: u32,
+    /// Arrays being written (their data addresses), to refuse recursion.
+    pub arrays: Vec<usize>,
     /// Write a Header element even without headers (an array of
     /// headers was given; observed on PHP 8.5; test bugs/bug70388.phpt).
     pub force_header: bool,
@@ -70,6 +72,7 @@ impl Cx {
             depth: 0,
             rep: 0,
             force_header: false,
+            arrays: Vec::new(),
         }
     }
 
@@ -282,6 +285,15 @@ pub fn to_xml(
             return Ok(());
         }
         cx.set_nil(el);
+        // A null for SOAP-ENC Array/Struct or a map still gets the type
+        // (observed on PHP 8.5; test interop/Round2/Base/r2_base_009s.phpt).
+        if !literal
+            && let Some(Enc::Builtin(b)) = enc
+            && matches!(b.conv, Conv::Array | Conv::Struct | Conv::Map)
+        {
+            let ns = if b.ns == NS_SOAP11_ENC { cx.enc_ns() } else { b.ns };
+            cx.set_type(el, ns, b.name);
+        }
         if !literal
             && let Some(Enc::Type(t)) = enc
             && let Some(sdl) = cx.sdl.clone()
@@ -349,6 +361,15 @@ pub fn to_xml(
         enc = Some(Enc::Type(t2));
         switched = Some((ns, n));
     }
+    // A recursive array (observed on PHP 8.5; test gh16318.phpt).
+    if cx.depth == 0
+        && let Value::Array(a) = &v
+    {
+        let mut stack = Vec::new();
+        if array_recursive(a, &mut stack) {
+            return vm.throw("ValueError", "Recursive array cannot be encoded");
+        }
+    }
     cx.depth += 1;
     let r = match enc {
         None => guess_to_xml(vm, cx, &v, el, literal),
@@ -365,6 +386,27 @@ pub fn to_xml(
         cx.set_type(el, &ns, &n);
     }
     r
+}
+
+/// Whether an array contains itself (through references).
+fn array_recursive(a: &PhpArray, stack: &mut Vec<usize>) -> bool {
+    if a.is_empty() || stack.len() > 64 {
+        return false;
+    }
+    let addr = a.data_addr();
+    if stack.contains(&addr) {
+        return true;
+    }
+    stack.push(addr);
+    for (_, v) in a.iter() {
+        if let Value::Array(sub) = v.deref()
+            && array_recursive(&sub, stack)
+        {
+            return true;
+        }
+    }
+    stack.pop();
+    false
 }
 
 /// The type an element declaration has.
@@ -615,7 +657,22 @@ fn soapvar_to_xml(vm: &mut Vm, cx: &mut Cx, o: &ObjRef, el: El, literal: bool) -
 
 /// The text a built-in encoding writes for a value.
 pub fn builtin_text(vm: &mut Vm, cx: &Cx, b: Bi, v: &Value) -> R<Option<String>> {
-    let v = v.deref();
+    let mut v = v.deref();
+    // Enums: a backed enum's value (observed on PHP 8.5; test
+    // gh15711.phpt).
+    if let Value::Object(o) = &v
+        && instance_of(vm, o, "UnitEnum")
+        && !matches!(b.conv, Conv::AnyType | Conv::Struct | Conv::Map | Conv::Array | Conv::AnyXml)
+    {
+        if !instance_of(vm, o, "BackedEnum") {
+            return vm.throw("ValueError", "Non-backed enums have no default serialization");
+        }
+        let val = vm.get_prop_raw(o, b"value");
+        if matches!(b.conv, Conv::Long | Conv::BigInt) && matches!(val, Value::Str(_)) {
+            return vm.throw("ValueError", "String-backed enum cannot be serialized as int");
+        }
+        v = val;
+    }
     Ok(Some(match b.conv {
         Conv::String | Conv::Token | Conv::Normalized | Conv::Duration | Conv::Decimal => {
             let bytes = value_to_bytes(vm, &v)?;
@@ -689,7 +746,10 @@ fn builtin_to_xml(vm: &mut Vm, cx: &mut Cx, b: Bi, v: &Value, el: El, literal: b
         // PHP 8.5; test interop/Round2/Base/r2_base_002p.phpt).
         cx.doc.els[el].kids.push(Kid::Text(t));
     }
-    if !literal {
+    // The list types NMTOKENS, IDREFS, ENTITIES carry no xsi:type
+    // (observed on PHP 8.5; test gh15711.phpt).
+    let list = matches!(b.code, types::XSD_NMTOKENS | types::XSD_IDREFS | types::XSD_ENTITIES);
+    if !literal && !list {
         let ns = if b.ns == NS_SOAP11_ENC && cx.version == 2 {
             NS_SOAP12_ENC
         } else {
@@ -1761,6 +1821,16 @@ fn element_to_xml(
             } else {
                 let c = cx.doc.add_child(el, &name);
                 to_xml(vm, cx, enc, &x, c, literal)?;
+                // A type the WSDL names but nothing defines: the value as
+                // guessed, typed with that name (observed on PHP 8.5;
+                // test gh15711.phpt).
+                if enc.is_none()
+                    && !literal
+                    && let Some(super::sdl::TRef::Q(tns, tn)) = &ed.base
+                {
+                    let (tns, tn) = (tns.clone(), tn.clone());
+                    cx.set_type(c, &tns, &tn);
+                }
                 qualify(cx, c);
             }
             Ok(true)

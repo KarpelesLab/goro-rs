@@ -183,10 +183,17 @@ pub fn fault_xml(
     let f = cx.doc.add_child(body, &format!("{prefix}:Fault"));
     let code = str_prop(vm, fault, "faultcode").unwrap_or_default();
     let code_ns = str_prop(vm, fault, "faultcodens");
+    // In the `encoding` option's charset (observed on PHP 8.5; tests
+    // bugs/bug38005.phpt, bug47273.phpt).
     let string = match vm.get_prop_raw(fault, b"faultstring") {
-        Value::Str(s) => s.to_string_lossy(),
         Value::Null => String::new(),
-        v => vm.to_php_str(&v)?.to_string_lossy(),
+        v => {
+            let b = vm.to_php_str(&v)?;
+            match &cx.encoding {
+                Some(e) => super::charset_to_utf8(e, b.as_bytes()),
+                None => b.to_string_lossy(),
+            }
+        }
     };
     let actor = str_prop(vm, fault, "faultactor");
     let detail = vm.get_prop_raw(fault, b"detail");
@@ -770,7 +777,10 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let r = process(vm, &this, &request);
     pop_mode();
     // exit() (SoapServer::fault() included) keeps what was written.
-    let discard = matches!(r, Ok(Out::Fault(..)) | Ok(Out::Plain(..)) | Err(Unwind::Throw(_)));
+    let discard = matches!(
+        r,
+        Ok(Out::Fault(..)) | Ok(Out::Plain(..)) | Ok(Out::Early(..)) | Err(Unwind::Throw(_))
+    );
     while vm.out.buffers.len() > level {
         let f = if discard { "ob_end_clean" } else { "ob_end_flush" };
         vm.call_value(&Value::Str(PhpStr::from(f)), vec![])?;
@@ -797,6 +807,10 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
             } else if super::is_fault_obj(vm, &Value::Object(e.clone())) {
                 let f = with(&this, |d| d.cur_func.take()).flatten();
                 Out::Fault(e, f)
+            } else if instance_of(vm, &e, "Exception") {
+                // Exceptions leave handle() (Errors become faults; observed
+                // on PHP 8.5; test bugs/bug47273.phpt).
+                return Err(Unwind::Throw(e));
             } else {
                 // Other exceptions become Server faults (observed on PHP
                 // 8.5; tests server014.phpt, bugs/bug31422.phpt).
@@ -884,14 +898,14 @@ fn wsdl_output(vm: &mut Vm, this: &ObjRef, version: i64) -> R<Value> {
                 _ => {
                     let f = make_fault(vm, "Server", "Couldn't find WSDL")?;
                     let xml = fault_xml(vm, version, &f, None, &SoapState::default(), &[], None)?;
-                    send_fault_doc(vm, version, &xml);
+                    send_fault_doc(vm, version, &xml);                    return Err(Unwind::Exit);
                 }
             }
         }
         None => {
             let f = make_fault(vm, "Server", "WSDL generation is not supported yet")?;
             let xml = fault_xml(vm, version, &f, None, &SoapState::default(), &[], None)?;
-            send_fault_doc(vm, version, &xml);
+            send_fault_doc(vm, version, &xml);            return Err(Unwind::Exit);
         }
     }
     Ok(Value::Null)
@@ -1090,23 +1104,30 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
             // A header the called operation declares: a method of the
             // header's name (tests interop/Round4/GroupI/r4_groupI_xsd_03*).
             let hns = doc.ns(hc).to_string();
-            let decl = func_def.as_ref().and_then(|f| {
+            // (Without a call: a header any operation declares; test
+            // soap12/T63.phpt.)
+            let find = |f: &Function| {
                 f.input
                     .headers
                     .iter()
                     .find(|d| d.name == hname && d.ns == hns)
                     .cloned()
-            });
+            };
+            let (decl, decl_func) = match (&func_def, &sdl) {
+                (Some(f), _) => (find(f), Some(f.clone())),
+                (None, Some(s)) => match s.functions.iter().find(|f| find(f).is_some()) {
+                    Some(f) => (find(f), Some(f.clone())),
+                    None => (None, None),
+                },
+                _ => (None, None),
+            };
             let hfunc = if decl.is_some() { None } else { hfunc };
             let call_name = match &hfunc {
                 Some(f) => f.name.clone(),
                 None => hname.clone(),
             };
-            let handler_ok = if sdl.is_some() {
-                (hfunc.is_some() || decl.is_some()) && target.has(vm, &call_name)?
-            } else {
-                target.has(vm, &call_name)?
-            };
+            // Else any method of the header's name (test bugs/bug50762.phpt).
+            let handler_ok = target.has(vm, &call_name)?;
             if !handler_ok {
                 if must {
                     return fault_out(vm, "MustUnderstand", "Header not understood");
@@ -1145,7 +1166,7 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
             // The header's operation's response element comes back as a
             // header (observed on PHP 8.5; test soap12/T01.phpt).
             if decl.is_some()
-                && let Some(f) = &func_def
+                && let Some(f) = &decl_func
                 && let Some(o) = &f.output
                 && let Some(oh) = o.headers.first()
             {
@@ -1171,9 +1192,8 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     let Some(fname) = func_name else {
         return fault_out(vm, "Server", "Procedure '' not present");
     };
-    // Is it offered?
-    let offered = target.has(vm, &fname)?;
-    if !offered || (sdl.is_some() && func_def.is_none()) {
+    // Is it in the WSDL?
+    if sdl.is_some() && func_def.is_none() {
         if version == 2 {
             return Ok(Out::Early(proc_not_present(vm)?));
         }
@@ -1224,6 +1244,23 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
                 }
             }
         }
+    }
+    // Is it offered? (After the arguments are decoded; observed on PHP
+    // 8.5; test bugs/gh16259.phpt.)
+    // An object service: a missing method is a fault of its own (observed
+    // on PHP 8.5; test bugs/bug73037.phpt).
+    if let Target::Object(_) = &target
+        && !target.has(vm, &fname)?
+    {
+        let call_name = func_def.as_ref().map(|f| f.name.clone()).unwrap_or(fname.clone());
+        let f = make_fault(vm, "Server", &format!("Function '{call_name}' doesn't exist"))?;
+        return Ok(Out::Fault(f, None));
+    }
+    if !target.has(vm, &fname)? {
+        if version == 2 {
+            return Ok(Out::Early(proc_not_present(vm)?));
+        }
+        return fault_out(vm, "Server", &format!("Procedure '{fname}' not present"));
     }
     let call_name = match &func_def {
         Some(f) => f.name.clone(),
@@ -1330,10 +1367,16 @@ fn service_target(vm: &mut Vm, this: &ObjRef, svc: &Service) -> R<Option<Target>
             if persistence == 1 {
                 // SOAP_PERSISTENCE_SESSION: the object lives in $_SESSION.
                 if let Some(o) = session_object(vm, name) {
+                    if super::encode::class_is(vm, &o, "__PHP_Incomplete_Class") {
+                        let f = make_fault(
+                            vm,
+                            "Server",
+                            "SoapServer class was deserialized from the session prior to loading the class passed to SoapServer::setClass(). Start the session after loading all classes to resolve this issue.",
+                        )?;
+                        return Err(Unwind::Throw(f));
+                    }
                     return Ok(Some(Target::Object(o)));
                 }
-            } else if let Some(o) = with(this, |d| d.instance.clone()).flatten() {
-                return Ok(Some(Target::Object(o)));
             }
             let Some(cls) = vm.find_class(name.as_bytes(), true)? else {
                 return Ok(Some(Target::None));
@@ -1342,10 +1385,10 @@ fn service_target(vm: &mut Vm, this: &ObjRef, svc: &Service) -> R<Option<Target>
             if cls.find_method(b"__construct").is_some() {
                 vm.call_method(&o, b"__construct", args.clone())?;
             }
+            // SOAP_PERSISTENCE_REQUEST: a new object for each request
+            // (test server010.phpt).
             if persistence == 1 {
                 store_session_object(vm, &o);
-            } else {
-                with(this, |d| d.instance = Some(o.clone()));
             }
             Target::Object(o)
         }
@@ -1358,7 +1401,12 @@ fn session_object(vm: &mut Vm, class: &str) -> Option<ObjRef> {
     let v = unsafe { (*p).deref() };
     let Value::Array(a) = v else { return None };
     match a.get_bytes(SESSION_KEY.as_bytes()).map(|v| v.deref()) {
-        Some(Value::Object(o)) if encode_class_is(vm, &o, class) => Some(o),
+        Some(Value::Object(o))
+            if encode_class_is(vm, &o, class)
+                || encode_class_is(vm, &o, "__PHP_Incomplete_Class") =>
+        {
+            Some(o)
+        }
         _ => None,
     }
 }
@@ -1547,8 +1595,17 @@ fn write_results(
             Ok(())
         }
         _ => {
-            for p in parts {
-                let v = super::encode::get_field(vm, result, &p.name)?.unwrap_or(Value::Null);
+            // By part name, else by position (observed on PHP 8.5; test
+            // gh9720.phpt).
+            let list: Vec<Value> = match result {
+                Value::Array(a) => a.iter().map(|(_, v)| v.deref()).collect(),
+                _ => Vec::new(),
+            };
+            for (i, p) in parts.iter().enumerate() {
+                let v = match super::encode::get_field(vm, result, &p.name)? {
+                    Some(v) => v,
+                    None => list.get(i).cloned().unwrap_or(Value::Null),
+                };
                 part_to_xml(vm, cx, s, p, &v, parent, literal, rpc)?;
             }
             Ok(())

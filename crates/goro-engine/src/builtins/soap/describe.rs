@@ -114,7 +114,9 @@ fn struct_fields(sdl: &Sdl, t: TId, out: &mut String, depth: u32) {
     let ty = &sdl.types[t];
     use super::sdl::Deriv;
     match ty.deriv {
-        Deriv::ComplexExtension | Deriv::SimpleExtension | Deriv::SimpleRestriction => {
+        // A complexContent extension lists only its own fields (observed
+        // on PHP 8.5; test bugs/bug28985.phpt).
+        Deriv::SimpleExtension | Deriv::SimpleRestriction => {
             match ty.base.as_ref().and_then(|b| sdl.resolve(b)) {
                 Some(Enc::Type(b)) if b != t && sdl.types[b].kind == Kind::Complex => {
                     struct_fields(sdl, b, out, depth + 1);

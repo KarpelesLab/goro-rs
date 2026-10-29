@@ -142,6 +142,8 @@ pub const HEAVY_TESTS: &[&str] = &[
     "file_get_contents_file_put_contents_5gb.phpt",
     // a 2 GB string
     "gh15613.phpt",
+    // a 2 GB string with memory_limit=6144M
+    "soap_qname_crash.phpt",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

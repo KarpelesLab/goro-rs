@@ -1048,7 +1048,14 @@ fn parse_fault(
                     let t = d.text(c).trim().to_string();
                     code = Some(t);
                 }
-                "faultstring" => string = d.text(c),
+                "faultstring" => {
+                    // Decoded as an xsd:string (typemaps apply; test
+                    // bugs/bug66049.phpt).
+                    let enc = super::types::by_code(super::types::XSD_STRING)
+                        .map(super::sdl::Enc::Builtin);
+                    let v = from_xml(vm, dx, enc, c)?;
+                    string = vm.to_php_str(&v)?.to_string_lossy();
+                }
                 "faultactor" => actor = Some(d.text(c)),
                 "detail" => detail = fault_detail(vm, dx, c, func)?,
                 _ => {}
@@ -1080,16 +1087,11 @@ fn parse_fault(
         }
     }
     let _ = lang;
-    // The code's namespace: SOAP-ENV:Client -> Client in the envelope ns.
-    let (ns, code) = match code {
-        Some(c) => match c.find(':') {
-            Some(i) => {
-                let p = &c[..i];
-                let ns = d.lookup(fe, Some(p));
-                (ns, c[i + 1..].to_string())
-            }
-            None => (None, c),
-        },
+    // SOAP 1.1 codes keep their prefix (observed on PHP 8.5: "SOAP-ENV:
+    // Server"; test bugs/bug66049.phpt); SOAP 1.2 values lose it.
+    // (SOAP 1.2 too: "[env:Receiver]"; test bugs/bug51561.phpt.)
+    let (ns, code): (Option<String>, String) = match code {
+        Some(c) => (None, c),
         None => (None, String::new()),
     };
     let cls = vm.find_class(b"SoapFault", false)?.expect("SoapFault");

@@ -12,6 +12,25 @@ pub struct InDoc {
 impl InDoc {
     /// Parses `input`; `Err` holds the first error's message.
     pub fn parse(input: &[u8], url: Option<&str>) -> Result<InDoc, String> {
+        // Charsets the XML parser lacks but iconv knows (windows-1257...):
+        // transcoded to UTF-8 first (test bugs/bug29109.phpt).
+        let converted;
+        let mut input = input;
+        if let Some((name, off)) = goro_xml::encoding::declared_encoding(input)
+            && goro_xml::encoding::lookup(&name).is_none()
+            && let Some(mut utf8) = goro_charset::iconv::iconv(
+                name.as_bytes(),
+                b"UTF-8",
+                input,
+                &mut Vec::new(),
+            )
+            && utf8.len() >= off + name.len()
+            && &utf8[off..off + name.len()] == name.as_bytes()
+        {
+            utf8.splice(off..off + name.len(), b"UTF-8".iter().copied());
+            converted = utf8;
+            input = &converted;
+        }
         let mut arena = Arena::new();
         let mut opts = goro_xml::xml::ParseOptions::with_flags(0);
         opts.url = url.map(|s| s.to_string());

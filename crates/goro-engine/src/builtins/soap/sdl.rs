@@ -264,8 +264,10 @@ fn schema_err<T>(m: impl Into<String>) -> Result<T, String> {
     Err(format!("SOAP-ERROR: Parsing Schema: {}", m.into()))
 }
 
+/// A reference's name without its prefix (only the first one: names may
+/// contain colons; observed on PHP 8.5; test gh8538.phpt).
 fn local_part(q: &str) -> &str {
-    match q.rfind(':') {
+    match q.find(':') {
         Some(i) => &q[i + 1..],
         None => q,
     }
@@ -969,10 +971,6 @@ impl<'a, 'b> Ctx<'a, 'b> {
             match local.as_str() {
                 "import" => {
                     let ns = self.d(di).attr(c, "namespace");
-                    // The XML namespace is built in.
-                    if ns.as_deref() == Some(NS_XML) {
-                        continue;
-                    }
                     if let Some(loc) = self.d(di).attr(c, "schemaLocation") {
                         if ns.as_deref() == Some(tns) && !tns.is_empty() {
                             return schema_err(format!(
@@ -1031,12 +1029,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
             return Ok(());
         }
         self.schemas.push(url.to_string());
+        // A schema that can't be loaded is skipped (observed on PHP 8.5:
+        // test bugs/bug29839.phpt imports a missing xml.xsd).
         let di = match self.load_doc(url) {
             Ok(d) => d,
-            Err(e) if e.starts_with("SOAP-ERROR") => {
-                return schema_err(format!("can't import schema from '{url}'"));
-            }
-            Err(_) => return schema_err(format!("can't import schema from '{url}'")),
+            Err(_) => return Ok(()),
         };
         let Some(root) = self.d(di).root() else {
             return schema_err(format!("can't import schema from '{url}'"));

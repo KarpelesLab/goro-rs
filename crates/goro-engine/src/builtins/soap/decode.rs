@@ -31,6 +31,8 @@ pub struct Dx<'a> {
     pub done: HashMap<NodeId, Value>,
     /// Inside a repeating model group.
     pub rep: u32,
+    /// The content model being decoded has an `<any>`.
+    pub pending_any: bool,
 }
 
 impl<'a> Dx<'a> {
@@ -50,6 +52,7 @@ impl<'a> Dx<'a> {
             ids,
             done: HashMap::new(),
             rep: 0,
+            pending_any: false,
         }
     }
 }
@@ -273,6 +276,7 @@ fn guess(vm: &mut Vm, dx: &mut Dx, n: NodeId) -> R<Value> {
 fn generic_struct(vm: &mut Vm, dx: &mut Dx, n: NodeId, class: Option<String>) -> R<Value> {
     let d = dx.d;
     let obj = new_object(vm, dx, class.as_deref())?;
+    register_early(dx, n, &obj);
     let mut seen: Vec<(String, bool)> = Vec::new();
     for c in d.kids(n) {
         let name = d.local(c).to_string();
@@ -282,8 +286,38 @@ fn generic_struct(vm: &mut Vm, dx: &mut Dx, n: NodeId, class: Option<String>) ->
     Ok(Value::Object(obj))
 }
 
+/// A struct with an id is known before its content is decoded, so
+/// references to it from inside resolve to it (observed on PHP 8.5; test
+/// bugs/bug55323.phpt).
+fn register_early(dx: &mut Dx, n: NodeId, obj: &goro_runtime::ObjRef) {
+    let d = dx.d;
+    if d.attr(n, "id").is_some() || d.attr_ns(n, NS_SOAP12_ENC, "id").is_some() {
+        dx.done.insert(n, Value::Object(obj.clone()));
+    }
+}
+
 /// Adds a property; repeated names become arrays.
 fn add_prop(vm: &mut Vm, obj: &goro_runtime::ObjRef, name: &str, v: Value, seen: &mut Vec<(String, bool)>) {
+    // A property the object already has (a classmapped class's default)
+    // becomes an array too (observed on PHP 8.5; test
+    // bugs/segfault_assertion_props.phpt).
+    if !seen.iter().any(|s| s.0 == name) {
+        let cur = vm.get_prop_raw(obj, name.as_bytes());
+        if !matches!(cur, Value::Null) {
+            let mut arr = match cur {
+                Value::Array(a) => a,
+                other => {
+                    let mut a = PhpArray::new();
+                    let _ = a.push(other);
+                    a
+                }
+            };
+            let _ = arr.push(v);
+            seen.push((name.to_string(), true));
+            set_prop(vm, obj, name, Value::Array(arr));
+            return;
+        }
+    }
     if let Some(s) = seen.iter_mut().find(|s| s.0 == name) {
         let cur = vm.get_prop_raw(obj, name.as_bytes());
         let mut arr = if s.1 {
@@ -306,14 +340,40 @@ fn add_prop(vm: &mut Vm, obj: &goro_runtime::ObjRef, name: &str, v: Value, seen:
 }
 
 pub fn set_prop(vm: &mut Vm, obj: &goro_runtime::ObjRef, name: &str, v: Value) {
+    // Undeclared properties of a class with __set() go through it
+    // (observed on PHP 8.5; test classmap004.phpt).
+    let cls = vm.class_of(obj);
+    if vm.find_prop_slot_any(&cls, name.as_bytes()).is_none()
+        && cls.find_method(b"__set").is_some()
+    {
+        let _ = vm.write_prop(obj, &PhpStr::from(name), v, None);
+        return;
+    }
     vm.set_prop_raw(obj, name.as_bytes(), v);
 }
 
 /// A new object of the classmap's class for `type_name`, or stdClass.
 fn new_object(vm: &mut Vm, dx: &Dx, type_name: Option<&str>) -> R<goro_runtime::ObjRef> {
-    if let Some(t) = type_name
-        && let Some((_, c)) = dx.classmap.iter().find(|(k, _)| k == t)
-    {
+    new_object_ns(vm, dx, type_name, None)
+}
+
+/// A new object for a type: the classmap's "{ns}name" entry, else
+/// "name" (PHP manual: SoapClient classmap option).
+fn new_object_ns(
+    vm: &mut Vm,
+    dx: &Dx,
+    type_name: Option<&str>,
+    ns: Option<&str>,
+) -> R<goro_runtime::ObjRef> {
+    let full = match (type_name, ns) {
+        (Some(t), Some(n)) => Some(format!("{{{n}}}{t}")),
+        _ => None,
+    };
+    let entry = full
+        .as_ref()
+        .and_then(|f| dx.classmap.iter().find(|(k, _)| k == f))
+        .or_else(|| type_name.and_then(|t| dx.classmap.iter().find(|(k, _)| k == t)));
+    if let Some((_, c)) = entry {
         let c = c.clone();
         match vm.find_class(c.as_bytes(), true)? {
             Some(cls) => {
@@ -345,6 +405,15 @@ pub fn parse_int(s: &str) -> Option<i64> {
 
 fn builtin(vm: &mut Vm, dx: &mut Dx, conv: Conv, n: NodeId) -> R<Value> {
     let d = dx.d;
+    // Elements where a simple value is expected (observed on PHP 8.5;
+    // tests soap12/T27.phpt, T58.phpt).
+    if !matches!(
+        conv,
+        Conv::AnyType | Conv::AnyXml | Conv::Array | Conv::Struct | Conv::Map
+    ) && has_element_kids(d, n)
+    {
+        return violation(vm);
+    }
     match conv {
         Conv::String | Conv::Duration | Conv::Decimal => {
             // Elements where a string is expected (observed on PHP 8.5;
@@ -457,7 +526,7 @@ fn builtin(vm: &mut Vm, dx: &mut Dx, conv: Conv, n: NodeId) -> R<Value> {
             Ok(Value::Str(PhpStr::from(s)))
         }
         Conv::Array => soap_array(vm, dx, None, n),
-        Conv::Struct => generic_struct(vm, dx, n, None),
+        Conv::Struct => generic_struct(vm, dx, n, Some("Struct".to_string())),
         Conv::Map => map(vm, dx, n),
     }
 }
@@ -762,7 +831,8 @@ fn complex(vm: &mut Vm, dx: &mut Dx, sdl: &Rc<Sdl>, t: TId, n: NodeId) -> R<Valu
         }
     }
     let class = Some(ty.name.clone());
-    let obj = new_object(vm, dx, class.as_deref())?;
+    let obj = new_object_ns(vm, dx, class.as_deref(), Some(&ty.ns))?;
+    register_early(dx, n, &obj);
     if simple_content_base(sdl, t).is_some() {
         let b = sdl.simple_base(t);
         let v = match b {
@@ -775,7 +845,13 @@ fn complex(vm: &mut Vm, dx: &mut Dx, sdl: &Rc<Sdl>, t: TId, n: NodeId) -> R<Valu
         set_prop(vm, &obj, "_", v);
     } else {
         let mut used = Vec::new();
-        content(vm, dx, sdl, t, n, &obj, &mut used)?;
+        let saved = std::mem::replace(&mut dx.pending_any, false);
+        let r = content(vm, dx, sdl, t, n, &obj, &mut used);
+        let had = std::mem::replace(&mut dx.pending_any, saved);
+        r?;
+        if had {
+            any_rest(vm, dx, n, &obj, &mut used)?;
+        }
     }
     attrs(vm, dx, sdl, t, n, &obj)?;
     Ok(Value::Object(obj))
@@ -896,31 +972,57 @@ fn model(
             Ok(())
         }
         MKind::Any => {
-            // The remaining children, serialized.
-            let d = dx.d;
-            let mut s = String::new();
-            for c in d.kids(n) {
-                if used.contains(&c) {
-                    continue;
-                }
-                used.push(c);
-                s.push_str(&d.to_xml(c));
-            }
-            if !s.is_empty() {
-                let cur = vm.get_prop_raw(obj, b"any");
-                let v = match cur {
-                    Value::Str(p) => {
-                        let mut b = p.as_bytes().to_vec();
-                        b.extend_from_slice(s.as_bytes());
-                        Value::Str(PhpStr::from(b))
-                    }
-                    _ => Value::Str(PhpStr::from(s)),
-                };
-                set_prop(vm, obj, "any", v);
-            }
+            // Taken from what the named elements leave (after the whole
+            // model; observed on PHP 8.5; test bugs/bug44882.phpt).
+            dx.pending_any = true;
             Ok(())
         }
     }
+}
+
+/// `<any>`: the children no element took. Untyped ones are serialized,
+/// those with a known xsi:type decoded by name; a single run of untyped
+/// ones is a string, otherwise an array (observed on PHP 8.5; tests
+/// any.phpt, bugs/bug73237.phpt).
+fn any_rest(
+    vm: &mut Vm,
+    dx: &mut Dx,
+    n: NodeId,
+    obj: &goro_runtime::ObjRef,
+    used: &mut Vec<NodeId>,
+) -> R<()> {
+    let d = dx.d;
+    let rest: Vec<NodeId> = d.kids(n).into_iter().filter(|c| !used.contains(c)).collect();
+    let mut arr = PhpArray::new();
+    let mut pending = String::new();
+    let mut typed_any = false;
+    for c in rest {
+        used.push(c);
+        let typed = xsi_type(d, c).is_some_and(|(ns, nm)| {
+            super::encode::enc_for(dx.sdl.as_deref(), &ns, &nm).is_some()
+        });
+        if typed {
+            if !pending.is_empty() {
+                let _ = arr.push(Value::Str(PhpStr::from(std::mem::take(&mut pending))));
+            }
+            let v = from_xml(vm, dx, None, c)?;
+            arr.insert(Key::from(d.local(c)), v);
+            typed_any = true;
+        } else {
+            pending.push_str(&d.to_xml(c));
+        }
+    }
+    if !typed_any {
+        if !pending.is_empty() {
+            set_prop(vm, obj, "any", Value::Str(PhpStr::from(pending)));
+        }
+        return Ok(());
+    }
+    if !pending.is_empty() {
+        let _ = arr.push(Value::Str(PhpStr::from(pending)));
+    }
+    set_prop(vm, obj, "any", Value::Array(arr));
+    Ok(())
 }
 
 fn default_value(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, s: &str) -> R<Value> {
@@ -941,6 +1043,7 @@ fn default_value(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, s: &str) -> R<Value
         ids: HashMap::new(),
         done: HashMap::new(),
         rep: 0,
+        pending_any: false,
     };
     from_xml_typed(vm, &mut sub, enc, root)
 }
@@ -966,7 +1069,7 @@ fn attrs(
         if a.name.is_empty() {
             continue;
         }
-        let val = if a.qualified && !a.ns.is_empty() {
+        let val = if (a.qualified || a.r#ref.is_some()) && !a.ns.is_empty() {
             d.attr_ns(n, &a.ns, &a.name).or_else(|| d.attr(n, &a.name))
         } else {
             d.attr(n, &a.name)
