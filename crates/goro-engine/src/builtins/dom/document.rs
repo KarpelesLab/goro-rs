@@ -556,6 +556,12 @@ fn import_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     };
     let deep = a.bool(1);
+    // A node of this document is returned as it is (observed on PHP 8.5;
+    // test bug47530.phpt).
+    if !modern && with_arena(|ar| ar.doc_of(n) == d && !matches!(ar.data(n), NodeData::Document(_)))
+    {
+        return Ok(a.val(0));
+    }
     let r = with_arena(|ar| match ar.data(n) {
         NodeData::Document(_) => Err(DomError::NotSupported),
         NodeData::Doctype(_) if !modern => Err(DomError::NotSupported),
@@ -565,6 +571,7 @@ fn import_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Ok(c) => {
             if !modern {
                 with_arena(|ar| super::element::reconcile_imported(ar, c, d));
+                super::element::mark_imported(c);
             }
             wrap_node(vm, c)
         }

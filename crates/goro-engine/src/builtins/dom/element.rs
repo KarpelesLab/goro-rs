@@ -1025,6 +1025,7 @@ fn bound_at(ar: &Arena, at: NodeId, q: &QName) -> bool {
 /// inserted subtree that the new context already provides go away, and
 /// names whose declaration is no longer in scope get one on their element.
 pub(crate) fn reconcile_after_insert(ar: &mut Arena, n: NodeId) {
+    let stale = STALE_NS.with(|st| st.borrow_mut().remove(&n));
     if !ar.is_element(n) || ar.is_modern(ar.doc_of(n)) {
         return;
     }
@@ -1065,7 +1066,26 @@ pub(crate) fn reconcile_after_insert(ar: &mut Arena, n: NodeId) {
             }
         }
     }
+    if stale {
+        reconcile_tree(ar, n);
+    }
     declare_dangling(ar, n);
+}
+
+thread_local! {
+    /// Roots of legacy imports from another document not inserted yet:
+    /// when they are, every namespaced name in them is resolved again from
+    /// the top of the subtree, by namespace URI (observed on PHP 8.5: a
+    /// copied element declaring its own default namespace gets a
+    /// "default" prefix declared on the imported root; test
+    /// bug47530.phpt).
+    static STALE_NS: std::cell::RefCell<std::collections::HashSet<NodeId>> =
+        Default::default();
+}
+
+/// Marks `n` as a fresh import (see [`STALE_NS`]).
+pub(crate) fn mark_imported(n: NodeId) {
+    STALE_NS.with(|st| st.borrow_mut().insert(n));
 }
 
 /// True if an attribute in the subtree at `el` uses declaration `d`.
@@ -1136,7 +1156,20 @@ pub(crate) fn declare_dangling(ar: &mut Arena, root: NodeId) {
                     });
                 }
                 None if x == el => {
-                    ar.declare_ns(el, None, &uri);
+                    // Another binding of the namespace in scope serves;
+                    // else a "default" prefix is made up (observed on PHP
+                    // 8.5; test bug47530.phpt).
+                    let p = match search_by_href(ar, el, &uri, false) {
+                        Some(p) => p,
+                        None => {
+                            let p = generated_prefix(ar, el);
+                            ar.declare_ns(el, Some(&p), &uri);
+                            Some(p.as_str().into())
+                        }
+                    };
+                    if let Some(qq) = ar.data_mut_qname(x) {
+                        qq.prefix = p;
+                    }
                 }
                 _ => {
                     let p = generated_prefix(ar, el);
@@ -1326,6 +1359,21 @@ fn insert_adjacent(el: NodeId, node: NodeId, w: u8, modern: bool) -> Result<bool
     {
         return Ok(false);
     }
+    // A node of another document is adopted first (observed on PHP 8.5;
+    // test DOMElement_insertAdjacentElement.phpt).
+    if !modern {
+        xmlstore::with(|s| {
+            let ar = &mut s.arena;
+            let d = ar.doc_of(p);
+            if ar.doc_of(node) != d && !matches!(ar.data(node), NodeData::Document(_)) {
+                if let Some(op) = ar.parent(node) {
+                    let _ = ar.remove_child(op, node);
+                }
+                ar.adopt(node, d);
+                s.collect();
+            }
+        });
+    }
     let r = if modern {
         modern_insert(p, node, before).map(|_| ())
     } else {
@@ -1462,6 +1510,20 @@ fn insert_nodes(
     nodes: &[NodeId],
     child: Option<NodeId>,
 ) -> R<()> {
+    insert_nodes_at(vm, a, parent, nodes, &|_| child)
+}
+
+/// [`insert_nodes`] with the reference child computed once the nodes are
+/// in their fragment (DOM Standard, ChildNode before(): the viable previous
+/// sibling's next sibling is taken after converting the nodes; test
+/// bug80602.phpt).
+fn insert_nodes_at(
+    vm: &mut Vm,
+    a: &Args,
+    parent: NodeId,
+    nodes: &[NodeId],
+    child: &dyn Fn(&Arena) -> Option<NodeId>,
+) -> R<()> {
     let modern = modern_fn(a);
     if nodes.is_empty() {
         return Ok(());
@@ -1504,6 +1566,7 @@ fn insert_nodes(
         }
         (frag, Some(fh))
     };
+    let child = with_arena(|ar| child(ar));
     let r = if modern {
         modern_insert(parent, node, child).map(|_| ())
     } else {
@@ -1595,11 +1658,10 @@ pub(crate) fn before(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let (nodes, _h) = convert_nodes(vm, a, n)?;
     let prev = with_arena(|ar| viable_prev(ar, n, &nodes));
-    let at = match prev {
-        Some(p) => with_arena(|ar| ar.next_sibling(p)),
-        None => with_arena(|ar| ar.first_child(parent)),
-    };
-    insert_nodes(vm, a, parent, &nodes, at)?;
+    insert_nodes_at(vm, a, parent, &nodes, &|ar| match prev {
+        Some(p) => ar.next_sibling(p),
+        None => ar.first_child(parent),
+    })?;
     Ok(Value::Null)
 }
 

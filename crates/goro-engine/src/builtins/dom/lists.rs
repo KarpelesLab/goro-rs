@@ -81,6 +81,10 @@ pub struct ListObj {
     /// that loads another document takes its collections along (test
     /// DOMDocument_item_cache_invalidation.phpt).
     owner: Option<ObjRef>,
+    /// The node objects of an XPath result, made when the query ran (the
+    /// object ids PHP hands out show they exist then; tests bug55700.phpt,
+    /// registerPhpFunctionNS.phpt).
+    items: Vec<ObjRef>,
 }
 
 impl NativeData for ListObj {
@@ -88,9 +92,26 @@ impl NativeData for ListObj {
         if let Some(o) = &self.owner {
             visit(&Value::Object(o.clone()));
         }
+        for o in &self.items {
+            visit(&Value::Object(o.clone()));
+        }
     }
     fn clear(&mut self) {
         self.owner = None;
+        self.items.clear();
+    }
+}
+
+/// Makes collection `list` keep the node objects `items` alive.
+pub fn keep_items(list: &Value, items: Vec<ObjRef>) {
+    if let Value::Object(o) = list {
+        let mut n = o.obj().native.borrow_mut();
+        if let Some(n) = n.as_mut() {
+            let any: &mut dyn std::any::Any = &mut **n;
+            if let Some(l) = any.downcast_mut::<ListObj>() {
+                l.items = items;
+            }
+        }
     }
 }
 
@@ -182,6 +203,7 @@ pub fn new_list_owned(
         _holds: holds,
         cache: RefCell::new(None),
         owner,
+        items: Vec::new(),
     }));
     Ok(Value::Object(o))
 }

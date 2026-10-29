@@ -428,6 +428,12 @@ pub(crate) fn clone_id(n: NodeId, deep: bool) -> NodeId {
         let a = &mut s.arena;
         let doc = a.doc_of(n);
         let c = a.clone_node(n, doc, deep);
+        // A namespace node's copy belongs to the same element (test
+        // clone_nodes.phpt).
+        if matches!(a.data(n), NodeData::Namespace(_)) {
+            let p = a.parent(n);
+            a.node_mut(c).parent = p;
+        }
         if matches!(a.data(n), NodeData::Document(_)) {
             let st = s.doc_ext(n).get::<super::DocSettings>().clone();
             *s.doc_ext(c).get::<super::DocSettings>() = st;

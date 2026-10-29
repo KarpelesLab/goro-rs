@@ -627,9 +627,22 @@ fn report_xpath_error(vm: &mut Vm, fname: &str, e: &XPathError) -> R<()> {
 
 /// A node-set result as a list object (namespace nodes wrapped first).
 fn node_list(vm: &mut Vm, v: Vec<NodeId>, modern: bool) -> R<Value> {
-    // Namespace nodes must get their objects before the list holds them.
+    // Every node but namespace nodes gets its object first, then the list
+    // (object ids observed on PHP 8.5; test xpath_domnamespacenode.phpt).
+    let mut items = Vec::with_capacity(v.len());
+    for &n in &v {
+        if with_arena(|ar| matches!(ar.data(n), goro_xml::tree::NodeData::Namespace(_))) {
+            continue;
+        }
+        if let Value::Object(o) = super::wrap_node(vm, n)? {
+            items.push(o);
+        }
+    }
     let r = new_list(vm, ListKind::Static(v), modern);
     free_ns_nodes();
+    if let Ok(l) = &r {
+        super::lists::keep_items(l, items);
+    }
     r
 }
 
@@ -707,6 +720,13 @@ pub fn xpath_hooks() -> NativeHooks {
         debug_props: Some(|vm, o| {
             let mut out = vm.plain_props_array(o, true);
             if with_xp(o, |_| ()).is_none() {
+                // Reading `document` throws; the dump goes on and the
+                // exception follows it (test gh16316.phpt).
+                if vm.err.deferred.is_none()
+                    && let Err(e) = super::throw_dom::<()>(vm, goro_xml::tree::DomError::InvalidState)
+                {
+                    vm.err.deferred = Some(e);
+                }
                 out.insert(
                     goro_runtime::Key::Str(PhpStr::from("registerNodeNamespaces")),
                     Value::Bool(true),
