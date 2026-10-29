@@ -49,6 +49,7 @@ pub mod spl_autoload;
 pub mod streams;
 pub mod string;
 pub mod strmisc;
+pub mod tokenizer;
 pub mod uri;
 pub mod userstream;
 pub mod var;
@@ -101,6 +102,7 @@ pub fn modules() -> Vec<&'static Module> {
         &phar::MODULE,
         &ctype::MODULE,
         &calendar::MODULE,
+        &tokenizer::MODULE,
         &date::MODULE,
         &array::MODULE,
         &math::MODULE,
