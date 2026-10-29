@@ -2848,7 +2848,14 @@ impl Vm {
             }
             let slot = unsafe { &mut *base.add(i) };
             if slot.is_none() {
-                match &param.default {
+                // An optional parameter before a required one is required
+                // (test Zend/tests/required_param_after_optional_named_args).
+                let default = if has_named && (i as u32) < code.num_required {
+                    &ParamDefault::None
+                } else {
+                    &param.default
+                };
+                match default {
                     ParamDefault::Const(v) => {
                         let mut v = v.clone();
                         if let Some(ty) = &param.ty
