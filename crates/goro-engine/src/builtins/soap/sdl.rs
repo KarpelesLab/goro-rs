@@ -586,6 +586,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 let Some(addr) = addr else {
                     continue;
                 };
+                self.check_required(di, port)?;
                 let Some(location) = self.d(di).attr(addr, "location") else {
                     return err("No location associated with <port>");
                 };
@@ -643,6 +644,25 @@ impl<'a, 'b> Ctx<'a, 'b> {
         Ok(())
     }
 
+    /// Extensibility elements marked wsdl:required in namespaces PHP
+    /// doesn't know are errors (WSDL 1.1 section 2.1.3).
+    fn check_required(&self, di: usize, n: NodeId) -> Result<(), String> {
+        for c in self.d(di).kids(n) {
+            let d = self.d(di);
+            let ns = d.ns(c);
+            if [NS_WSDL, NS_WSDL_SOAP11, NS_WSDL_SOAP12, super::xmlout::NS_WSDL_HTTP, super::xmlout::NS_WSDL_MIME, XSD]
+                .contains(&ns)
+            {
+                continue;
+            }
+            let req = d.attr_ns(c, NS_WSDL, "required");
+            if matches!(req.as_deref(), Some("true") | Some("1")) {
+                return err(format!("Unknown required WSDL extension '{ns}'"));
+            }
+        }
+        Ok(())
+    }
+
     fn bind_operations(
         &mut self,
         bdi: usize,
@@ -652,6 +672,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         version: i64,
         location: &str,
     ) -> Result<(), String> {
+        self.check_required(bdi, bnode)?;
         let Some(pt_name) = self.d(bdi).attr(bnode, "type") else {
             return err("Missing 'type' attribute in <binding>");
         };

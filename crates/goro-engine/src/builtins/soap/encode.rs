@@ -270,6 +270,17 @@ pub fn to_xml(
         return Ok(());
     }
     if let Value::Null = v {
+        if literal {
+            // Literal: an empty element, xsi:nil for nillable elements.
+            if let Some(Enc::Type(t)) = enc
+                && let Some(sdl) = cx.sdl.clone()
+                && sdl.types[t].kind == Kind::Element
+                && sdl.types[sdl.deref_element(t)].nillable
+            {
+                cx.set_nil(el);
+            }
+            return Ok(());
+        }
         cx.set_nil(el);
         if !literal
             && let Some(Enc::Type(t)) = enc
@@ -590,9 +601,9 @@ fn builtin_to_xml(vm: &mut Vm, cx: &mut Cx, b: Bi, v: &Value, el: El, literal: b
         _ => {}
     }
     if let Some(t) = builtin_text(vm, cx, b, v)? {
-        if !t.is_empty() {
-            cx.doc.add_text(el, &t);
-        }
+        // An empty string is still a text node: `<a></a>` (observed on
+        // PHP 8.5; test interop/Round2/Base/r2_base_002p.phpt).
+        cx.doc.els[el].kids.push(Kid::Text(t));
     }
     if !literal {
         let ns = if b.ns == NS_SOAP11_ENC && cx.version == 2 {
@@ -1518,17 +1529,32 @@ fn element_to_xml(
     let ed: &SType = &sdl.types[ed_id];
     let decl = &sdl.types[e];
     let name = ed.name.clone();
-    let qualified = ed.qualified;
+    // Encoded messages never qualify local elements (observed on PHP
+    // 8.5; tests interop/Round4/GroupH/r4_groupH_complex_rpcenc_*).
+    let qualified = ed.qualified && literal;
     let nillable = ed.nillable || decl.nillable;
-    let val = get_field(vm, v, &name)?;
     let min = m.min;
     let max = m.max;
+    let mut val = get_field(vm, v, &name)?;
+    // A list for a struct whose element repeats: the list is that
+    // element's values (observed on PHP 8.5; tests
+    // interop/Round3/GroupD/r3_groupD_doclit_002w.phpt).
+    if val.is_none()
+        && max != 1
+        && let Value::Array(a) = v
+        && is_list(a)
+    {
+        val = Some(v.clone());
+    }
     let enc = ed.base.as_ref().and_then(|b| sdl.resolve(b));
-    let qn = |cx: &mut Cx| {
-        if qualified && !ed.ns.is_empty() {
-            cx.doc.qname(Some(el), &ed.ns, &name)
-        } else {
-            name.clone()
+    let ns = ed.ns.clone();
+    // The element's prefix is set after its content is written, so the
+    // content's namespaces are declared first (observed on PHP 8.5; test
+    // interop/Round3/GroupD/r3_groupD_compound2_001w.phpt).
+    let qualify = |cx: &mut Cx, c: El| {
+        if qualified && !ns.is_empty() {
+            let q = cx.doc.qname(Some(c), &ns, &name);
+            cx.doc.rename(c, &q);
         }
     };
     match val {
@@ -1537,18 +1563,18 @@ fn element_to_xml(
                 return Ok(true);
             }
             if nillable {
-                let n = qn(cx);
-                let c = cx.doc.add_child(el, &n);
+                let c = cx.doc.add_child(el, &name);
                 cx.set_nil(c);
+                qualify(cx, c);
                 return Ok(true);
             }
             if !strict {
                 return Ok(false);
             }
             if let Some(d) = ed.fixed.clone().or(ed.default.clone()) {
-                let n = qn(cx);
-                let c = cx.doc.add_child(el, &n);
+                let c = cx.doc.add_child(el, &name);
                 to_xml(vm, cx, enc, &Value::Str(PhpStr::from(d)), c, literal)?;
+                qualify(cx, c);
                 return Ok(true);
             }
             Err(soap_error(
@@ -1557,6 +1583,14 @@ fn element_to_xml(
             ))
         }
         Some(Value::Null) if !nillable && min == 0 => Ok(true),
+        Some(Value::Null) => {
+            let c = cx.doc.add_child(el, &name);
+            if nillable || !literal {
+                cx.set_nil(c);
+            }
+            qualify(cx, c);
+            Ok(true)
+        }
         Some(x) => {
             let repeat = max != 1
                 && match &x {
@@ -1566,32 +1600,24 @@ fn element_to_xml(
             if repeat {
                 let items = iter_values(vm, &x)?.unwrap_or_default();
                 for (_, it) in items {
-                    let n = qn(cx);
-                    let c = cx.doc.add_child(el, &n);
+                    let c = cx.doc.add_child(el, &name);
                     if let Value::Null = it {
-                        cx.set_nil(c);
-                        continue;
+                        if nillable || !literal {
+                            cx.set_nil(c);
+                        }
+                    } else {
+                        to_xml(vm, cx, enc, &it, c, literal)?;
                     }
-                    to_xml(vm, cx, enc_or_elem(enc, ed_id, sdl), &it, c, literal)?;
+                    qualify(cx, c);
                 }
             } else {
-                let n = qn(cx);
-                let c = cx.doc.add_child(el, &n);
-                if let Some(f) = &ed.fixed
-                    && !matches!(x, Value::Null)
-                {
-                    let _ = f;
-                }
-                to_xml(vm, cx, enc_or_elem(enc, ed_id, sdl), &x, c, literal)?;
+                let c = cx.doc.add_child(el, &name);
+                to_xml(vm, cx, enc, &x, c, literal)?;
+                qualify(cx, c);
             }
             Ok(true)
         }
     }
-}
-
-/// The encoding for an element's content: its type, or nothing (guess).
-fn enc_or_elem(enc: Option<Enc>, _e: TId, _sdl: &Sdl) -> Option<Enc> {
-    enc
 }
 
 /// Resolves the encoding of a type reference given as a QName attribute

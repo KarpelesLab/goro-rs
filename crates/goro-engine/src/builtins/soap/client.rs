@@ -715,8 +715,13 @@ fn wsdl_request(
         {
             val = Some(vm.get_prop_raw(o, b"param_data"));
         }
-        let Some(val) = val else {
-            continue;
+        let val = match val {
+            Some(v) => v,
+            // Document parts are written even without an argument
+            // (observed on PHP 8.5; test
+            // interop/Round3/GroupD/r3_groupD_doclitparams_004w.phpt).
+            None if !f.rpc => Value::Null,
+            None => continue,
         };
         part_to_xml(vm, cx, sdl, p, &val, parent, literal, f.rpc)?;
     }
