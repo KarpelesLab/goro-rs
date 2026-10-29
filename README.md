@@ -51,8 +51,10 @@ Fresh start. The previous code base is kept on the `old` branch for the
 record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
-php-src test suite (8.5.4), share of the tests that run: **93.1%** overall
-(15,604 passing, 1,152 failing, 4,693 skipped), as of 2026-10-29.
+php-src test suite (8.5.4), share of the tests that run: **92.7%** overall
+(16,066 passing, 1,261 failing, 4,121 skipped), as of 2026-10-29. The
+ext/opcache tests now run (goro has no optimizer or JIT, so tests that dump
+opcodes fail where they used to be skipped).
 The extension libraries below are wired into the engine; ext/random,
 mbstring, iconv, zlib, bcmath, gmp, filter, sodium, uri, openssl, intl and
 the XML extensions each pass 87-100% of their tests that run.
