@@ -1840,7 +1840,7 @@ fn do_sort(
         if items.iter().all(|x| int_key(x).is_some()) {
             let k = |x: &(Key, Value)| int_key(x).unwrap_or(0);
             if reverse {
-                items.sort_by(|x, y| k(y).cmp(&k(x)));
+                items.sort_by_key(|x| std::cmp::Reverse(k(x)));
             } else {
                 items.sort_by_key(k);
             }

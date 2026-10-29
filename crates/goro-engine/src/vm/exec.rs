@@ -1518,11 +1518,15 @@ impl Vm {
                     }
                     return Ok(());
                 }
-                Some(PhpStr::concat(x, goro_runtime::convert::int_digits(*i, &mut buf)))
+                Some(PhpStr::concat(
+                    x,
+                    goro_runtime::convert::int_digits(*i, &mut buf),
+                ))
             }
-            (Some(Value::Int(i)), Some(Value::Str(y))) => {
-                Some(PhpStr::concat(goro_runtime::convert::int_digits(*i, &mut buf), y))
-            }
+            (Some(Value::Int(i)), Some(Value::Str(y))) => Some(PhpStr::concat(
+                goro_runtime::convert::int_digits(*i, &mut buf),
+                y,
+            )),
             _ => None,
         };
         if let Some(s) = joined {

@@ -840,10 +840,7 @@ impl Vm {
             let c = self.code_ref().caches[cache as usize]
                 .get()
                 .way(self.class_ptr_of(&o) as usize);
-            if c.key != 0
-                && c.b & IC_PLAIN != 0
-                && !o.is_lazy()
-            {
+            if c.key != 0 && c.b & IC_PLAIN != 0 && !o.is_lazy() {
                 let v = self.get_hot(val)?;
                 let mut slots = o.obj().slots.borrow_mut();
                 let slot = &mut slots[c.a];

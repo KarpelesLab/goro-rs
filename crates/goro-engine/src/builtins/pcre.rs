@@ -177,10 +177,7 @@ fn limits_for(vm: &Vm, pat: &[u8]) -> Limits {
 
 pub(crate) fn limits(vm: &Vm) -> Limits {
     LIMIT_KEYS.with(|k| {
-        let mut l = Limits::new(
-            ini_u32(vm, &k[0], 1_000_000),
-            ini_u32(vm, &k[1], 100_000),
-        );
+        let mut l = Limits::new(ini_u32(vm, &k[0], 1_000_000), ini_u32(vm, &k[1], 100_000));
         if vm
             .ini
             .values

@@ -1326,7 +1326,9 @@ impl Vm {
         // Inline cache: same class, constant name.
         let cls_ptr = self.class_ptr_of(&o);
         if is_const(name) {
-            let c = self.code_ref().caches[cache as usize].get().way(cls_ptr as usize);
+            let c = self.code_ref().caches[cache as usize]
+                .get()
+                .way(cls_ptr as usize);
             if c.key == cls_ptr as usize && c.key != 0 {
                 let fp = c.a as *const Func;
                 let f = unsafe {
