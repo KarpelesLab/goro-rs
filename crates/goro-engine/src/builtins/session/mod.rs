@@ -204,9 +204,7 @@ pub(crate) fn raise(vm: &mut Vm, level: i64, msg: &str) -> R<()> {
         Phase::RequestStartup => {
             vm.raise_at(level, &format!("PHP Request Startup: {msg}"), unknown, 0)
         }
-        Phase::Shutdown => {
-            vm.raise_at(level, &format!("PHP Request Shutdown: {msg}"), unknown, 0)
-        }
+        Phase::Shutdown => vm.raise_at(level, &format!("PHP Request Shutdown: {msg}"), unknown, 0),
     }
 }
 
@@ -262,7 +260,10 @@ fn active_refusal(vm: &mut Vm, what: &str) -> R<bool> {
 fn sent_refusal(vm: &mut Vm, what: &str) -> R<bool> {
     if headers_sent(vm) {
         let at = sent_from(vm);
-        warn(vm, &format!("{what} after headers have already been sent{at}"))?;
+        warn(
+            vm,
+            &format!("{what} after headers have already been sent{at}"),
+        )?;
         return Ok(true);
     }
     Ok(false)
@@ -316,13 +317,8 @@ fn random_bytes(n: usize) -> Vec<u8> {
     let mut got = 0;
     while got < n {
         // SAFETY: writes at most `n - got` bytes into the buffer.
-        let r = unsafe {
-            libc::getrandom(
-                buf[got..].as_mut_ptr() as *mut libc::c_void,
-                n - got,
-                0,
-            )
-        };
+        let r =
+            unsafe { libc::getrandom(buf[got..].as_mut_ptr() as *mut libc::c_void, n - got, 0) };
         if r <= 0 {
             break;
         }
@@ -659,7 +655,10 @@ fn decode_failed(vm: &mut Vm) -> R<()> {
     end_session(vm, true);
     r1?;
     r2?;
-    warn(vm, "Failed to decode session object. Session has been destroyed")
+    warn(
+        vm,
+        "Failed to decode session object. Session has been destroyed",
+    )
 }
 
 /// The session is no longer active; `forget` clears the ID too.
@@ -689,7 +688,8 @@ fn publish_id(vm: &mut Vm) {
     };
     let key = PhpStr::from("SID");
     let user_defined = vm.constants.contains_key(&key) && !sid_is_internal();
-    vm.constants.insert(key, Value::Str(PhpStr::from(sid.clone())));
+    vm.constants
+        .insert(key, Value::Str(PhpStr::from(sid.clone())));
     if !user_defined {
         SID_INTERNAL.with(|c| c.set(true));
     }
@@ -773,7 +773,9 @@ fn cache_limiter(vm: &mut Vm) -> R<bool> {
         let at = sent_from(vm);
         warn(
             vm,
-            &format!("Session cache limiter cannot be sent after headers have already been sent{at}"),
+            &format!(
+                "Session cache limiter cannot be sent after headers have already been sent{at}"
+            ),
         )?;
         return Ok(false);
     }
@@ -937,11 +939,10 @@ fn session_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
             };
             if key == "read_and_close" {
                 read_and_close = match &v {
-                    Value::Str(s) => {
-                        match goro_runtime::numeric::is_numeric_str(s) {
-                            true => goro_runtime::convert::str_to_float(s) >= 1.0,
-                            false => {
-                                return vm.fthrow(
+                    Value::Str(s) => match goro_runtime::numeric::is_numeric_str(s) {
+                        true => goro_runtime::convert::str_to_float(s) >= 1.0,
+                        false => {
+                            return vm.fthrow(
                                     a,
                                     "TypeError",
                                     &format!(
@@ -949,9 +950,8 @@ fn session_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
                                         s.to_string_lossy()
                                     ),
                                 );
-                            }
                         }
-                    }
+                    },
                     // A positive int (test session_start_read_and_close.phpt:
                     // -1 keeps the session open).
                     Value::Int(i) => *i > 0,
@@ -1135,7 +1135,11 @@ fn session_status(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         return Ok(Value::Int(2));
     }
     let h = ini_str(vm, "session.save_handler");
-    Ok(Value::Int(if matches!(&h[..], b"files" | b"user") { 1 } else { 0 }))
+    Ok(Value::Int(if matches!(&h[..], b"files" | b"user") {
+        1
+    } else {
+        0
+    }))
 }
 
 fn session_register_shutdown(vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -1213,7 +1217,8 @@ fn session_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if active_refusal(vm, "Session ID cannot be changed")? {
             return Ok(Value::Bool(false));
         }
-        if ini_bool(vm, "session.use_cookies") && sent_refusal(vm, "Session ID cannot be changed")? {
+        if ini_bool(vm, "session.use_cookies") && sent_refusal(vm, "Session ID cannot be changed")?
+        {
             return Ok(Value::Bool(false));
         }
         // The ID is a C string (observed on PHP 8.5: "a\0b" sets "a").

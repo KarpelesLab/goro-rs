@@ -42,7 +42,10 @@ pub(super) static INI: &[(&str, &str)] = &[
     ("session.upload_progress.enabled", "1"),
     ("session.upload_progress.cleanup", "1"),
     ("session.upload_progress.prefix", "upload_progress_"),
-    ("session.upload_progress.name", "PHP_SESSION_UPLOAD_PROGRESS"),
+    (
+        "session.upload_progress.name",
+        "PHP_SESSION_UPLOAD_PROGRESS",
+    ),
     ("session.upload_progress.freq", "1%"),
     ("session.upload_progress.min_freq", "1"),
     ("url_rewriter.tags", "form="),
@@ -134,7 +137,10 @@ fn check(vm: &mut Vm, k: &[u8], v: &[u8], runtime: bool) -> R<bool> {
                     )?;
                     return Ok(false);
                 }
-                warn(vm, "Session save handler \"user\" cannot be set by ini_set()")?;
+                warn(
+                    vm,
+                    "Session save handler \"user\" cannot be set by ini_set()",
+                )?;
                 return Ok(false);
             } else if v != b"files" && runtime {
                 warn(
@@ -158,7 +164,10 @@ fn check(vm: &mut Vm, k: &[u8], v: &[u8], runtime: bool) -> R<bool> {
             return Ok(false);
         }
         b"session.gc_probability" if int(v) < 0 => {
-            warn(vm, "session.gc_probability must be greater than or equal to 0")?;
+            warn(
+                vm,
+                "session.gc_probability must be greater than or equal to 0",
+            )?;
             return Ok(false);
         }
         b"session.gc_divisor" if int(v) <= 0 => {

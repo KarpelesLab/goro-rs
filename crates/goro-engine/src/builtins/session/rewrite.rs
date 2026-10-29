@@ -202,7 +202,10 @@ impl Config {
                 Some(p) => (&e[..p], &e[p + 1..]),
                 None => (e, &b""[..]),
             };
-            tags.push((t.trim_ascii().to_ascii_lowercase(), at.trim_ascii().to_ascii_lowercase()));
+            tags.push((
+                t.trim_ascii().to_ascii_lowercase(),
+                at.trim_ascii().to_ascii_lowercase(),
+            ));
         }
         let hosts_s = super::ini_str(vm, hk);
         let mut hosts: Vec<Vec<u8>> = hosts_s
@@ -215,7 +218,8 @@ impl Config {
             if let Some(p) = vm.global_var_ptr(&PhpStr::from("_SERVER"), false) {
                 // SAFETY: read of the global's slot.
                 if let Value::Array(s) = unsafe { (*p).deref() }
-                    && let Some(Value::Str(h)) = s.get_str(&PhpStr::from("HTTP_HOST")).map(|v| v.deref())
+                    && let Some(Value::Str(h)) =
+                        s.get_str(&PhpStr::from("HTTP_HOST")).map(|v| v.deref())
                 {
                     hosts.push(h.to_ascii_lowercase());
                 }

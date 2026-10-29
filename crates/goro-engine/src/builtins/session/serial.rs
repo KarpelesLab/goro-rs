@@ -32,9 +32,7 @@ pub(super) fn encode(
     _for_write: bool,
 ) -> R<Option<Vec<u8>>> {
     if handler == b"php_serialize" {
-        return vm
-            .serialize_value(&Value::Array(vars.clone()))
-            .map(Some);
+        return vm.serialize_value(&Value::Array(vars.clone())).map(Some);
     }
     let binary = handler == b"php_binary";
     let vars = vars.clone();

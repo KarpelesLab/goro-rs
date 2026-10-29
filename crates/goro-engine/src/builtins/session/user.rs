@@ -119,7 +119,10 @@ pub(super) fn callback_name(vm: &mut Vm, i: usize) -> String {
 }
 
 fn call(vm: &mut Vm, i: usize, args: Vec<Value>) -> R<Option<Value>> {
-    let cb = st(vm).user.as_ref().and_then(|u| u.cbs.get(i).cloned().flatten());
+    let cb = st(vm)
+        .user
+        .as_ref()
+        .and_then(|u| u.cbs.get(i).cloned().flatten());
     match cb {
         Some(cb) => Ok(Some(vm.call_value(&cb, args)?.into_deref())),
         None => Ok(None),
@@ -251,10 +254,7 @@ pub(super) fn session_set_save_handler(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 ]))
             }));
         }
-        UserHandler {
-            obj: Some(o),
-            cbs,
-        }
+        UserHandler { obj: Some(o), cbs }
     } else {
         vm.fdeprecated(
             a,
@@ -283,7 +283,12 @@ pub(super) fn session_set_save_handler(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 return vm.fthrow(
                     a,
                     "TypeError",
-                    &format!("Argument #{} (${}) must be a valid callback, {}", i + 1, p, why),
+                    &format!(
+                        "Argument #{} (${}) must be a valid callback, {}",
+                        i + 1,
+                        p,
+                        why
+                    ),
                 );
             }
             cbs.push(Some(v));

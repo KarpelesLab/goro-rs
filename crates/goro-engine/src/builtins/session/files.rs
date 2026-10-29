@@ -191,9 +191,8 @@ pub(super) fn write(vm: &mut Vm, id: &[u8], data: &[u8]) -> R<bool> {
     let Some((_, f)) = st(vm).files.file.as_mut() else {
         return Ok(false);
     };
-    let ok = f.set_len(0).is_ok()
-        && f.seek(SeekFrom::Start(0)).is_ok()
-        && f.write_all(data).is_ok();
+    let ok =
+        f.set_len(0).is_ok() && f.seek(SeekFrom::Start(0)).is_ok() && f.write_all(data).is_ok();
     if !ok {
         let e = std::io::Error::last_os_error();
         let code = e.raw_os_error().unwrap_or(0);
@@ -274,7 +273,10 @@ pub(super) fn gc(vm: &mut Vm, maxlifetime: i64) -> Option<i64> {
         }
         let Ok(md) = e.metadata() else { continue };
         let Ok(m) = md.modified() else { continue };
-        let age = now.duration_since(m).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let age = now
+            .duration_since(m)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         if age > maxlifetime && std::fs::remove_file(e.path()).is_ok() {
             n += 1;
         }
