@@ -553,9 +553,27 @@ fn initialize(vm: &mut Vm) -> R<bool> {
         return Ok(false);
     };
     st(vm).data_read = Some(data.clone());
-    if !decode_into(vm, &data)? {
-        decode_failed(vm)?;
-        return Ok(false);
+    match decode_into(vm, &data) {
+        Ok(true) => {}
+        Ok(false) => {
+            decode_failed(vm)?;
+            return Ok(false);
+        }
+        Err(e) => {
+            if !matches!(e, crate::vm::Unwind::Throw(_)) {
+                // A fatal error while decoding (an autoloaded class):
+                // the session is dropped, unwritten (test gh12504.phpt).
+                set_vars(vm, PhpArray::new());
+                end_session(vm, true);
+                let _ = vm.raise_at(
+                    E_WARNING,
+                    "Unknown: Failed to decode session object. Session has been destroyed",
+                    PhpStr::from("Unknown"),
+                    0,
+                );
+            }
+            return Err(e);
+        }
     }
     gc_maybe(vm)?;
     Ok(true)
