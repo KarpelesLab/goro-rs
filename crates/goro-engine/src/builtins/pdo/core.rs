@@ -161,9 +161,22 @@ pub fn with_dbh<T>(o: &ObjRef, f: impl FnOnce(&mut DbhData) -> T) -> Option<T> {
     any.downcast_mut::<DbhObj>().map(|d| f(&mut d.0))
 }
 
+/// PDO and PDOStatement objects can't be serialized ("Serialization of
+/// 'PDO' is not allowed", test pecl_bug_5217.phpt) while subclasses may
+/// still allow dynamic properties (test pdo_023.phpt), so the flag is set
+/// here rather than by the #[NotSerializable] stub marker.
+pub fn mark_not_serializable(vm: &mut Vm, o: &ObjRef) {
+    let cls = vm.class_of(o);
+    let f = crate::class::cflags::NOT_SERIALIZABLE;
+    if cls.flags.get() & f == 0 {
+        cls.flags.set(cls.flags.get() | f);
+    }
+}
+
 pub fn dbh_hooks() -> NativeHooks {
     NativeHooks {
-        create: Some(|_, o| {
+        create: Some(|vm, o| {
+            mark_not_serializable(vm, o);
             *o.obj().native.borrow_mut() = Some(Box::new(DbhObj(DbhData::new())));
         }),
         ..Default::default()
@@ -425,7 +438,10 @@ fn init_connection(vm: &mut Vm, o: &ObjRef, fname: &str, a: &Args, from_connect:
             } else {
                 pstr.clone()
             };
-            if !vm.basedir_allows(fpath.as_bytes()) {
+            let basedir_set = vm.get_ini(b"open_basedir").is_some_and(|v| !v.is_empty());
+            // With open_basedir set, URI filenames are refused outright (test
+            // pdo_sqlite_open_basedir_uri.phpt).
+            if (basedir_set && pstr.starts_with("file:")) || !vm.basedir_allows(fpath.as_bytes()) {
                 let bd = vm
                     .get_ini(b"open_basedir")
                     .map(|v| v.to_string_lossy())

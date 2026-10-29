@@ -73,12 +73,14 @@ fn base(mode: i64) -> i64 {
 /// The "must be a bitmask" and flag checks shared by the fetch methods.
 fn check_mode_bits(vm: &mut Vm, fname: &str, mode: i64, argn: usize) -> R<()> {
     let pname = if argn == 2 { "$fetchMode" } else { "$mode" };
-    if mode & !0x3ff != 0 || base(mode) > FETCH_KEY_PAIR {
-        return vm.value_error(&format!(
-            "{fname}(): Argument #{argn} ({pname}) must be a bitmask of PDO::FETCH_* constants"
-        ));
+    let bitmask = || {
+        format!("{fname}(): Argument #{argn} ({pname}) must be a bitmask of PDO::FETCH_* constants")
+    };
+    if mode & !0x3ff != 0 {
+        return vm.value_error(&bitmask());
     }
     let b = base(mode);
+    // The flags are checked before the mode (test pdo_set_fetch_mode_errors).
     if mode & (FETCH_CLASSTYPE | FETCH_PROPS_LATE | FETCH_SERIALIZE) != 0
         && b != FETCH_CLASS
         && b != FETCH_DEFAULT
@@ -86,6 +88,9 @@ fn check_mode_bits(vm: &mut Vm, fname: &str, mode: i64, argn: usize) -> R<()> {
         return vm.value_error(&format!(
             "{fname}(): Argument #{argn} ({pname}) cannot use PDO::FETCH_CLASSTYPE, PDO::FETCH_PROPS_LATE, or PDO::FETCH_SERIALIZE fetch flags with a fetch mode other than PDO::FETCH_CLASS"
         ));
+    }
+    if b > FETCH_KEY_PAIR {
+        return vm.value_error(&bitmask());
     }
     Ok(())
 }
@@ -356,6 +361,25 @@ fn call_ctor(vm: &mut Vm, o: &ObjRef, cls: &Rc<Class>, args: Option<&PhpArray>) 
     Ok(())
 }
 
+/// Marks the statement as fetching (user code it runs can't change the
+/// fetch mode, tests pdo_fetch_class_change_ctor_args_during_fetch*),
+/// restoring the previous state when dropped.
+struct FetchGuard(ObjRef, bool);
+
+impl FetchGuard {
+    fn new(o: &ObjRef) -> FetchGuard {
+        let prev = with_st(o, |s| std::mem::replace(&mut s.fetching, true)).unwrap_or(false);
+        FetchGuard(o.clone(), prev)
+    }
+}
+
+impl Drop for FetchGuard {
+    fn drop(&mut self) {
+        let prev = self.1;
+        with_st(&self.0, |s| s.fetching = prev);
+    }
+}
+
 /// What a fetch call builds.
 struct Spec {
     mode: i64,
@@ -507,7 +531,6 @@ fn build(
                 return Ok(Some(Value::Object(o)));
             }
             let o = vm.instantiate(&cls)?;
-            with_st(st, |s| s.fetching = true);
             let r = (|| -> R<()> {
                 let late = spec.mode & FETCH_PROPS_LATE != 0;
                 if late {
@@ -522,7 +545,6 @@ fn build(
                 }
                 Ok(())
             })();
-            with_st(st, |s| s.fetching = false);
             r?;
             Ok(Some(Value::Object(o)))
         }
@@ -557,7 +579,7 @@ fn build(
 
 /// The statement's PDORow, holding the current row (FETCH_LAZY).
 fn lazy_row(vm: &mut Vm, st: &ObjRef, row: &[Value], names: &[PhpStr]) -> R<ObjRef> {
-    let existing = with_st(st, |s| s.lazy.clone()).flatten();
+    let existing = with_st(st, |s| s.lazy.as_ref().and_then(|w| w.upgrade())).flatten();
     let o = match existing {
         Some(o) => o,
         None => {
@@ -568,7 +590,7 @@ fn lazy_row(vm: &mut Vm, st: &ObjRef, row: &[Value], names: &[PhpStr]) -> R<ObjR
                 names: Vec::new(),
                 values: Vec::new(),
             }));
-            with_st(st, |s| s.lazy = Some(o.clone()));
+            with_st(st, |s| s.lazy = Some(o.downgrade()));
             o
         }
     };
@@ -630,6 +652,7 @@ fn fetch_failed(vm: &mut Vm, st: &ObjRef, fname: &str) -> R<()> {
 pub fn fetch(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     check_init(vm, &o)?;
+    let _fetching = FetchGuard::new(&o);
     let mode = a.int_or(0, 0);
     check_mode_bits(vm, "PDOStatement::fetch", mode, 1)?;
     if mode & (FETCH_GROUP | FETCH_UNIQUE) != 0 {
@@ -669,6 +692,7 @@ pub fn fetch(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub fn fetch_object(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     check_init(vm, &o)?;
+    let _fetching = FetchGuard::new(&o);
     let cname = a.opt_str(0).unwrap_or_else(|| PhpStr::from("stdClass"));
     let Some(cls) = vm.find_class(cname.as_bytes(), true)? else {
         return vm.fthrow(
@@ -721,6 +745,7 @@ pub fn fetch_column(vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub fn fetch_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     check_init(vm, &o)?;
+    let _fetching = FetchGuard::new(&o);
     let fname = "PDOStatement::fetchAll";
     let mode = a.int_or(0, 0);
     let args: Vec<Value> = a.vals.iter().skip(1).map(|v| v.deref()).collect();
@@ -834,6 +859,7 @@ pub fn fetch_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let why = vm.callable_error(&f);
                 return vm.type_error(&why);
             }
+            vm.callable_deprecation(&f)?;
             spec.func = Some(f);
         }
         FETCH_LAZY => {
@@ -973,6 +999,7 @@ fn iter_step(vm: &mut Vm, st: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Va
 fn iter_fetch(vm: &mut Vm, st: &ObjRef) -> R<Value> {
     let fm = with_st(st, |s| s.fetch.clone()).unwrap_or_default();
     let spec: Spec = fm.into();
+    let _fetching = FetchGuard::new(st);
     fetch_one(vm, st, "PDOStatement::getIterator", &spec)
 }
 

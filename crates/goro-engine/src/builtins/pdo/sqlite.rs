@@ -40,6 +40,10 @@ pub struct Conn {
     /// Whether open_basedir applies to ATTACH.
     pub txn_mode: i64,
     pub open_flags: i64,
+    /// Statements of the connection, each flagged while it has rows left
+    /// to fetch: DROP TABLE is refused while one has (SQLITE_LOCKED, test
+    /// pdo_sqlite_transaction.phpt).
+    pub busy: Vec<std::rc::Weak<std::cell::Cell<bool>>>,
 }
 
 impl Conn {
@@ -125,6 +129,7 @@ impl SqliteDriver {
                     authorizer: None,
                     txn_mode: 0,
                     open_flags: flags,
+                    busy: Vec::new(),
                 }));
                 if let Some(key) = shared {
                     SHARED.with(|s| s.borrow_mut().insert(key, Rc::downgrade(&conn)));
@@ -155,6 +160,17 @@ impl SqliteDriver {
             if let Some(st) = st {
                 if let Err(e) = attach_allowed(vm, &st) {
                     return Err(self.fail(e));
+                }
+                if gs::scan::first_keyword(&st.sql) == "DROP" {
+                    let mut c = conn.borrow_mut();
+                    c.busy.retain(|w| w.strong_count() > 0);
+                    if c.busy.iter().any(|w| w.upgrade().is_some_and(|b| b.get())) {
+                        drop(c);
+                        return Err(self.fail(SqlError::new(
+                            gs::SQLITE_LOCKED,
+                            "database table is locked",
+                        )));
+                    }
                 }
                 let r = guarded(vm, || conn.borrow_mut().db.run(&st, &[]))?;
                 if let Err(e) = r {
@@ -222,6 +238,11 @@ impl Driver for SqliteDriver {
                     executed: false,
                     changes: 0,
                     explain: 0,
+                    busy: {
+                        let b = std::rc::Rc::new(std::cell::Cell::new(false));
+                        self.conn.borrow_mut().busy.push(std::rc::Rc::downgrade(&b));
+                        b
+                    },
                     origins: None,
                 }))
             }
@@ -377,6 +398,7 @@ impl Driver for SqliteDriver {
 }
 
 pub struct SqliteStmt {
+    busy: std::rc::Rc<std::cell::Cell<bool>>,
     conn: Rc<RefCell<Conn>>,
     /// `None` for an empty statement (only spaces and comments).
     st: Option<Stmt>,
@@ -508,6 +530,7 @@ impl DriverStmt for SqliteStmt {
                     c.db.changes()
                 };
                 drop(c);
+                self.busy.set(!rows.rows.is_empty());
                 self.rows = Some(rows);
                 self.pos = 0;
                 self.executed = true;
@@ -541,6 +564,7 @@ impl DriverStmt for SqliteStmt {
         };
         let out = row.iter().map(sc::to_php).collect();
         self.pos += 1;
+        self.busy.set(self.pos < rows.rows.len());
         Ok(Some(out))
     }
 
@@ -601,6 +625,7 @@ impl DriverStmt for SqliteStmt {
     fn close_cursor(&mut self) {
         if let Some(r) = &self.rows {
             self.pos = r.rows.len();
+            self.busy.set(false);
         }
     }
 

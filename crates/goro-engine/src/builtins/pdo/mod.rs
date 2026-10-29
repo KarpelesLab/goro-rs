@@ -23,7 +23,6 @@ class PDOException extends RuntimeException {
 }"#;
 
 const PDO_CLASS: &str = r#"<?php
-#[NotSerializable]
 #[NotCloneable]
 class PDO {
     public const int PARAM_NULL = 0;
@@ -139,7 +138,6 @@ class PDO {
 }"#;
 
 const PDO_STATEMENT: &str = r#"<?php
-#[NotSerializable]
 #[NotCloneable]
 class PDOStatement implements IteratorAggregate {
     public string $queryString;

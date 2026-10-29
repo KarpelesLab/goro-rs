@@ -45,7 +45,7 @@ pub struct StmtData {
     pub columns: Option<Vec<PhpStr>>,
     pub err: ErrState,
     /// The PDORow of FETCH_LAZY fetches.
-    pub lazy: Option<ObjRef>,
+    pub lazy: Option<goro_runtime::object::WeakObj>,
     /// Inside a fetch that runs user code (constructors).
     pub fetching: bool,
 }
@@ -80,9 +80,6 @@ impl goro_runtime::NativeData for StmtObj {
             visit(&b.var);
         }
         s.fetch.trace(visit);
-        if let Some(l) = &s.lazy {
-            visit(&Value::Object(l.clone()));
-        }
     }
     fn clear(&mut self) {
         let s = &mut self.0;
@@ -102,7 +99,8 @@ pub fn with_st<T>(o: &ObjRef, f: impl FnOnce(&mut StmtData) -> T) -> Option<T> {
 
 pub fn stmt_hooks() -> NativeHooks {
     NativeHooks {
-        create: Some(|_, o| {
+        create: Some(|vm, o| {
+            core::mark_not_serializable(vm, o);
             *o.obj().native.borrow_mut() = Some(Box::new(StmtObj(StmtData::new())));
         }),
         get_iterator: Some(super::fetch::iterator_hook),
