@@ -1056,6 +1056,12 @@ impl Vm {
                 magic_name: Some(PhpStr::new(name)),
             });
         }
+        if cls.lname.as_bytes() == b"__php_incomplete_class" {
+            return self.throw(
+                "Error",
+                &crate::builtins::serialize::incomplete_msg("call a method", o),
+            );
+        }
         self.throw(
             "Error",
             &format!(
