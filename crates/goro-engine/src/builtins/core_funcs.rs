@@ -479,6 +479,7 @@ pub static MODULE: Module = Module {
         ("assert.bail", "0"),
         ("assert.callback", ""),
         ("memory_limit", "128M"),
+        ("fiber.stack_size", ""),
         ("include_path", ".:/usr/share/php"),
         ("ignore_user_abort", "0"),
         ("max_execution_time", "0"),
@@ -1838,6 +1839,11 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // quantity capped by it, and can't go below the memory in use (tests
     // tests/basic/gh17951_runtime_change_*; observed on PHP 8.5).
     if k.as_bytes() == b"max_memory_limit" {
+        return Ok(Value::Bool(false));
+    }
+    // Test Zend/tests/fibers/negative_stack_size.
+    if k.as_bytes() == b"fiber.stack_size" && crate::vm::setup::parse_size(&v) < 0 {
+        vm.warn("fiber.stack_size must be a positive number")?;
         return Ok(Value::Bool(false));
     }
     let mut v = v;

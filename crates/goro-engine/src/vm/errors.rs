@@ -701,7 +701,15 @@ impl Vm {
             while natives > 0 && ex.native_calls[natives - 1].depth as usize == i {
                 let nc = &ex.native_calls[natives - 1];
                 natives -= 1;
-                if direct_cuf(natives) || gen_dtor(natives) {
+                // A fiber destroyed (its function unwinding) is no frame
+                // either (tests Zend/tests/fibers/suspend-in-force-close-fiber,
+                // throw-during-fiber-destruct).
+                let fiber_dtor = nc.func.lname.as_bytes() == b"__destruct"
+                    && nc
+                        .func
+                        .scope()
+                        .is_some_and(|c| c.lname.as_bytes() == b"fiber");
+                if direct_cuf(natives) || gen_dtor(natives) || fiber_dtor {
                     continue;
                 }
                 let mut e = self.native_trace_frame(ex, nc, i, with_args);

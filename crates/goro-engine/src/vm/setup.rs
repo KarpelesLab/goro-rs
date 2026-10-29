@@ -59,6 +59,7 @@ impl Vm {
                 serialize_precision: -1,
                 assertions: 1,
                 memory_limit: 128 << 20,
+                fiber_stack_size: None,
                 include_path: PhpStr::from(".:/usr/share/php"),
                 max_nesting: 0,
                 originals: HashMap::new(),
@@ -209,6 +210,7 @@ impl Vm {
                 self.apply_memory_limit();
             }
             b"implicit_flush" => self.out.implicit_flush = ini_truthy(v),
+            b"fiber.stack_size" => self.ini.fiber_stack_size = Some(parse_size(v)),
             b"zend.enable_gc" => self.gc_enabled = ini_truthy(v),
             _ => {}
         }
