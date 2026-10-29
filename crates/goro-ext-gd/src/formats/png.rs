@@ -3,7 +3,7 @@
 //! do: palette PNGs give palette images, RGB(A) and grayscale-with-alpha
 //! give truecolor images, alpha is reduced to GD's 7 bits.
 
-use crate::image::{ALPHA_TRANSPARENT, Image, tc};
+use crate::image::{Image, tc};
 use goro_ext_zlib::{InflateFlush, InflateStatus, InflateWrap, Inflater, Wrap};
 
 pub const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -138,7 +138,12 @@ pub fn decode(data: &[u8]) -> Result<Image, PngError> {
                 hdr = Some(h);
             }
             b"PLTE" => {
-                palette = body.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                palette = body
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| [c[0], c[1], c[2]])
+                    .collect();
             }
             b"tRNS" => trns = Some(body.to_vec()),
             b"IDAT" => idat.extend_from_slice(body),
@@ -284,7 +289,7 @@ pub fn decode(data: &[u8]) -> Result<Image, PngError> {
         im.transparent = tc(s(r), s(g), s(b), 0);
     }
     // Unfilter and store.
-    let mut store = |im: &mut Image, x: usize, y: usize, samples: &[u16; 4]| {
+    let store = |im: &mut Image, x: usize, y: usize, samples: &[u16; 4]| {
         let scale = |v: u16| -> i32 {
             match h.depth {
                 16 => (v >> 8) as i32,
@@ -590,7 +595,7 @@ pub fn encode(im: &Image, level: i32, filters: i32) -> Vec<u8> {
     } else {
         vec![(0, 0, 1, 1)]
     };
-    let filter_mask = if filters < 0 || filters == 0 {
+    let filter_mask = if filters <= 0 {
         // Default: no filtering for palette images and depths < 8,
         // adaptive filtering otherwise (PNG spec 12.8 recommendation).
         if ctype == 3 || depth < 8 {

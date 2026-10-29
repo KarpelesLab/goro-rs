@@ -199,7 +199,8 @@ impl Image {
         while right > left && col_bg(right, top, bottom) {
             right -= 1;
         }
-        self.crop(left, top, right - left + 1, bottom - top + 1).ok()
+        self.crop(left, top, right - left + 1, bottom - top + 1)
+            .ok()
     }
 
     fn get_truecolor_pixel_of(&self, p: i32) -> i32 {
@@ -357,7 +358,11 @@ impl Image {
             let (support, _) = kernel(method);
             for (n_in, n_out) in [(self.sx, nw), (self.sy, nh)] {
                 let scale = n_out as f64 / n_in as f64;
-                let width = if scale < 1.0 { support / scale } else { support };
+                let width = if scale < 1.0 {
+                    support / scale
+                } else {
+                    support
+                };
                 let window = 2.0 * width.ceil() + 1.0;
                 if window * n_out as f64 * 8.0 > i32::MAX as f64 {
                     return Err(SizeError::Overflow);
@@ -583,7 +588,8 @@ fn kernel(method: i32) -> (f64, fn(f64) -> f64) {
         0.54 + 0.46 * (std::f64::consts::PI * t).cos()
     }
     fn blackman(t: f64) -> f64 {
-        0.42 + 0.5 * (std::f64::consts::PI * t).cos() + 0.08 * (2.0 * std::f64::consts::PI * t).cos()
+        0.42 + 0.5 * (std::f64::consts::PI * t).cos()
+            + 0.08 * (2.0 * std::f64::consts::PI * t).cos()
     }
     fn quadratic(t: f64) -> f64 {
         let t = t.abs();
@@ -739,9 +745,15 @@ pub fn affine(src: &Image, m: &Affine, clip: Option<(i32, i32, i32, i32)>) -> Op
         affine_apply(m, (cx + cw) as f64, (cy + ch) as f64),
     ];
     let minx = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-    let maxx = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+    let maxx = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f64::NEG_INFINITY, f64::max);
     let miny = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-    let maxy = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+    let maxy = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f64::NEG_INFINITY, f64::max);
     let ox = minx.floor();
     let oy = miny.floor();
     let w = (maxx.ceil() - ox) as i64;

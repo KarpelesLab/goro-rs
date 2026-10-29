@@ -361,12 +361,20 @@ fn check_dims(vm: &mut Vm, a: &Args) -> R<Option<(i32, i32)>> {
     let h = a.int(1);
     if w <= 0 || w > i32::MAX as i64 {
         return vm
-            .fthrow(a, "ValueError", "Argument #1 ($width) must be greater than 0")
+            .fthrow(
+                a,
+                "ValueError",
+                "Argument #1 ($width) must be greater than 0",
+            )
             .map(|_: ()| None);
     }
     if h <= 0 || h > i32::MAX as i64 {
         return vm
-            .fthrow(a, "ValueError", "Argument #2 ($height) must be greater than 0")
+            .fthrow(
+                a,
+                "ValueError",
+                "Argument #2 ($height) must be greater than 0",
+            )
             .map(|_: ()| None);
     }
     Ok(Some((w as i32, h as i32)))
@@ -413,7 +421,7 @@ fn imagesy(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(im.borrow().sy as i64))
 }
 
-fn imagedestroy(vm: &mut Vm, a: &mut Args) -> R<Value> {
+fn imagedestroy(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     vm.deprecated(
         "Function imagedestroy() is deprecated since 8.5, as it has no effect since PHP 8.0",
     )?;
@@ -656,7 +664,9 @@ fn emit(vm: &mut Vm, a: &Args, sink: Sink, bytes: &[u8]) -> R<Value> {
                 static_class: std::ptr::null(),
                 named: None,
             };
-            let ok = super::file::with_stream(vm, &tmp, 0, |vm, st| Ok(st.write_all(vm, bytes).is_ok()))?;
+            let ok = super::file::with_stream(vm, &tmp, 0, |vm, st| {
+                Ok(st.write_all(vm, bytes).is_ok())
+            })?;
             Ok(Value::Bool(ok))
         }
     }
@@ -669,7 +679,11 @@ fn imagepng(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let q = a.int_or(2, -1);
     if !(-1..=9).contains(&q) {
-        return vm.fthrow(a, "ValueError", "Argument #3 ($quality) must be between -1 and 9");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #3 ($quality) must be between -1 and 9",
+        );
     }
     let filters = a.int_or(3, -1) as i32;
     let bytes = {
@@ -714,7 +728,10 @@ fn imagejpeg(vm: &mut Vm, a: &mut Args) -> R<Value> {
     match r {
         Ok(b) => emit(vm, a, sink, &b),
         Err(e) => {
-            vm.fwarn(a, &format!("gd-jpeg: JPEG library reports unrecoverable error: {e}"))?;
+            vm.fwarn(
+                a,
+                &format!("gd-jpeg: JPEG library reports unrecoverable error: {e}"),
+            )?;
             Ok(Value::Bool(false))
         }
     }
@@ -750,11 +767,19 @@ fn imageavif(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let q = a.int_or(2, -1);
     if !(-1..=100).contains(&q) {
-        return vm.fthrow(a, "ValueError", "Argument #3 ($quality) must be between -1 and 100");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #3 ($quality) must be between -1 and 100",
+        );
     }
     let sp = a.int_or(3, -1);
     if !(-1..=10).contains(&sp) {
-        return vm.fthrow(a, "ValueError", "Argument #4 ($speed) must be between -1 and 10");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #4 ($speed) must be between -1 and 10",
+        );
     }
     let r = formats::avif::encode(&im.borrow(), q as i32, sp as i32);
     match r {
@@ -786,7 +811,10 @@ fn imagewbmp(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let r = {
         let im = im.borrow();
-        let fg = a.opt_int(2).map(|v| v as i32).unwrap_or_else(|| default_fg(&im));
+        let fg = a
+            .opt_int(2)
+            .map(|v| v as i32)
+            .unwrap_or_else(|| default_fg(&im));
         formats::wbmp::encode(&im, fg)
     };
     match r {
@@ -821,7 +849,10 @@ fn imagexbm(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let bytes = {
         let im = im.borrow();
-        let fg = a.opt_int(2).map(|v| v as i32).unwrap_or_else(|| default_fg(&im));
+        let fg = a
+            .opt_int(2)
+            .map(|v| v as i32)
+            .unwrap_or_else(|| default_fg(&im));
         formats::xbm::encode(&im, &name, fg)
     };
     emit(vm, a, sink, &bytes)
@@ -895,14 +926,22 @@ fn imagecolorallocate(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let (r, g, b, al) = rgba(vm, a, 1, false)?;
     let c = im.borrow_mut().color_allocate(r, g, b, al);
-    Ok(if c < 0 { Value::Bool(false) } else { Value::Int(c as i64) })
+    Ok(if c < 0 {
+        Value::Bool(false)
+    } else {
+        Value::Int(c as i64)
+    })
 }
 
 fn imagecolorallocatealpha(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let (r, g, b, al) = rgba(vm, a, 1, true)?;
     let c = im.borrow_mut().color_allocate(r, g, b, al);
-    Ok(if c < 0 { Value::Bool(false) } else { Value::Int(c as i64) })
+    Ok(if c < 0 {
+        Value::Bool(false)
+    } else {
+        Value::Int(c as i64)
+    })
 }
 
 macro_rules! color_query {
@@ -971,7 +1010,12 @@ fn imagecolorset(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if a.has(5) {
             check_range(vm, a, 5, "alpha", 127)?;
         }
-        (int(a, 2), int(a, 3), int(a, 4), if a.has(5) { int(a, 5) } else { 0 })
+        (
+            int(a, 2),
+            int(a, 3),
+            int(a, 4),
+            if a.has(5) { int(a, 5) } else { 0 },
+        )
     };
     let c = a.int(1);
     let mut im = im.borrow_mut();
@@ -1025,7 +1069,11 @@ fn imagecolorat(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn imagecolorstotal(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let im = im.borrow();
-    Ok(Value::Int(if im.truecolor { 0 } else { im.colors_total as i64 }))
+    Ok(Value::Int(if im.truecolor {
+        0
+    } else {
+        im.colors_total as i64
+    }))
 }
 
 fn imagecolortransparent(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1064,7 +1112,13 @@ fn imagecolormatch(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (tc1, tc2, s1, s2, n2) = {
         let x = i1.borrow();
         let y = i2.borrow();
-        (x.truecolor, y.truecolor, (x.sx, x.sy), (y.sx, y.sy), y.colors_total)
+        (
+            x.truecolor,
+            y.truecolor,
+            (x.sx, x.sy),
+            (y.sx, y.sy),
+            y.colors_total,
+        )
     };
     if !tc1 {
         return vm.fthrow(a, "ValueError", "Argument #1 ($image1) must be TrueColor");
@@ -1100,13 +1154,14 @@ fn imagecolormatch(vm: &mut Vm, a: &mut Args) -> R<Value> {
             sums[i][4] += 1;
         }
     }
-    for i in 0..y.colors_total as usize {
-        let n = sums[i][4];
+    let total = y.colors_total as usize;
+    for (i, sum) in sums.iter().enumerate().take(total) {
+        let n = sum[4];
         if n > 0 {
-            y.red[i] = (sums[i][0] / n) as i32;
-            y.green[i] = (sums[i][1] / n) as i32;
-            y.blue[i] = (sums[i][2] / n) as i32;
-            y.alpha[i] = (sums[i][3] / n) as i32;
+            y.red[i] = (sum[0] / n) as i32;
+            y.green[i] = (sum[1] / n) as i32;
+            y.blue[i] = (sum[2] / n) as i32;
+            y.alpha[i] = (sum[3] / n) as i32;
         }
     }
     true_()
@@ -1147,7 +1202,11 @@ fn imagegammacorrect(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     }
     if o.is_nan() || o == f64::INFINITY {
-        return vm.fthrow(a, "ValueError", "Argument #3 ($output_gamma) must be finite");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #3 ($output_gamma) must be finite",
+        );
     }
     if o <= 0.0 {
         return vm.fthrow(
@@ -1211,7 +1270,7 @@ fn imageinterlace(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn imagesetstyle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let arr = a.array(1);
-    if arr.len() == 0 {
+    if arr.is_empty() {
         return vm.fthrow(a, "ValueError", "Argument #2 ($style) must not be empty");
     }
     let mut style = Vec::with_capacity(arr.len());
@@ -1275,7 +1334,11 @@ fn imagegetinterpolation(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn imagesetinterpolation(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let m = a.int_or(1, tr::IMG_BILINEAR_FIXED as i64);
-    let m = if m == -1 { tr::IMG_BILINEAR_FIXED as i64 } else { m };
+    let m = if m == -1 {
+        tr::IMG_BILINEAR_FIXED as i64
+    } else {
+        m
+    };
     if !tr::valid_interpolation(m) {
         return Ok(Value::Bool(false));
     }
@@ -1475,9 +1538,7 @@ fn polygon_args(vm: &mut Vm, a: &Args, min: usize) -> R<Option<(Vec<(i32, i32)>,
         vm.fthrow::<()>(
             a,
             "ValueError",
-            &format!(
-                "Argument #3 ($num_points_or_color) must be greater than or equal to {min}"
-            ),
+            &format!("Argument #3 ($num_points_or_color) must be greater than or equal to {min}"),
         )?;
         return Ok(None);
     }
@@ -1634,7 +1695,9 @@ fn ft_options(vm: &mut Vm, a: &Args, i: usize) -> R<f64> {
 }
 
 fn bbox_value(b: [i32; 8]) -> Value {
-    Value::Array(PhpArray::from_values(b.iter().map(|&v| Value::Int(v as i64))))
+    Value::Array(PhpArray::from_values(
+        b.iter().map(|&v| Value::Int(v as i64)),
+    ))
 }
 
 fn check_size(vm: &mut Vm, a: &Args, size: f64) -> R<bool> {
@@ -1852,7 +1915,10 @@ fn imagefilter(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let im = img(vm, a, 0)?;
     let n = a.len();
     if n < 2 {
-        return vm.throw("ArgumentCountError", "Wrong parameter count for imagefilter()");
+        return vm.throw(
+            "ArgumentCountError",
+            "Wrong parameter count for imagefilter()",
+        );
     }
     let f = vm.to_int(&a.val(1))?;
     if !(0..=12).contains(&f) {
@@ -1872,7 +1938,10 @@ fn imagefilter(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let extra = n - 2;
     if extra < req || extra > max {
-        return vm.throw("ArgumentCountError", "Wrong parameter count for imagefilter()");
+        return vm.throw(
+            "ArgumentCountError",
+            "Wrong parameter count for imagefilter()",
+        );
     }
     let iv = |vm: &mut Vm, i: usize| -> R<i64> { vm.to_int(&a.val(i)) };
     let fv = |vm: &mut Vm, i: usize| -> R<f64> { vm.to_float(&a.val(i)) };
@@ -1900,7 +1969,11 @@ fn imagefilter(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let r = iv(vm, 2)?.clamp(-255, 255) as i32;
             let g = iv(vm, 3)?.clamp(-255, 255) as i32;
             let b = iv(vm, 4)?.clamp(-255, 255) as i32;
-            let al = if n > 5 { iv(vm, 5)?.clamp(-127, 127) as i32 } else { 0 };
+            let al = if n > 5 {
+                iv(vm, 5)?.clamp(-127, 127) as i32
+            } else {
+                0
+            };
             im.filter_colorize(r, g, b, al);
             true
         }
@@ -1929,19 +2002,27 @@ fn imagefilter(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let max = i32::MAX as i64;
             if !(0..=max).contains(&sub) {
                 drop(im);
-                return vm.fthrow(a, "ValueError", &format!("Argument #3 must be between 0 and {max}"));
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    &format!("Argument #3 must be between 0 and {max}"),
+                );
             }
             if !(0..=max).contains(&plus) {
                 drop(im);
-                return vm.fthrow(a, "ValueError", &format!("Argument #4 must be between 0 and {max}"));
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    &format!("Argument #4 must be between 0 and {max}"),
+                );
             }
             let mut colors = Vec::new();
-            if n > 4 {
-                if let Value::Array(arr) = a.val(4) {
-                    for (_, v) in arr.iter() {
-                        let v = v.deref();
-                        colors.push(vm.to_int(&v)? as i32);
-                    }
+            if n > 4
+                && let Value::Array(arr) = a.val(4)
+            {
+                for (_, v) in arr.iter() {
+                    let v = v.deref();
+                    colors.push(vm.to_int(&v)? as i32);
                 }
             }
             // Scatter offsets are random (PHP manual); a local xorshift
@@ -1988,7 +2069,9 @@ fn imageconvolution(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 return vm.fthrow(
                     a,
                     "ValueError",
-                    &format!("Argument #2 ($matrix) must be a 3x3 array, matrix[{i}] is not an array"),
+                    &format!(
+                        "Argument #2 ($matrix) must be a 3x3 array, matrix[{i}] is not an array"
+                    ),
                 );
             }
         };
@@ -2075,7 +2158,12 @@ fn imagecrop(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     let [x, y, w, h] = v;
-    let (x, y, w, h) = (x as i32 as i64, y as i32 as i64, w as i32 as i64, h as i32 as i64);
+    let (x, y, w, h) = (
+        x as i32 as i64,
+        y as i32 as i64,
+        w as i32 as i64,
+        h as i32 as i64,
+    );
     for (p, s, pk, sk) in [(x, w, "x", "width"), (y, h, "y", "height")] {
         if p + s > i32::MAX as i64 {
             return vm.fthrow(
@@ -2105,11 +2193,7 @@ fn imagecropauto(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let threshold = if a.has(2) { a.float(2) } else { 0.5 };
     let color = a.int_or(3, -1);
     if !(0..=5).contains(&mode) {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #2 ($mode) must be a valid mode",
-        );
+        return vm.fthrow(a, "ValueError", "Argument #2 ($mode) must be a valid mode");
     }
     let palette_total = {
         let i = im.borrow();
@@ -2119,8 +2203,7 @@ fn imagecropauto(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Some(i.colors_total as i64)
         }
     };
-    if mode == tr::CROP_THRESHOLD as i64
-        && (color < 0 || palette_total.is_some_and(|n| color >= n))
+    if mode == tr::CROP_THRESHOLD as i64 && (color < 0 || palette_total.is_some_and(|n| color >= n))
     {
         return vm.fthrow(
             a,
@@ -2195,7 +2278,11 @@ fn imagescale(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #4 ($mode) must be one of the GD_* constants",
         );
     }
-    let mode = if mode == -1 { tr::IMG_BILINEAR_FIXED } else { mode as i32 };
+    let mode = if mode == -1 {
+        tr::IMG_BILINEAR_FIXED
+    } else {
+        mode as i32
+    };
     let r = im.borrow().scale(w as i32, h as i32, mode);
     match r {
         Ok(d) => new_image(vm, d),
@@ -2230,15 +2317,16 @@ fn imagerotate(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn fmt_float(f: f64) -> String {
-    let s = format!("{f}");
-    if s.contains('.') || s.contains('e') {
-        s
-    } else {
-        s
-    }
+    format!("{f}")
 }
 
-fn affine_arg(vm: &mut Vm, a: &Args, arr: &PhpArray, argn: usize, name: &str) -> R<Option<tr::Affine>> {
+fn affine_arg(
+    vm: &mut Vm,
+    a: &Args,
+    arr: &PhpArray,
+    argn: usize,
+    name: &str,
+) -> R<Option<tr::Affine>> {
     if arr.len() != 6 {
         vm.fthrow::<()>(
             a,
@@ -2379,7 +2467,11 @@ fn imageaffinematrixget(vm: &mut Vm, a: &mut Args) -> R<Value> {
             };
             Ok(affine_value(&m))
         }
-        _ => vm.fthrow(a, "ValueError", "Argument #1 ($type) must be a valid element type"),
+        _ => vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($type) must be a valid element type",
+        ),
     }
 }
 

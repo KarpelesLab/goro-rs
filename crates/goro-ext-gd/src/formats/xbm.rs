@@ -86,7 +86,8 @@ pub fn decode(d: &[u8]) -> DecodeResult {
     if vals.len() < needed {
         return Err(DecodeError::with("Invalid XBM"));
     }
-    let mut im = Image::new_palette(w as i32, h as i32).ok_or_else(|| DecodeError::with(OVERFLOW_MSG))?;
+    let mut im =
+        Image::new_palette(w as i32, h as i32).ok_or_else(|| DecodeError::with(OVERFLOW_MSG))?;
     im.color_allocate(255, 255, 255, 0);
     im.color_allocate(0, 0, 0, 0);
     let per_row = (w as usize).div_ceil(unit);

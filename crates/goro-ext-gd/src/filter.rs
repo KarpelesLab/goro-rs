@@ -254,7 +254,12 @@ impl Image {
                         }
                     }
                     let n = n.max(1);
-                    let (r, g, b, a) = ((r / n) as i32, (g / n) as i32, (b / n) as i32, (a / n) as i32);
+                    let (r, g, b, a) = (
+                        (r / n) as i32,
+                        (g / n) as i32,
+                        (b / n) as i32,
+                        (a / n) as i32,
+                    );
                     if self.truecolor {
                         tc(r, g, b, a)
                     } else {

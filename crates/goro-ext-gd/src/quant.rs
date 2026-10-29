@@ -272,11 +272,7 @@ pub fn truecolor_to_palette(im: &mut Image, dither: bool, colors: usize) {
                 out[y * w + x] = i as u8;
                 let (pr, pg, pb, _) = pal[i];
                 let d = [r - pr, g - pg, b - pb];
-                let (fwd, back) = if ltr {
-                    (x + 2, x)
-                } else {
-                    (x, x + 2)
-                };
+                let (fwd, back) = if ltr { (x + 2, x) } else { (x, x + 2) };
                 for c in 0..3 {
                     err_cur[fwd][c] += d[c] * 7;
                     err_next[back][c] += d[c] * 3;

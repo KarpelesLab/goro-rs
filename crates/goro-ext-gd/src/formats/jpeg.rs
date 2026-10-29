@@ -46,7 +46,10 @@ fn density(d: &[u8]) -> Option<(u32, u32)> {
             let y = u16::from_be_bytes([d[i + 14], d[i + 15]]) as u32;
             return match units {
                 1 => Some((x, y)),
-                2 => Some(((x as f64 * 2.54 + 0.5) as u32, (y as f64 * 2.54 + 0.5) as u32)),
+                2 => Some((
+                    (x as f64 * 2.54 + 0.5) as u32,
+                    (y as f64 * 2.54 + 0.5) as u32,
+                )),
                 _ => None,
             };
         }
@@ -74,7 +77,7 @@ pub fn decode(d: &[u8]) -> DecodeResult {
     let img = oxideav_mjpeg::decode_rgb8_with(d, &opts).map_err(|e| fail(&e.to_string()))?;
     let mut im = Image::new_truecolor(img.width as i32, img.height as i32)
         .ok_or_else(|| DecodeError::with(super::OVERFLOW_MSG))?;
-    for (p, c) in im.tpixels.iter_mut().zip(img.data.chunks_exact(3)) {
+    for (p, c) in im.tpixels.iter_mut().zip(img.data.as_chunks::<3>().0) {
         *p = tc(c[0] as i32, c[1] as i32, c[2] as i32, 0);
     }
     if let Some((x, y)) = density(d) {
@@ -95,12 +98,17 @@ pub fn encode(im: &Image, quality: i32) -> Result<Vec<u8>, String> {
             rgb.extend_from_slice(&[tc_r(p) as u8, tc_g(p) as u8, tc_b(p) as u8]);
         }
     }
-    let q = if quality < 0 { 75 } else { quality.clamp(1, 100) } as u8;
+    let q = if quality < 0 {
+        75
+    } else {
+        quality.clamp(1, 100)
+    } as u8;
     let mut opts = oxideav_mjpeg::EncodeOptions::default().with_quality(q);
     if im.interlace {
         opts = opts.with_progressive(true);
     }
-    let mut out = oxideav_mjpeg::encode_rgb8(w as u32, h as u32, &rgb, &opts).map_err(|e| e.to_string())?;
+    let mut out =
+        oxideav_mjpeg::encode_rgb8(w as u32, h as u32, &rgb, &opts).map_err(|e| e.to_string())?;
     set_density(&mut out, im.res_x, im.res_y);
     Ok(out)
 }

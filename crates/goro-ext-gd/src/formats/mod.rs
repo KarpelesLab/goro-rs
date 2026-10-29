@@ -37,10 +37,8 @@ impl DecodeError {
 pub type DecodeResult = Result<Image, DecodeError>;
 
 /// The allocation-overflow warning of GD (bug77479, libgd00101).
-pub const OVERFLOW_MSG: &str =
-    "Product of memory allocation multiplication would exceed INT_MAX, failing operation gracefully\n";
-pub const NEGATIVE_MSG: &str =
-    "One parameter to a memory allocation multiplication is negative or zero, failing operation gracefully\n";
+pub const OVERFLOW_MSG: &str = "Product of memory allocation multiplication would exceed INT_MAX, failing operation gracefully\n";
+pub const NEGATIVE_MSG: &str = "One parameter to a memory allocation multiplication is negative or zero, failing operation gracefully\n";
 
 /// Formats imagecreatefromstring() recognizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

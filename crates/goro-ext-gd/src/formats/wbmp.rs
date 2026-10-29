@@ -45,14 +45,16 @@ pub fn decode(d: &[u8]) -> DecodeResult {
         return Err(DecodeError::silent());
     }
     let n = w as u64 * h as u64;
-    if w > i32::MAX as u32 || h > i32::MAX as u32 || n > i32::MAX as u64 || n * 4 > i32::MAX as u64 {
+    if w > i32::MAX as u32 || h > i32::MAX as u32 || n > i32::MAX as u64 || n * 4 > i32::MAX as u64
+    {
         return Err(DecodeError::with(OVERFLOW_MSG));
     }
     let row = (w as usize).div_ceil(8);
     if d.len() - p < row * h as usize {
         return Err(DecodeError::silent());
     }
-    let mut im = Image::new_palette(w as i32, h as i32).ok_or_else(|| DecodeError::with(OVERFLOW_MSG))?;
+    let mut im =
+        Image::new_palette(w as i32, h as i32).ok_or_else(|| DecodeError::with(OVERFLOW_MSG))?;
     im.color_allocate(255, 255, 255, 0);
     im.color_allocate(0, 0, 0, 0);
     for y in 0..h as usize {

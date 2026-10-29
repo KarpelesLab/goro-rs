@@ -190,7 +190,8 @@ fn decode_inner(d: &[u8]) -> Option<DecodeResult> {
                 }
             };
             for r in 0..h {
-                let row = data.get(r as usize * stride..r as usize * stride + w as usize * bytespp)?;
+                let row =
+                    data.get(r as usize * stride..r as usize * stride + w as usize * bytespp)?;
                 for x in 0..w as usize {
                     let p = &row[x * bytespp..(x + 1) * bytespp];
                     let c = if bpp == 24 {
@@ -201,11 +202,7 @@ fn decode_inner(d: &[u8]) -> Option<DecodeResult> {
                         } else {
                             u32::from_le_bytes([p[0], p[1], p[2], p[3]])
                         };
-                        let a = if am != 0 {
-                            127 - (chan(v, am) >> 1)
-                        } else {
-                            0
-                        };
+                        let a = if am != 0 { 127 - (chan(v, am) >> 1) } else { 0 };
                         tc(chan(v, rm), chan(v, gm), chan(v, bm), a)
                     };
                     im.put_raw(x as i32, row_y(r), c);
@@ -222,7 +219,11 @@ pub fn encode(im: &Image, compressed: bool) -> Vec<u8> {
     let (w, h) = (im.sx as usize, im.sy as usize);
     let palette = !im.truecolor;
     let bpp: u16 = if palette { 8 } else { 24 };
-    let ncolors = if palette { im.colors_total.max(0) as usize } else { 0 };
+    let ncolors = if palette {
+        im.colors_total.max(0) as usize
+    } else {
+        0
+    };
     let mut pixels = Vec::new();
     let rle = palette && compressed;
     if palette {

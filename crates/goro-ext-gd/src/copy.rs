@@ -313,7 +313,11 @@ pub fn copy_resampled(
             } else {
                 (0.0, 0.0, 0.0)
             };
-            let a = if contrib_sum != 0.0 { alpha / contrib_sum } else { 0.0 };
+            let a = if contrib_sum != 0.0 {
+                alpha / contrib_sum
+            } else {
+                0.0
+            };
             let clampc = |v: f64| -> i32 { (v + 0.5).clamp(0.0, 255.0) as i32 };
             let a = (a + 0.5).clamp(0.0, ALPHA_MAX as f64) as i32;
             let c = tc(clampc(r), clampc(g), clampc(b), a);

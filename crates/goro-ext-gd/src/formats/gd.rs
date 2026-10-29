@@ -69,7 +69,11 @@ fn read_colors(r: &mut Rd, im: &mut Image, truecolor_flag: bool) -> Option<()> {
         im.open[i] = i >= total;
     }
     im.colors_total = total as i32;
-    im.transparent = if t >= 0 && (t as usize) < MAX_COLORS { t } else { -1 };
+    im.transparent = if t >= 0 && (t as usize) < MAX_COLORS {
+        t
+    } else {
+        -1
+    };
     Some(())
 }
 
@@ -79,7 +83,11 @@ pub fn decode_gd(d: &[u8]) -> DecodeResult {
     let mut r = Rd { d, p: 0 };
     let sig = r.u16().ok_or_else(bad)?;
     let (w, h, legacy) = if sig == 0xfffe || sig == 0xffff {
-        (r.u16().ok_or_else(bad)? as i32, r.u16().ok_or_else(bad)? as i32, false)
+        (
+            r.u16().ok_or_else(bad)? as i32,
+            r.u16().ok_or_else(bad)? as i32,
+            false,
+        )
     } else {
         (sig as i32, r.u16().ok_or_else(bad)? as i32, true)
     };
@@ -171,7 +179,11 @@ pub const GD2_COMPRESSED: i64 = 2;
 
 /// imagegd2.
 pub fn encode_gd2(im: &Image, chunk: i64, mode: i64) -> Vec<u8> {
-    let cs = if chunk == 0 { 128 } else { chunk.clamp(64, 4096) } as i32;
+    let cs = if chunk == 0 {
+        128
+    } else {
+        chunk.clamp(64, 4096)
+    } as i32;
     let compressed = mode != GD2_RAW;
     let fmt: u16 = match (im.truecolor, compressed) {
         (false, false) => 1,

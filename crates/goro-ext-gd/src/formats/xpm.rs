@@ -66,7 +66,11 @@ fn parse_color(spec: &str) -> Option<Option<(i32, i32, i32)>> {
     if let Some(h) = s.strip_prefix('#') {
         let v = |a: &str| i32::from_str_radix(a, 16).ok();
         return match h.len() {
-            3 => Some(Some((v(&h[0..1])? * 17, v(&h[1..2])? * 17, v(&h[2..3])? * 17))),
+            3 => Some(Some((
+                v(&h[0..1])? * 17,
+                v(&h[1..2])? * 17,
+                v(&h[2..3])? * 17,
+            ))),
             6 => Some(Some((v(&h[0..2])?, v(&h[2..4])?, v(&h[4..6])?))),
             12 => Some(Some((v(&h[0..2])?, v(&h[4..6])?, v(&h[8..10])?))),
             _ => None,
@@ -79,7 +83,10 @@ pub fn decode(d: &[u8]) -> DecodeResult {
     let s = strings(d);
     let hdr = s.first().ok_or_else(DecodeError::silent)?;
     let hdr = String::from_utf8_lossy(hdr);
-    let v: Vec<i64> = hdr.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    let v: Vec<i64> = hdr
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
     if v.len() < 4 {
         return Err(DecodeError::silent());
     }

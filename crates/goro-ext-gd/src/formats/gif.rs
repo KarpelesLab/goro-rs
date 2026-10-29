@@ -20,7 +20,9 @@ pub fn decode(data: &[u8]) -> Option<Image> {
             return None;
         }
         global = data[pos..pos + 3 * n]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2]])
             .collect();
         pos += 3 * n;
@@ -61,7 +63,12 @@ pub fn decode(data: &[u8]) -> Option<Image> {
                 if iflags & 0x80 != 0 {
                     let n = 2usize << (iflags & 7);
                     let t = data.get(pos..pos + 3 * n)?;
-                    local = t.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                    local = t
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|c| [c[0], c[1], c[2]])
+                        .collect();
                     pos += 3 * n;
                 }
                 let pal = if local.is_empty() { &global } else { &local };
@@ -79,10 +86,7 @@ pub fn decode(data: &[u8]) -> Option<Image> {
                 }
                 // Gather the sub-blocks.
                 let mut lzw = Vec::new();
-                loop {
-                    let Some(&n) = data.get(pos) else {
-                        break;
-                    };
+                while let Some(&n) = data.get(pos) {
                     pos += 1;
                     if n == 0 {
                         break;
@@ -130,7 +134,7 @@ pub fn decode(data: &[u8]) -> Option<Image> {
                     }
                     im.colors_total = max_index as i32 + 1;
                 }
-                if transparent >= 0 && transparent < 256 {
+                if (0..256).contains(&transparent) {
                     im.transparent = transparent;
                 }
                 let _ = top;

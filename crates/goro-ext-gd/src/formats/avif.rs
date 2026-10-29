@@ -17,8 +17,13 @@ pub fn decode(d: &[u8]) -> DecodeResult {
         .map_err(|e| DecodeError::with(&format!("gd-avif error: {e}")))?;
     let mut im = Image::new_truecolor(img.width as i32, img.height as i32)
         .ok_or_else(|| DecodeError::with(super::OVERFLOW_MSG))?;
-    for (p, c) in im.tpixels.iter_mut().zip(img.data.chunks_exact(4)) {
-        *p = tc(c[0] as i32, c[1] as i32, c[2] as i32, 127 - (c[3] as i32 >> 1));
+    for (p, c) in im.tpixels.iter_mut().zip(img.data.as_chunks::<4>().0) {
+        *p = tc(
+            c[0] as i32,
+            c[1] as i32,
+            c[2] as i32,
+            127 - (c[3] as i32 >> 1),
+        );
     }
     Ok(im)
 }
@@ -41,9 +46,9 @@ pub fn encode(im: &Image, quality: i32, speed: i32) -> Result<Vec<u8>, String> {
     }
     let q = if quality < 0 { 52 } else { quality.min(100) } as u8;
     let mut opts = oxideav_avif::EncodeOptions::default().with_quality(q);
-    if q == 100 {
-        opts = opts.with_chroma(oxideav_avif::StillChroma::Yuv444);
-    } else if w % 2 == 1 || h % 2 == 1 {
+    // Full chroma for lossless output and odd sizes (4:2:0 needs even
+    // extents).
+    if q == 100 || w % 2 == 1 || h % 2 == 1 {
         opts = opts.with_chroma(oxideav_avif::StillChroma::Yuv444);
     }
     let _ = speed;

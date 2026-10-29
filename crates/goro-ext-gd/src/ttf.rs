@@ -41,7 +41,8 @@ fn decode_text(t: &[u8]) -> Vec<char> {
                 (false, i + 2)
             };
             let mut j = start;
-            while j < t.len() && j - start < 8 && (t[j] as char).is_digit(if hex { 16 } else { 10 }) {
+            while j < t.len() && j - start < 8 && (t[j] as char).is_digit(if hex { 16 } else { 10 })
+            {
                 j += 1;
             }
             if j > start && t.get(j) == Some(&b';') {
@@ -118,7 +119,7 @@ fn flatten(points: &[(f64, f64, bool)], out: &mut Vec<Seg>) {
     };
     let mut cur = start;
     let mut ctrl: Option<(f64, f64)> = None;
-    let mut quad = |p0: (f64, f64), c: (f64, f64), p1: (f64, f64), out: &mut Vec<Seg>| {
+    let quad = |p0: (f64, f64), c: (f64, f64), p1: (f64, f64), out: &mut Vec<Seg>| {
         let dd = ((p0.0 - 2.0 * c.0 + p1.0).abs() + (p0.1 - 2.0 * c.1 + p1.1).abs()).max(0.0);
         let steps = ((dd * 2.0).sqrt().ceil() as usize).clamp(1, 64);
         let mut prev = p0;
@@ -255,7 +256,8 @@ struct Glyph {
 
 /// Lays out and optionally draws the text. Returns the bounding box.
 pub fn text(im: Option<&mut Image>, req: &TextReq) -> Result<[i32; 8], String> {
-    let font = oxideav_ttf::Font::from_bytes(req.font).map_err(|_| "Could not read font".to_string())?;
+    let font =
+        oxideav_ttf::Font::from_bytes(req.font).map_err(|_| "Could not read font".to_string())?;
     let upem = font.units_per_em().max(1) as f64;
     let ppem = req.size * DPI / 72.0;
     let scale = ppem / upem;
@@ -344,7 +346,12 @@ pub fn text(im: Option<&mut Image>, req: &TextReq) -> Result<[i32; 8], String> {
     Ok(out)
 }
 
-fn draw(im: &mut Image, req: &TextReq, placed: &[(f64, f64, Glyph)], rot: &dyn Fn(f64, f64) -> (f64, f64)) {
+fn draw(
+    im: &mut Image,
+    req: &TextReq,
+    placed: &[(f64, f64, Glyph)],
+    rot: &dyn Fn(f64, f64) -> (f64, f64),
+) {
     // Segments in image coordinates.
     let mut segs: Vec<Seg> = Vec::new();
     for (px, py, g) in placed {
@@ -410,7 +417,11 @@ fn draw(im: &mut Image, req: &TextReq, placed: &[(f64, f64, Glyph)], rot: &dyn F
                 let opacity = ((127 - fa) as f32 * cv).round() as i32;
                 let src = tc(fr, fg, fb, 127 - opacity);
                 let dst = im.get_pixel(x, y);
-                let v = if cv >= 1.0 && fa == 0 { src } else { alpha_blend(dst, src) };
+                let v = if cv >= 1.0 && fa == 0 {
+                    src
+                } else {
+                    alpha_blend(dst, src)
+                };
                 im.put_raw(x, y, v);
             } else {
                 if cv < 0.5 {
@@ -420,8 +431,13 @@ fn draw(im: &mut Image, req: &TextReq, placed: &[(f64, f64, Glyph)], rot: &dyn F
                     color
                 } else {
                     let d = im.get_pixel(x, y) as usize;
-                    let mix = |f: i32, b: i32| (f as f32 * cv + b as f32 * (1.0 - cv)).round() as i32;
-                    let (r2, g2, b2) = (mix(fr, im.red[d]), mix(fg, im.green[d]), mix(fb, im.blue[d]));
+                    let mix =
+                        |f: i32, b: i32| (f as f32 * cv + b as f32 * (1.0 - cv)).round() as i32;
+                    let (r2, g2, b2) = (
+                        mix(fr, im.red[d]),
+                        mix(fg, im.green[d]),
+                        mix(fb, im.blue[d]),
+                    );
                     im.color_resolve(r2, g2, b2, fa)
                 };
                 im.put_raw(x, y, v);

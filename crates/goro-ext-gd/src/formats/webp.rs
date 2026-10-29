@@ -11,11 +11,17 @@ pub fn decode(d: &[u8]) -> DecodeResult {
     if !oxideav_webp::probe(d) {
         return Err(DecodeError::with("gd-webp cannot get webp info"));
     }
-    let img = oxideav_webp::decode_rgba8(d).map_err(|_| DecodeError::with("gd-webp cannot get webp info"))?;
+    let img = oxideav_webp::decode_rgba8(d)
+        .map_err(|_| DecodeError::with("gd-webp cannot get webp info"))?;
     let mut im = Image::new_truecolor(img.width as i32, img.height as i32)
         .ok_or_else(|| DecodeError::with(super::OVERFLOW_MSG))?;
-    for (p, c) in im.tpixels.iter_mut().zip(img.data.chunks_exact(4)) {
-        *p = tc(c[0] as i32, c[1] as i32, c[2] as i32, 127 - (c[3] as i32 >> 1));
+    for (p, c) in im.tpixels.iter_mut().zip(img.data.as_chunks::<4>().0) {
+        *p = tc(
+            c[0] as i32,
+            c[1] as i32,
+            c[2] as i32,
+            127 - (c[3] as i32 >> 1),
+        );
     }
     Ok(im)
 }

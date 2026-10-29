@@ -105,7 +105,11 @@ impl std::fmt::Debug for Image {
             "Image({}x{}, {})",
             self.sx,
             self.sy,
-            if self.truecolor { "truecolor" } else { "palette" }
+            if self.truecolor {
+                "truecolor"
+            } else {
+                "palette"
+            }
         )
     }
 }

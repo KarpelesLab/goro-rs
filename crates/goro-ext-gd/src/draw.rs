@@ -480,6 +480,7 @@ impl Image {
     }
 
     /// imagearc: the outline of a partial ellipse.
+    #[allow(clippy::too_many_arguments)]
     pub fn arc(&mut self, cx: i32, cy: i32, w: i32, h: i32, s: i32, e: i32, color: i32) {
         // Points every degree, truncated toward the centre
         // (imagearc_basic.png); full circles too, so that the thickness
@@ -532,8 +533,6 @@ impl Image {
                 if style & ARC_CHORD == 0 {
                     if style & ARC_NOFILL != 0 {
                         self.line(lx, ly, x, y, color);
-                    } else if y == ly {
-                        pts.push((x, y));
                     } else {
                         pts.push((x, y));
                     }
@@ -655,7 +654,9 @@ impl Image {
                 seen[row + xx as usize] = true;
             }
             for xx in l..=r {
-                if sy > 0 && !seen[row - w as usize + xx as usize] && self.get_pixel(xx, sy - 1) == oc
+                if sy > 0
+                    && !seen[row - w as usize + xx as usize]
+                    && self.get_pixel(xx, sy - 1) == oc
                 {
                     stack.push((xx, sy - 1));
                 }

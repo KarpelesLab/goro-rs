@@ -46,7 +46,11 @@ pub fn decode(d: &[u8]) -> DecodeResult {
             2 => {
                 let v = u16::from_le_bytes([p[0], p[1]]) as u32;
                 let c = |s: u32| ((v >> s) & 0x1f) * 255 / 31;
-                let a = if v & 0x8000 != 0 || desc & 0x0f == 0 { 0xff } else { 0 };
+                let a = if v & 0x8000 != 0 || desc & 0x0f == 0 {
+                    0xff
+                } else {
+                    0
+                };
                 (a << 24) | (c(10) << 16) | (c(5) << 8) | c(0)
             }
             3 => 0xff00_0000 | ((p[2] as u32) << 16) | ((p[1] as u32) << 8) | p[0] as u32,
@@ -89,7 +93,11 @@ pub fn decode(d: &[u8]) -> DecodeResult {
         let (x, y) = ((i % w as usize) as i32, (i / w as usize) as i32);
         let x = if right_to_left { w - 1 - x } else { x };
         let y = if top_down { y } else { h - 1 - y };
-        let a8 = if has_alpha || bpp == 16 { (v >> 24) as i32 } else { 255 };
+        let a8 = if has_alpha || bpp == 16 {
+            (v >> 24) as i32
+        } else {
+            255
+        };
         let c = tc(
             ((v >> 16) & 0xff) as i32,
             ((v >> 8) & 0xff) as i32,
