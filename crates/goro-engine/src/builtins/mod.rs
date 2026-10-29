@@ -18,6 +18,7 @@ pub mod exec;
 pub mod exif;
 pub mod fiber;
 pub mod file;
+pub mod fileinfo;
 pub mod filter;
 pub mod ftp;
 pub mod gd;
@@ -88,6 +89,7 @@ pub fn modules() -> Vec<&'static Module> {
         &hash::MODULE,
         &info::MODULE,
         &fiber::MODULE,
+        &fileinfo::MODULE,
         &file::MODULE,
         &sockets::MODULE,
         &socketext::MODULE,

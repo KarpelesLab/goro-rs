@@ -1,0 +1,11 @@
+[package]
+name = "goro-ext-fileinfo"
+description = "PHP fileinfo extension: a magic(5) rule engine, text and encoding detection and built-in file type rules"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The magic(5) "regex" type (PHP's libmagic matches these with PCRE).
+goro-regex = { path = "../goro-regex" }
+libc = "0.2"
