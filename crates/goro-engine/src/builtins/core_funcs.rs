@@ -1862,6 +1862,13 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if k.as_bytes() == b"max_memory_limit" {
         return Ok(Value::Bool(false));
     }
+    // A response type with a line break could inject headers: refused,
+    // silently (tests sapi/cgi/tests/bug81518a.phpt, bug81518b.phpt).
+    if matches!(k.as_bytes(), b"default_charset" | b"default_mimetype")
+        && v.iter().any(|&c| matches!(c, b'\r' | b'\n' | 0))
+    {
+        return Ok(Value::Bool(false));
+    }
     // Test Zend/tests/fibers/negative_stack_size.
     if k.as_bytes() == b"fiber.stack_size" && crate::vm::setup::parse_size(&v) < 0 {
         vm.warn("fiber.stack_size must be a positive number")?;
@@ -2134,6 +2141,8 @@ fn zero_int(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(if vm.out.sapi.server {
         "cli-server"
+    } else if vm.out.sapi.cgi {
+        "cgi-fcgi"
     } else {
         "cli"
     })))

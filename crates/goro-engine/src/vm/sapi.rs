@@ -4,14 +4,17 @@
 //! manual: header(), http_response_code(), Built-in web server).
 //!
 //! The CLI keeps the status code but no header list (observed on PHP 8.5:
-//! headers_list() is empty in the CLI); the web server keeps both and
-//! sends them before the first byte of output.
+//! headers_list() is empty in the CLI); the web server and the CGI SAPI
+//! (`goro --cgi`) keep both and send them before the first byte of output.
 
 /// The SAPI response state (`vm.out.sapi`).
 #[derive(Default)]
 pub struct Sapi {
     /// The "cli-server" SAPI (the built-in web server) runs this request.
     pub server: bool,
+    /// The "cgi-fcgi" SAPI (`goro --cgi`) runs this request: the head is
+    /// CGI header lines (RFC 3875 6.2) on stdout.
+    pub cgi: bool,
     /// The response status; 0 while unset (the CLI before
     /// http_response_code() or a status header).
     pub status: i64,
@@ -125,6 +128,11 @@ pub fn header_name(h: &[u8]) -> &[u8] {
 }
 
 impl Sapi {
+    /// A web SAPI (the built-in server or CGI): headers are kept and sent.
+    pub fn web(&self) -> bool {
+        self.server || self.cgi
+    }
+
     pub fn has_header(&self, name: &[u8]) -> bool {
         self.headers
             .iter()
@@ -151,6 +159,31 @@ impl Sapi {
             let mut h = b"Content-type: ".to_vec();
             h.extend_from_slice(&conn.default_type);
             self.headers.push(h);
+        }
+        if self.cgi {
+            // RFC 3875 6.3.3: the status goes in a Status header; a status
+            // line's own reason phrase is kept (test
+            // ext/standard/tests/general_functions/header_redirection_*).
+            let mut head: Vec<Vec<u8>> = Vec::new();
+            let text = self.status_line.as_ref().and_then(|l| {
+                let p = l.iter().position(|&c| c == b' ')?;
+                let rest = l[p + 1..].trim_ascii();
+                (!rest.is_empty()).then(|| rest.to_vec())
+            });
+            let text = match text {
+                Some(t) if t.contains(&b' ') => t,
+                _ => format!("{} {}", self.status, reason(self.status)).into_bytes(),
+            };
+            if self.status != 200 && self.status != 0 {
+                let mut l = b"Status: ".to_vec();
+                l.extend_from_slice(&text);
+                // At most 1023 bytes (test sapi/cgi/tests/bug80849-cgi.phpt).
+                l.truncate(1023);
+                head.push(l);
+            }
+            head.extend(self.headers.iter().filter(|h| !h.is_empty()).cloned());
+            conn.transport.write_head(b"", &head);
+            return;
         }
         let line = match &self.status_line {
             Some(l) => l.clone(),

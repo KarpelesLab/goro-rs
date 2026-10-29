@@ -31,6 +31,7 @@ fn config(root: &Path) -> Config {
         mem_limit: None,
         heavy: false,
         online: false,
+        cgi: None,
     }
 }
 

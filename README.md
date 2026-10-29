@@ -42,8 +42,10 @@ Each test runs the binary under test as a subprocess with `-n` and the ini
 defaults listed (with their reasons) in `crates/goro-phpt/src/runner.rs`
 (`DEFAULT_INI`). The working directory is the test-suite root. `--copy-to`
 runs from a copy of that root, so files the tests leave behind don't touch
-the checkout. Tests that need a web SAPI (CGI, GET, POST, ...) or phpdbg are
-reported as SKIP for now.
+the checkout. Tests with request sections (CGI, GET, POST, POST_RAW, COOKIE,
+EXPECTHEADERS, ...) run through goro's CGI SAPI (`goro --cgi`, or goro run
+as `php-cgi`; `--php-cgi PATH` for another binary); tests that need phpdbg
+are reported as SKIP for now.
 
 ## Status
 

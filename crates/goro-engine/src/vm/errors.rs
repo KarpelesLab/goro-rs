@@ -158,7 +158,7 @@ impl Vm {
         let fatal_level =
             level & (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE) != 0;
         if fatal_level
-            && self.out.sapi.server
+            && self.out.sapi.web()
             && self.ini.display_errors == 0
             && !crate::builtins::headers::sent(self)
         {

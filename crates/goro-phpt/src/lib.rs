@@ -7,10 +7,12 @@
 //! - [`section`]: the file layout parser.
 //! - [`expect`]: EXPECT / EXPECTF / EXPECTREGEX matching.
 //! - [`runner`]: running one test (SKIPIF, INI, ENV, ARGS, STDIN, CLEAN...).
+//! - [`cgi`]: the request and response of tests run through the CGI SAPI.
 //! - [`schedule`]: parallel workers honoring CONFLICTS.
 //! - [`results`]: result files and the PASS-to-FAIL guard.
 //! - [`cli`]: `goro --test` and `goro --test-compare`.
 
+pub mod cgi;
 pub mod cli;
 pub mod diff;
 pub mod expect;

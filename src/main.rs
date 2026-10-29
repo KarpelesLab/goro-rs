@@ -51,7 +51,130 @@ fn usage() -> &'static str {
   --rz <name>      Show information about Zend extension <name>.
   --ri <name>      Show configuration for extension <name>.
 
+  --cgi            Run as the CGI SAPI (as when invoked as php-cgi); see
+                   `goro --cgi -h`.
+
 "
+}
+
+fn cgi_usage() -> &'static str {
+    "Usage: goro --cgi [-q] [-h] [-s] [-v] [-i] [-f <file>]
+       goro --cgi <file> [args...]
+  -C               Do not chdir to the script's directory
+  -c <path>|<file> Look for php.ini file in this directory
+  -n               No php.ini file will be used
+  -d foo[=bar]     Define INI entry foo with value 'bar'
+  -f <file>        Parse and execute <file>.
+  -h               This help
+  -i               PHP information
+  -l               Syntax check only (lint)
+  -m               Show compiled in modules
+  -q               Quiet-mode.  Suppress HTTP header output.
+  -s               Display colour syntax highlighted source.
+  -v               Version number
+  -w               Display source with stripped comments and whitespace.
+
+The request comes from the CGI environment (RFC 3875: REQUEST_METHOD,
+QUERY_STRING, CONTENT_TYPE, CONTENT_LENGTH, HTTP_COOKIE, HTTP_*,
+SCRIPT_FILENAME or PATH_TRANSLATED when no file is given) and the body
+from stdin; the response is CGI header lines, an empty line and the body.
+"
+}
+
+/// The CGI SAPI's command line (php-cgi's options).
+fn cgi(args: Vec<OsString>) -> i32 {
+    let args: Vec<Vec<u8>> = args.into_iter().map(|a| a.into_vec()).collect();
+    let mut opts = goro_engine::cgi::CgiOptions::default();
+    let mut ini_file: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == b"--" {
+            i += 1;
+            break;
+        }
+        if !a.starts_with(b"-") || a.len() < 2 {
+            break;
+        }
+        let mut k = 1;
+        while k < a.len() {
+            let c = a[k];
+            if b"cdfz".contains(&c) {
+                let v = if k + 1 < a.len() {
+                    a[k + 1..].to_vec()
+                } else {
+                    i += 1;
+                    match args.get(i) {
+                        Some(v) => v.clone(),
+                        None => {
+                            print!("{}", cgi_usage());
+                            return 1;
+                        }
+                    }
+                };
+                match c {
+                    b'c' => ini_file = Some(v),
+                    b'd' => opts.ini.push(split_ini(&v)),
+                    b'f' => opts.script = Some(v),
+                    _ => {}
+                }
+                break;
+            }
+            match c {
+                b'n' | b'e' | b'H' | b'T' => {}
+                b'q' => opts.no_headers = true,
+                b'C' => opts.no_chdir = true,
+                b'h' | b'?' => {
+                    print!("{}", cgi_usage());
+                    return 0;
+                }
+                b'v' => {
+                    println!(
+                        "PHP 8.5.4 (cgi-fcgi) (built: {}) (NTS)\nCopyright (c) The PHP Group\nZend Engine v4.5.4, Copyright (c) Zend Technologies\n    with goro-rs {}, a clean-room implementation",
+                        BUILT,
+                        env!("CARGO_PKG_VERSION")
+                    );
+                    return 0;
+                }
+                b'i' | b'l' | b'm' | b's' | b'w' => {
+                    // As the CLI does them (without the CGI headers).
+                    let mut cli_args: Vec<OsString> = Vec::new();
+                    if let Some(f) = &ini_file {
+                        cli_args.push("-c".into());
+                        cli_args.push(OsString::from_vec(f.clone()));
+                    }
+                    for (k, v) in &opts.ini {
+                        let mut d = k.clone();
+                        d.push(b'=');
+                        d.extend_from_slice(v);
+                        cli_args.push("-d".into());
+                        cli_args.push(OsString::from_vec(d));
+                    }
+                    cli_args.push(OsString::from_vec(vec![b'-', c]));
+                    if let Some(f) = &opts.script {
+                        cli_args.push(OsString::from_vec(f.clone()));
+                    }
+                    cli_args.extend(args[i + 1..].iter().map(|a| OsString::from_vec(a.clone())));
+                    return cli(cli_args);
+                }
+                _ => {
+                    print!("{}", cgi_usage());
+                    return 1;
+                }
+            }
+            k += 1;
+        }
+        i += 1;
+    }
+    let mut rest: Vec<Vec<u8>> = args[i..].to_vec();
+    if opts.script.is_none() && !rest.is_empty() {
+        opts.script = Some(rest.remove(0));
+    }
+    opts.args = rest;
+    if let Some(f) = &ini_file {
+        opts.ini = with_ini_file(f, std::mem::take(&mut opts.ini));
+    }
+    goro_engine::cgi::run(opts)
 }
 
 /// The build date, for `-v` (from SOURCE_DATE_EPOCH-free compile time is not
@@ -73,12 +196,23 @@ fn main() {
         Some("--test-compare") => std::process::exit(goro_phpt::cli::compare_main(&args[1..])),
         _ => {}
     }
+    // The CGI SAPI: `goro --cgi ...`, or goro run as php-cgi.
+    let as_cgi = std::env::args_os().next().is_some_and(|a0| {
+        std::path::Path::new(&a0)
+            .file_name()
+            .is_some_and(|n| n.as_bytes().starts_with(b"php-cgi"))
+    });
+    let (cgi_mode, args) = if args.first().is_some_and(|a| a == "--cgi") {
+        (true, args[1..].to_vec())
+    } else {
+        (as_cgi, args)
+    };
     let code = std::thread::Builder::new()
         .name("php".into())
         .stack_size(STACK_SIZE)
         .spawn(move || {
             let pid = std::process::id();
-            let code = cli(args);
+            let code = if cgi_mode { cgi(args) } else { cli(args) };
             // A child of pcntl_fork() has no main thread to return to.
             if std::process::id() != pid {
                 std::process::exit(code);
@@ -348,42 +482,9 @@ fn cli(args: Vec<OsString>) -> i32 {
         }
         i += 1;
     }
-    // php.ini given with -c: its settings come before -d ones (sections are
-    // for other SAPIs; test sapi/cli/tests/023).
+    // php.ini given with -c: its settings come before -d ones.
     if let Some(f) = &ini_file {
-        let p = std::path::Path::new(std::ffi::OsStr::from_bytes(f));
-        let p = if p.is_dir() {
-            p.join("php.ini")
-        } else {
-            p.to_path_buf()
-        };
-        if let Ok(text) = std::fs::read(&p) {
-            let mut from_file = Vec::new();
-            for line in text.split(|&c| c == b'\n') {
-                let line = line.trim_ascii();
-                if line.starts_with(b"[") {
-                    break;
-                }
-                if line.is_empty() || line.starts_with(b";") || line.starts_with(b"#") {
-                    continue;
-                }
-                if let Some(p) = line.iter().position(|&c| c == b'=') {
-                    let k = line[..p].trim_ascii().to_vec();
-                    let mut v = line[p + 1..].trim_ascii().to_vec();
-                    if v.len() >= 2 && (v[0] == b'"' || v[0] == b'\'') && v[v.len() - 1] == v[0] {
-                        v = v[1..v.len() - 1].to_vec();
-                    } else if let Some(c) = v.iter().position(|&c| c == b';') {
-                        v.truncate(c);
-                        while v.last().is_some_and(|c| c.is_ascii_whitespace()) {
-                            v.pop();
-                        }
-                    }
-                    from_file.push((k, v));
-                }
-            }
-            from_file.extend(ini);
-            ini = from_file;
-        }
+        ini = with_ini_file(f, ini);
     }
     if let Some(addr) = server
         && matches!(mode, Mode::Run)
@@ -534,6 +635,46 @@ fn cli(args: Vec<OsString>) -> i32 {
             })
         }
     }
+}
+
+/// The settings of a php.ini given with -c (a file, or a directory holding
+/// php.ini), followed by `ini` (sections are for other SAPIs; test
+/// sapi/cli/tests/023).
+fn with_ini_file(f: &[u8], ini: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let p = std::path::Path::new(std::ffi::OsStr::from_bytes(f));
+    let p = if p.is_dir() {
+        p.join("php.ini")
+    } else {
+        p.to_path_buf()
+    };
+    let Ok(text) = std::fs::read(&p) else {
+        return ini;
+    };
+    let mut from_file = Vec::new();
+    for line in text.split(|&c| c == b'\n') {
+        let line = line.trim_ascii();
+        if line.starts_with(b"[") {
+            break;
+        }
+        if line.is_empty() || line.starts_with(b";") || line.starts_with(b"#") {
+            continue;
+        }
+        if let Some(p) = line.iter().position(|&c| c == b'=') {
+            let k = line[..p].trim_ascii().to_vec();
+            let mut v = line[p + 1..].trim_ascii().to_vec();
+            if v.len() >= 2 && (v[0] == b'"' || v[0] == b'\'') && v[v.len() - 1] == v[0] {
+                v = v[1..v.len() - 1].to_vec();
+            } else if let Some(c) = v.iter().position(|&c| c == b';') {
+                v.truncate(c);
+                while v.last().is_some_and(|c| c.is_ascii_whitespace()) {
+                    v.pop();
+                }
+            }
+            from_file.push((k, v));
+        }
+    }
+    from_file.extend(ini);
+    from_file
 }
 
 fn split_ini(v: &[u8]) -> (Vec<u8>, Vec<u8>) {
