@@ -1148,7 +1148,7 @@ impl Vm {
                 // method first (test Zend/tests/magic_methods/bug53826).
                 if let Some(t) = &this
                     && self.class_of(t).is_subclass_of(cls)
-                    && let Some(c) = cls.magic.borrow().call.clone()
+                    && let Some(c) = self.class_of(t).magic.borrow().call.clone()
                 {
                     return Ok(Callee {
                         scope: c.scope.get(),
@@ -1251,8 +1251,9 @@ impl Vm {
         // __call in object context, else __callStatic.
         if let Some(t) = this.clone() {
             let tc = self.class_of(&t);
+            // The object's own __call (test tests/classes/__call_004).
             if tc.is_subclass_of(cls)
-                && let Some(c) = cls.magic.borrow().call.clone()
+                && let Some(c) = tc.magic.borrow().call.clone()
             {
                 return Ok(Callee {
                     scope: c.scope.get(),
@@ -1638,8 +1639,10 @@ impl Vm {
                     }
                 }
                 _ => {
+                    // The resolution that failed already ran the autoloader
+                    // (test tests/classes/autoload_012).
                     let saved = vm.err.deferred.take();
-                    let r = vm.find_class(n, true).ok().flatten();
+                    let r = vm.find_class(n, false).ok().flatten();
                     vm.err.deferred = saved;
                     r
                 }
