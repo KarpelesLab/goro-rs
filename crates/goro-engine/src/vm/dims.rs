@@ -1479,6 +1479,15 @@ impl Vm {
                             self.warn("String offset cast occurred")?;
                             p.num.to_f64() as i64
                         }
+                        // A leading-numeric offset (observed on PHP 8.5;
+                        // test tests/lang/bug19943).
+                        goro_runtime::numeric::Numericness::Leading => {
+                            self.warn(&format!(
+                                "Illegal string offset \"{}\"",
+                                s.to_string_lossy()
+                            ))?;
+                            p.num.to_f64() as i64
+                        }
                         _ => {
                             return self
                                 .type_error("Cannot access offset of type string on string");

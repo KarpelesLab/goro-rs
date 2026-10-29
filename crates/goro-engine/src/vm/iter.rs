@@ -1,7 +1,7 @@
 //! `foreach` and generators (PHP manual: foreach, Generators, Iterator,
 //! IteratorAggregate).
 
-use crate::class::{DisplayName, TypeName};
+use crate::class::DisplayName;
 use std::rc::Rc;
 
 use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpRef, Value};
@@ -311,7 +311,7 @@ impl Vm {
             other => {
                 self.warn(&format!(
                     "foreach() argument must be of type array|object, {} given",
-                    other.tname()
+                    Vm::type_name_given(&other)
                 ))?;
                 Ok(false)
             }

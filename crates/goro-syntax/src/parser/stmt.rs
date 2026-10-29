@@ -707,6 +707,10 @@ impl<'a> Parser<'a> {
         self.expect(T::As, &[])?;
         let (first, first_ref) = self.foreach_target()?;
         let (key, value, by_ref) = if self.eat(T::DoubleArrow) {
+            // Test tests/lang/foreachLoop.006.
+            if first_ref {
+                return Err(self.fatal("Key element cannot be a reference".to_string(), first.span));
+            }
             let (v, r) = self.foreach_target()?;
             (Some(first), v, r)
         } else {

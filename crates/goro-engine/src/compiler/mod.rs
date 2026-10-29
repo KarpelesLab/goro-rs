@@ -144,6 +144,8 @@ pub(crate) struct FState<'a> {
     region_ids: u32,
     pub flags: u32,
     pub num_statics: u32,
+    /// Names of the `static` variables declared so far.
+    pub static_names: Vec<Vec<u8>>,
     pub const_attrs: Vec<(PhpStr, u32, Rc<[AttrInfo]>)>,
     pub discarded_calls: Vec<u32>,
     pub line: u32,
@@ -196,6 +198,7 @@ impl<'a> FState<'a> {
             region_ids: 0,
             flags: 0,
             num_statics: 0,
+            static_names: Vec::new(),
             const_attrs: Vec::new(),
             discarded_calls: Vec::new(),
             line: 1,
@@ -1028,6 +1031,17 @@ impl<'a> Compiler<'a> {
                     if v.name.name == b"this" {
                         return self.err("Cannot use $this as static variable", v.span.line);
                     }
+                    // Test tests/lang/static_basic_002.
+                    if self.f.static_names.iter().any(|n| n == v.name.name) {
+                        return self.err(
+                            format!(
+                                "Duplicate declaration of static variable ${}",
+                                String::from_utf8_lossy(v.name.name)
+                            ),
+                            v.span.line,
+                        );
+                    }
+                    self.f.static_names.push(v.name.name.to_vec());
                     let cv = self.cv(v.name.name);
                     let index = self.f.num_statics;
                     self.f.num_statics += 1;
