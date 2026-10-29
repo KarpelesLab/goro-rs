@@ -318,6 +318,19 @@ pub fn run(opts: CgiOptions) -> i32 {
     } else {
         src
     };
+    // zlib.output_compression: the output goes through ob_gzhandler, which
+    // compresses for clients that accept it (PHP manual: Zlib runtime
+    // configuration; tests ext/zlib/tests/ob_001.phpt, bug51269.phpt).
+    if ini_on(&vm, b"zlib.output_compression", false)
+        && vm.functions.contains_key(&PhpStr::from("ob_gzhandler"))
+    {
+        vm.out.buffers.push(crate::vm::output::ObBuffer::new(
+            Some(Value::Str(PhpStr::from("ob_gzhandler"))),
+            0,
+            crate::vm::output::PHP_OUTPUT_HANDLER_STDFLAGS,
+            PhpStr::from("zlib output compression"),
+        ));
+    }
     crate::builtins::output::start_ini_handler(&mut vm);
     let status = vm.run_script(&src, &path);
     vm.out.flush();
