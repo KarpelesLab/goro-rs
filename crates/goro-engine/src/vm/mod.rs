@@ -578,6 +578,9 @@ pub struct Vm {
     pub const_cache: Vec<Value>,
     /// `__COMPILER_HALT_OFFSET__` per file.
     pub halt_offsets: HashMap<PhpStr, i64>,
+    /// The main script's file and how much shorter its `#!` line is than
+    /// the code it was replaced with (halt offsets count the real file).
+    pub halt_shift: Option<(PhpStr, i64)>,
     /// Containers being dumped (recursion detection).
     pub dump_stack: Vec<usize>,
     /// The directory handle of the last opendir() (readdir() default).

@@ -152,7 +152,13 @@ impl Vm {
             } else {
                 off
             };
-            self.halt_offsets.insert(PhpStr::new(file), off as i64);
+            let mut off = off as i64;
+            if let Some((f, d)) = &self.halt_shift
+                && f.as_bytes() == file
+            {
+                off += d;
+            }
+            self.halt_offsets.insert(PhpStr::new(file), off);
         }
         Ok(unit)
     }

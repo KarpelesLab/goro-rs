@@ -888,6 +888,9 @@ fn define(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let key = crate::vm::include::normalize_const_name(&name);
     if vm.constants.contains_key(&key)
         || matches!(&name.to_ascii_lowercase()[..], b"true" | b"false" | b"null")
+        // Reserved even in a file without __halt_compiler() (tests
+        // Zend/tests/constants/halt_compiler/halt_compiler3, bug53305).
+        || name.as_bytes() == b"__COMPILER_HALT_OFFSET__"
     {
         vm.warn(&format!(
             "Constant {} already defined, this will be an error in PHP 9",
