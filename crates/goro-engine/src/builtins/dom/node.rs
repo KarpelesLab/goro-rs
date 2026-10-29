@@ -725,7 +725,7 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
     let prefixes = match a.val(first + 3) {
         Value::Array(p) => p
             .iter()
-            .map(|(_, v)| s8(&v.as_str().cloned().unwrap_or_default()))
+            .map(|(_, v)| s8(&v.deref().as_str().cloned().unwrap_or_default()))
             .collect(),
         _ => Vec::new(),
     };
@@ -761,7 +761,8 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
                     ),
                 );
             };
-            let ns: Vec<(String, String)> = match x.get_bytes(b"namespaces") {
+            // Values may be references (test DOMNode_C14N_references.phpt).
+            let ns: Vec<(String, String)> = match x.get_bytes(b"namespaces").map(|v| v.deref()) {
                 Some(Value::Array(m)) => m
                     .iter()
                     .map(|(k, v)| {
@@ -770,7 +771,7 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
                                 goro_runtime::KeyRef::Str(s) => s8(s),
                                 goro_runtime::KeyRef::Int(i) => i.to_string(),
                             },
-                            s8(&v.as_str().cloned().unwrap_or_default()),
+                            s8(&v.deref().as_str().cloned().unwrap_or_default()),
                         )
                     })
                     .collect(),

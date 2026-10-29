@@ -1073,8 +1073,11 @@ pub(crate) fn set_prefix(vm: &mut Vm, n: NodeId, prefix: &str) -> R<()> {
                 }
             }
         };
-        if ar.lookup_ns(el, new_p).as_deref() != Some(&*uri) {
-            ar.declare_ns(el, new_p, &uri);
+        // A prefix the element itself declares for another namespace is a
+        // Namespace Error (observed on PHP 8.5; test
+        // DOMElement_prefix_empty.phpt).
+        if ar.lookup_ns(el, new_p).as_deref() != Some(&*uri) && !ar.declare_ns(el, new_p, &uri) {
+            return Err(DomError::Namespace);
         }
         if let Some(qq) = ar.data_mut_qname(n) {
             qq.prefix = new_p.map(Into::into);

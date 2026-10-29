@@ -299,6 +299,30 @@ impl Eval<'_> {
                         }
                     }
                 }
+                // Modern documents declare namespaces with xmlns attributes
+                // (observed on PHP 8.5: C14N node-sets of a modern document;
+                // test ext/dom/tests/canonicalization.phpt).
+                if self.arena.is_modern(self.arena.doc_of(c)) {
+                    for a in self.arena.attrs(c) {
+                        let Some(ad) = self.arena.attr(a) else {
+                            continue;
+                        };
+                        if ad.name.ns.as_deref() != Some(crate::tree::XMLNS_NS) {
+                            continue;
+                        }
+                        let p: Option<Str> = ad.name.prefix.as_ref().map(|_| ad.name.local.clone());
+                        if !seen.contains(&p) {
+                            seen.push(p.clone());
+                            let v = self.arena.attr_value(a);
+                            if !v.is_empty() && p.as_deref() != Some("xml") {
+                                decls.push(NsDecl {
+                                    prefix: p,
+                                    uri: v.as_str().into(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
             cur = self.arena.parent(c);
         }

@@ -630,6 +630,21 @@ fn node_list(vm: &mut Vm, v: Vec<NodeId>, modern: bool) -> R<Value> {
     // Every node gets its object first (a namespace node after its
     // element's), then the list (object ids observed on PHP 8.5; tests
     // xpath_domnamespacenode.phpt, gh12616_3.phpt).
+    // Dom\XPath refuses namespace nodes (test
+    // modern/xml/XMLDocument_xpath.phpt).
+    if modern
+        && with_arena(|ar| {
+            v.iter()
+                .any(|&n| matches!(ar.data(n), goro_xml::tree::NodeData::Namespace(_)))
+        })
+    {
+        free_ns_nodes();
+        return super::throw_dom_msg(
+            vm,
+            "The namespace axis is not well-defined in the living DOM specification. Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
+            9,
+        );
+    }
     let mut items = Vec::with_capacity(v.len());
     for &n in &v {
         let owner = with_arena(|ar| match ar.data(n) {

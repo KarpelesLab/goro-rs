@@ -108,9 +108,32 @@ impl Ctx<'_> {
     }
 
     fn ns_node_in_set(&self, el: NodeId, prefix: Option<&str>) -> bool {
+        let key = prefix.map(str::to_string);
         match &self.ns_in_set {
             None => true,
-            Some(s) => s.contains(&(el, prefix.map(str::to_string))),
+            Some(s) if s.contains(&(el, key.clone())) => true,
+            Some(s) if self.arena.is_modern(self.arena.doc_of(el)) => {
+                // The namespace node comes from the nearest xmlns attribute
+                // declaring the prefix.
+                let mut cur = Some(el);
+                while let Some(c) = cur.filter(|&c| self.arena.is_element(c)) {
+                    let declares = self.arena.attrs(c).any(|a| {
+                        self.arena.attr(a).is_some_and(|ad| {
+                            ad.name.ns.as_deref() == Some(XMLNS_NS)
+                                && match prefix {
+                                    None => ad.name.prefix.is_none(),
+                                    Some(p) => ad.name.prefix.is_some() && &*ad.name.local == p,
+                                }
+                        })
+                    });
+                    if declares {
+                        return s.contains(&(c, key));
+                    }
+                    cur = self.arena.parent(c);
+                }
+                false
+            }
+            Some(_) => false,
         }
     }
 
@@ -350,18 +373,30 @@ impl Ctx<'_> {
 /// Canonicalizes `node` (or, with a node-set, the document's nodes in the
 /// set).
 pub fn canonicalize(arena: &Arena, node: NodeId, opts: &C14nOptions) -> String {
+    // In a modern document, namespace declarations are xmlns attributes: the
+    // node-set's ones stand for the namespace nodes, and a node-set without
+    // any has no namespace nodes (observed on PHP 8.5; test ext/dom/tests/
+    // canonicalization.phpt).
+    let modern = arena.is_modern(arena.doc_of(node));
     let ns_in_set = opts.node_set.as_ref().map(|s| {
         s.iter()
             .filter_map(|&n| match arena.data(n) {
                 NodeData::Namespace(d) => arena
                     .parent(n)
                     .map(|p| (p, d.prefix.as_deref().map(str::to_string))),
+                NodeData::Attribute(a) if modern && a.name.ns.as_deref() == Some(XMLNS_NS) => {
+                    let p = match a.name.prefix {
+                        None => None,
+                        Some(_) => Some(a.name.local.to_string()),
+                    };
+                    arena.parent(n).map(|el| (el, p))
+                }
                 _ => None,
             })
             .collect::<HashSet<_>>()
     });
     // A node-set without namespace nodes keeps all namespace nodes.
-    let ns_in_set = ns_in_set.filter(|s| !s.is_empty());
+    let ns_in_set = ns_in_set.filter(|s| modern || !s.is_empty());
     let mut c = Ctx {
         arena,
         opts,
