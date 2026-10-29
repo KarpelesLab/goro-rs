@@ -94,7 +94,7 @@ impl Vm {
                     if e.kind == goro_syntax::ErrorKind::Parse {
                         "\u{1}"
                     } else {
-                        ""
+                        "\u{2}"
                     },
                     e.message
                 ),
@@ -209,8 +209,15 @@ impl Vm {
             Some(m) => (true, m.to_string()),
             None => (false, e.message),
         };
-        // eval() throws compile errors too; include only parse errors.
-        let throw_compile = throw && self.compiling_eval;
+        // eval() throws the parser's other errors as CompileError (test
+        // Zend/tests/bug75218); the compiler's are fatal there too
+        // (observed on PHP 8.5: "Key element cannot be a reference").
+        // include throws only parse errors.
+        let (from_parser, msg) = match msg.strip_prefix('\u{2}') {
+            Some(m) => (true, m.to_string()),
+            None => (false, msg),
+        };
+        let throw_compile = throw && self.compiling_eval && from_parser;
         if (is_parse && throw) || throw_compile {
             let class = if is_parse {
                 "ParseError"
