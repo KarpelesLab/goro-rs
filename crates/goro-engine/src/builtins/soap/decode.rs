@@ -347,8 +347,10 @@ fn builtin(vm: &mut Vm, dx: &mut Dx, conv: Conv, n: NodeId) -> R<Value> {
     let d = dx.d;
     match conv {
         Conv::String | Conv::Duration | Conv::Decimal => {
-            if has_element_kids(d, n) && conv == Conv::String {
-                // Mixed content as a string: its text.
+            // Elements where a string is expected (observed on PHP 8.5;
+            // test soap12/T27.phpt).
+            if has_element_kids(d, n) {
+                return violation(vm);
             }
             let t = node_text(d, n);
             Ok(out_str(dx, &t))

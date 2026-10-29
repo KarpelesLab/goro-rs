@@ -353,6 +353,8 @@ pub enum ErrMode {
 
 thread_local! {
     static ERR_MODE: RefCell<Vec<ErrMode>> = const { RefCell::new(Vec::new()) };
+    /// The last fault raised for a SOAP error (by address).
+    static LAST_INTERNAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// use_soap_error_handler()'s setting.
     static SERVER_ERRORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -373,11 +375,19 @@ pub fn soap_error(vm: &mut Vm, msg: &str) -> Unwind {
     let mode = ERR_MODE.with(|s| s.borrow().last().cloned());
     match mode {
         Some(ErrMode::Throw(code)) => match make_fault(vm, code, &full) {
-            Ok(f) => Unwind::Throw(f),
+            Ok(f) => {
+                LAST_INTERNAL.with(|l| l.set(f.obj() as *const _ as usize));
+                Unwind::Throw(f)
+            }
             Err(e) => e,
         },
         _ => vm.fatal(&full),
     }
+}
+
+/// Whether a fault object was raised for a SOAP error (not by user code).
+pub fn is_internal_fault(f: &ObjRef) -> bool {
+    LAST_INTERNAL.with(|l| l.get() == f.obj() as *const _ as usize)
 }
 
 /// A plain error ("Class::method(): msg") in the current context.

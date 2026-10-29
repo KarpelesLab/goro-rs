@@ -54,6 +54,10 @@ pub struct ServerData {
     pub constructed: bool,
     /// The operation of the request being handled.
     pub cur_func: Option<Function>,
+    /// A service function was called for this request.
+    pub called: bool,
+    /// The soap_version option.
+    pub cfg_version: i64,
 }
 
 impl goro_runtime::NativeData for ServerData {
@@ -197,6 +201,7 @@ pub fn fault_xml(
                 format!("env:{code}")
             }
             (_, Some(ns)) if ns == NS_SOAP12_ENV || ns == NS_SOAP11_ENV => format!("env:{code}"),
+            (_, Some(ns)) if ns == NS_SOAP12_RPC => format!("rpc:{code}"),
             (_, Some(ns)) if !ns.is_empty() => {
                 let p = cx.doc.ensure_ns(Some(env), ns);
                 format!("{p}:{code}")
@@ -371,7 +376,10 @@ fn construct_inner(
         }
         None => 1,
     };
-    with(this, |d| d.version = version);
+    with(this, |d| {
+        d.version = version;
+        d.cfg_version = version;
+    });
     let uri = match opt(opts, "uri") {
         Some(Value::Str(s)) => Some(s.to_string_lossy()),
         _ => None,
@@ -751,6 +759,8 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with(&this, |d| {
         d.in_handle = true;
         d.out_headers.clear();
+        d.called = false;
+        d.version = d.cfg_version;
     });
     // Output of the service is buffered: a fault discards it (observed
     // on PHP 8.5; test bugs/bug42214.phpt).
@@ -775,7 +785,16 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let out = match r {
         Ok(o) => o,
         Err(Unwind::Throw(e)) => {
-            if super::is_fault_obj(vm, &Value::Object(e.clone())) {
+            let called = with(&this, |d| d.called).unwrap_or(false);
+            if super::is_fault_obj(vm, &Value::Object(e.clone()))
+                && !called
+                && super::is_internal_fault(&e)
+            {
+                // A SOAP error before the service ran (decoding): sent,
+                // then the script ends (observed on PHP 8.5; test
+                // soap12/T56.phpt).
+                Out::Early(e)
+            } else if super::is_fault_obj(vm, &Value::Object(e.clone())) {
                 let f = with(&this, |d| d.cur_func.take()).flatten();
                 Out::Fault(e, f)
             } else {
@@ -919,7 +938,6 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     } else if env_ns == NS_SOAP11_ENV {
         1
     } else {
-        with(this, |d| d.version = 1);
         return fault_out(vm, "VersionMismatch", "Wrong Version");
     };
     if doc.local(env) != "Envelope" {
@@ -1017,10 +1035,11 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     // Headers.
     let mut resp_headers: Vec<(String, String, Value, bool)> = Vec::new();
     if let Some(h) = header {
+        // Who each header is for, and its mustUnderstand (all checked
+        // before any is processed; observed on PHP 8.5; test
+        // soap12/T23.phpt).
+        let mut todo = Vec::new();
         for hc in doc.kids(h) {
-            let hname = doc.local(hc).to_string();
-            let hns = doc.ns(hc).to_string();
-            // Who it is for.
             let role = if version == 2 {
                 doc.attr_ns(hc, NS_SOAP12_ENV, "role")
             } else {
@@ -1043,28 +1062,50 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
                 Some(v) => match is_true(v) {
                     Some(b) => b,
                     None => {
-                        if version == 2 {
-                            return fault_out(vm, "Sender", "mustUnderstand value is not boolean");
-                        }
-                        return fault_out(vm, "Client", "mustUnderstand value is not boolean");
+                        return fault_out(vm, sender, "mustUnderstand value is not boolean");
                     }
                 },
             };
-            // A handler: a function/method of the header's name (in WSDL
-            // mode, one the operation declares as input header).
-            let decl = match (&func_def, &sdl) {
-                (Some(f), Some(_)) => f
-                    .input
+            todo.push((hc, must));
+        }
+        for (hc, must) in todo {
+            let hname = doc.local(hc).to_string();
+            // The handler: in WSDL mode the operation the header element
+            // is the request of, else a function of the header's name.
+            let hfunc = sdl.as_ref().and_then(|s| {
+                s.functions
+                    .iter()
+                    .find(|f| {
+                        if f.rpc {
+                            f.name == hname
+                        } else {
+                            f.input.parts.first().is_some_and(|p| match &p.element {
+                                Some((_, n)) => n == &hname,
+                                None => p.name == hname,
+                            })
+                        }
+                    })
+                    .cloned()
+            });
+            // A header the called operation declares: a method of the
+            // header's name (tests interop/Round4/GroupI/r4_groupI_xsd_03*).
+            let hns = doc.ns(hc).to_string();
+            let decl = func_def.as_ref().and_then(|f| {
+                f.input
                     .headers
                     .iter()
                     .find(|d| d.name == hname && d.ns == hns)
-                    .cloned(),
-                _ => None,
+                    .cloned()
+            });
+            let hfunc = if decl.is_some() { None } else { hfunc };
+            let call_name = match &hfunc {
+                Some(f) => f.name.clone(),
+                None => hname.clone(),
             };
             let handler_ok = if sdl.is_some() {
-                decl.is_some() && target.has(vm, &hname)?
+                (hfunc.is_some() || decl.is_some()) && target.has(vm, &call_name)?
             } else {
-                target.has(vm, &hname)?
+                target.has(vm, &call_name)?
             };
             if !handler_ok {
                 if must {
@@ -1072,15 +1113,21 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
                 }
                 continue;
             }
-            let enc = match (&decl, &sdl) {
-                (Some(d), Some(s)) => match &d.part.element {
+            let part = match (&hfunc, &decl) {
+                (Some(f), _) => f.input.parts.first().cloned(),
+                (None, Some(d)) => Some(d.part.clone()),
+                _ => None,
+            };
+            let enc = match (&part, &sdl) {
+                (Some(p), Some(s)) => match &p.element {
                     Some((ens, en)) => s.element(ens, en).map(Enc::Type),
-                    None => d.part.typ.as_ref().and_then(|t| s.resolve(t)),
+                    None => p.typ.as_ref().and_then(|t| s.resolve(t)),
                 },
                 _ => None,
             };
             let arg = from_xml(vm, &mut dx, enc, hc)?;
-            let r = target.call(vm, &hname, vec![arg])?;
+            with(this, |d| d.called = true);
+            let r = target.call(vm, &call_name, vec![arg])?;
             if super::is_fault_obj(vm, &r)
                 && let Value::Object(f) = r
             {
@@ -1095,12 +1142,23 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
             if matches!(r, Value::Null) {
                 continue;
             }
-            // The response header the WSDL declares for it.
-            if let Some(f) = &func_def
+            // The header's operation's response element comes back as a
+            // header (observed on PHP 8.5; test soap12/T01.phpt).
+            if decl.is_some()
+                && let Some(f) = &func_def
                 && let Some(o) = &f.output
                 && let Some(oh) = o.headers.first()
             {
                 resp_headers.push((oh.ns.clone(), oh.name.clone(), r, oh.literal));
+            } else if let Some(f) = &hfunc
+                && let Some(o) = &f.output
+                && let Some(p) = o.parts.first()
+            {
+                let (ns, name) = match &p.element {
+                    Some((ns, n)) => (ns.clone(), n.clone()),
+                    None => (o.ns.clone(), p.name.clone()),
+                };
+                resp_headers.push((ns, name, r, o.literal));
             }
         }
     }
@@ -1117,7 +1175,7 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     let offered = target.has(vm, &fname)?;
     if !offered || (sdl.is_some() && func_def.is_none()) {
         if version == 2 {
-            return Ok(Out::Fault(proc_not_present(vm)?, None));
+            return Ok(Out::Early(proc_not_present(vm)?));
         }
         return fault_out(vm, "Server", &format!("Procedure '{fname}' not present"));
     }
@@ -1171,6 +1229,7 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
         Some(f) => f.name.clone(),
         None => fname.clone(),
     };
+    with(this, |d| d.called = true);
     let result = target.call(vm, &call_name, args)?;
     if super::is_fault_obj(vm, &result)
         && let Value::Object(f) = result
