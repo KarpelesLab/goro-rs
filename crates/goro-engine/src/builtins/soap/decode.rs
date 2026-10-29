@@ -163,7 +163,7 @@ fn decode_node(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Value
         return typemap_from_xml(vm, dx, &ns, &name, n);
     }
     if is_nil(d, n) {
-        return Ok(Value::Null);
+        return nil_value(vm, dx, enc, n);
     }
     match enc {
         None => guess(vm, dx, n),
@@ -554,7 +554,11 @@ fn soap_array(vm: &mut Vm, dx: &mut Dx, tid: Option<TId>, n: NodeId) -> R<Value>
             }
         }
         if dims.len() == 1 && dims[0] == -1 && info.dims > 1 {
-            dims = vec![-1; info.dims];
+            dims = if info.sizes.len() == info.dims {
+                info.sizes.clone()
+            } else {
+                vec![-1; info.dims]
+            };
         }
     }
     let _ = item_elem_name;
@@ -639,10 +643,43 @@ fn wsdl_type(vm: &mut Vm, dx: &mut Dx, t: TId, n: NodeId) -> R<Value> {
     }
 }
 
+/// A nil element: null, or for a simple-content type with attributes an
+/// object with "_" null (observed on PHP 8.5; test schema/schema062.phpt).
+fn nil_value(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Value> {
+    let Some(Enc::Type(t)) = enc else {
+        return Ok(Value::Null);
+    };
+    let Some(sdl) = dx.sdl.clone() else {
+        return Ok(Value::Null);
+    };
+    let mut id = t;
+    if sdl.types[id].kind == Kind::Element {
+        match sdl.types[sdl.deref_element(id)]
+            .base
+            .as_ref()
+            .and_then(|b| sdl.resolve(b))
+        {
+            Some(Enc::Type(b)) => id = b,
+            _ => return Ok(Value::Null),
+        }
+    }
+    if sdl.types[id].kind != Kind::Complex
+        || simple_content_base(&sdl, id).is_none()
+        || sdl.attrs_of(id).is_empty()
+    {
+        return Ok(Value::Null);
+    }
+    let class = Some(sdl.types[id].name.clone());
+    let obj = new_object(vm, dx, class.as_deref())?;
+    set_prop(vm, &obj, "_", Value::Null);
+    attrs(vm, dx, &sdl, id, n, &obj)?;
+    Ok(Value::Object(obj))
+}
+
 /// Decodes with an encoding, without letting xsi:type change it again.
 fn from_xml_typed(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Value> {
     if is_nil(dx.d, n) {
-        return Ok(Value::Null);
+        return nil_value(vm, dx, enc, n);
     }
     match enc {
         None => guess(vm, dx, n),
@@ -685,11 +722,8 @@ fn complex(vm: &mut Vm, dx: &mut Dx, sdl: &Rc<Sdl>, t: TId, n: NodeId) -> R<Valu
     }
     let class = Some(ty.name.clone());
     let obj = new_object(vm, dx, class.as_deref())?;
-    if let Some(base) = simple_content_base(sdl, t) {
-        let b = match base {
-            Some(Enc::Type(x)) if sdl.types[x].kind == Kind::Complex => None,
-            other => other,
-        };
+    if simple_content_base(sdl, t).is_some() {
+        let b = sdl.simple_base(t);
         let v = match b {
             Some(b) => from_xml_typed(vm, dx, Some(b), n)?,
             None => {

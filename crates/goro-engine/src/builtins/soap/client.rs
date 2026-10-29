@@ -417,7 +417,11 @@ fn do_call(
         r.set(Value::Array(PhpArray::new()));
     }
     vm.set_prop_raw(this, b"__soap_fault", Value::Null);
-    push_mode(ErrMode::Throw("Client"));
+    push_mode(if exceptions {
+        ErrMode::Throw("Client")
+    } else {
+        ErrMode::Fatal
+    });
     let r = call_inner(vm, this, name, args, &options, &headers, out_headers.as_ref());
     pop_mode();
     let r = match r {

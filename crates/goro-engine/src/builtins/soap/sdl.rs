@@ -397,9 +397,9 @@ impl Sdl {
                         ..Default::default()
                     },
                 };
-                na.qualified = !na.ns.is_empty() && na.ns != NS_XML || r.0 == NS_XML;
                 if r.0 == NS_XML {
                     na.ns = NS_XML.to_string();
+                    na.qualified = true;
                 }
                 if a.default.is_some() {
                     na.default = a.default.clone();
@@ -416,6 +416,20 @@ impl Sdl {
             }
             out.push(a.clone());
         }
+    }
+
+    /// The simple type a simple-content complex type's value has (its
+    /// bases followed through complex simple-content types).
+    pub fn simple_base(&self, t: TId) -> Option<Enc> {
+        let mut id = t;
+        for _ in 0..16 {
+            let ty = &self.types[id];
+            match ty.base.as_ref().and_then(|b| self.resolve(b)) {
+                Some(Enc::Type(b)) if b != id && self.types[b].kind == Kind::Complex => id = b,
+                other => return other,
+            }
+        }
+        None
     }
 
     /// A model group's particle (`group ref=`).
@@ -1357,21 +1371,19 @@ impl<'a, 'b> Ctx<'a, 'b> {
             t.r#ref = Some((ns, l));
             t.min = min;
             t.max = max;
-            t.qualified = true;
+            t.qualified = false;
             let id = self.sdl.add(t);
             return Ok(id);
         }
         let name = d.attr(n, "name").unwrap_or_default();
         let nillable = matches!(d.attr(n, "nillable").as_deref(), Some("true") | Some("1"));
         let form = d.attr(n, "form");
-        let qualified = if global {
-            true
-        } else {
-            match form.as_deref() {
-                Some("qualified") => true,
-                Some("unqualified") => false,
-                _ => sc.efd,
-            }
+        // Global elements too follow elementFormDefault (observed on PHP
+        // 8.5; tests schema/schema034.phpt, schema035.phpt).
+        let qualified = match form.as_deref() {
+            Some("qualified") => true,
+            Some("unqualified") => false,
+            _ => sc.efd,
         };
         let default = d.attr(n, "default");
         let fixed = d.attr(n, "fixed");
@@ -1428,14 +1440,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
         } else {
             a.name = d.attr(n, "name").unwrap_or_default();
             a.ns = sc.tns.clone();
-            a.qualified = if global {
-                true
-            } else {
-                match d.attr(n, "form").as_deref() {
-                    Some("qualified") => true,
-                    Some("unqualified") => false,
-                    _ => sc.afd,
-                }
+            let _ = global;
+            a.qualified = match d.attr(n, "form").as_deref() {
+                Some("qualified") => true,
+                Some("unqualified") => false,
+                _ => sc.afd,
             };
             a.typ = d
                 .attr(n, "type")

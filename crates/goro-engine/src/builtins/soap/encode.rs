@@ -289,8 +289,12 @@ pub fn to_xml(
         }
         return Ok(());
     }
-    // Multi-reference values (SOAP 1.1 section 5.4.1, `id`/`href`).
-    if !literal && let Value::Object(o) = &v {
+    // Multi-reference values (SOAP 1.1 section 5.4.1, `id`/`href`), for
+    // values written as structs.
+    if !literal
+        && let Value::Object(o) = &v
+        && struct_like(cx, enc)
+    {
         let addr = o.obj() as *const _ as usize;
         if let Some(i) = cx.refs.iter().position(|r| r.0 == addr) {
             let target = cx.refs[i].1;
@@ -340,6 +344,35 @@ pub fn to_xml(
     };
     cx.depth -= 1;
     r
+}
+
+/// Whether an encoding writes a struct (objects shared by reference).
+fn struct_like(cx: &Cx, enc: Option<Enc>) -> bool {
+    match enc {
+        None => true,
+        Some(Enc::Builtin(b)) => matches!(b.conv, Conv::Struct | Conv::AnyType | Conv::Map),
+        Some(Enc::Type(t)) => match &cx.sdl {
+            Some(sdl) => {
+                let mut id = t;
+                for _ in 0..16 {
+                    let ty = &sdl.types[id];
+                    match ty.kind {
+                        Kind::Complex => return true,
+                        Kind::Element => match ty.base.as_ref().and_then(|b| sdl.resolve(b)) {
+                            Some(Enc::Type(b)) => id = b,
+                            Some(Enc::Builtin(b)) => {
+                                return matches!(b.conv, Conv::Struct | Conv::AnyType | Conv::Map);
+                            }
+                            None => return true,
+                        },
+                        _ => return false,
+                    }
+                }
+                false
+            }
+            None => false,
+        },
+    }
 }
 
 fn enc_qname(cx: &Cx, enc: Option<Enc>) -> Option<(String, String)> {
@@ -785,6 +818,11 @@ fn array_to_xml(
             }
         }
     }
+    if literal && let Some((ns, n)) = &item_q {
+        // The item type's namespace is declared anyway (observed on PHP
+        // 8.5; test schema/schema057.phpt).
+        let _ = cx.doc.qname(Some(el), ns, n);
+    }
     // Literal arrays from an arrayType attribute name their items after
     // the item type (observed on PHP 8.5; test schema/schema056.phpt).
     let lit_name = if literal && item_elem.is_none() {
@@ -859,6 +897,8 @@ fn flatten(
 pub struct ArrayInfo {
     pub item: Option<(String, String)>,
     pub dims: usize,
+    /// Declared sizes (wsdl:arraySize; -1 for "*").
+    pub sizes: Vec<i64>,
     /// The item element (arrays defined by a content model).
     pub elem: Option<TId>,
 }
@@ -883,6 +923,7 @@ pub fn array_info(sdl: &Sdl, t: TId) -> Option<ArrayInfo> {
             let mut info = ArrayInfo {
                 item: None,
                 dims: 1,
+                sizes: Vec::new(),
                 elem: None,
             };
             for a in &attrs {
@@ -899,6 +940,10 @@ pub fn array_info(sdl: &Sdl, t: TId) -> Option<ArrayInfo> {
                 }
                 if let Some(sz) = &a.array_size {
                     info.dims = sz.split_whitespace().count().max(1);
+                    info.sizes = sz
+                        .split_whitespace()
+                        .map(|p| p.parse::<i64>().unwrap_or(-1))
+                        .collect();
                 }
             }
             if let Some(m) = &ty.model
@@ -1213,44 +1258,70 @@ fn complex_to_xml(
         _ => v.clone(),
     };
     let v = &v;
-    if let Some(base) = simple_content_base(sdl, t) {
+    complex_body(vm, cx, sdl, t, v, el, literal, 0)?;
+    if !literal {
+        let (ns, n) = (ty.ns.clone(), ty.name.clone());
+        cx.set_type(el, &ns, &n);
+    }
+    Ok(())
+}
+
+/// The content and attributes of complex type `t`: an extension writes
+/// its base first (with the base's xsi:type, replaced afterwards), a
+/// simple-content type its "_" value, others their content model
+/// (observed on PHP 8.5; tests schema/schema042.phpt to schema049.phpt).
+#[allow(clippy::too_many_arguments)]
+fn complex_body(
+    vm: &mut Vm,
+    cx: &mut Cx,
+    sdl: &Rc<Sdl>,
+    t: TId,
+    v: &Value,
+    el: El,
+    literal: bool,
+    depth: u32,
+) -> R<()> {
+    let ty = &sdl.types[t];
+    let base_complex = match ty.base.as_ref().and_then(|b| sdl.resolve(b)) {
+        Some(Enc::Type(b)) if b != t && sdl.types[b].kind == Kind::Complex && depth < 16 => {
+            Some(b)
+        }
+        _ => None,
+    };
+    let is_ext = matches!(ty.deriv, Deriv::SimpleExtension | Deriv::ComplexExtension);
+    if is_ext && let Some(b) = base_complex {
+        complex_body(vm, cx, sdl, b, v, el, literal, depth + 1)?;
+        if !literal {
+            let (ns, n) = (sdl.types[b].ns.clone(), sdl.types[b].name.clone());
+            cx.set_type(el, &ns, &n);
+        }
+        if let Some(m) = ty.model.clone() {
+            model_to_xml(vm, cx, sdl, &m, v, el, literal, true)?;
+        }
+        return own_attrs_to_xml(vm, cx, sdl, t, v, el);
+    }
+    if simple_content_base(sdl, t).is_some() {
         // Simple content: the value is "_" (or the value itself).
         let val = match v {
             Value::Object(_) | Value::Array(_) => get_field(vm, v, "_")?.unwrap_or(Value::Null),
             other => other.clone(),
         };
         match &val {
-            Value::Null => {
-                cx.set_nil(el);
-            }
-            _ => match base {
-                Some(b) => {
-                    let b = match b {
-                        Enc::Type(x) if sdl.types[x].kind == Kind::Complex => None,
-                        other => Some(other),
-                    };
-                    match b {
-                        Some(b) => to_xml(vm, cx, Some(b), &val, el, literal)?,
-                        None => {
-                            builtin_to_xml(vm, cx, types::string(), &val, el, literal)?
-                        }
-                    }
-                }
+            Value::Null => cx.set_nil(el),
+            _ => match sdl.simple_base(t) {
+                Some(b) => to_xml(vm, cx, Some(b), &val, el, literal)?,
                 None => builtin_to_xml(vm, cx, types::string(), &val, el, literal)?,
             },
         }
         if matches!(v, Value::Object(_) | Value::Array(_)) {
-            attrs_to_xml(vm, cx, sdl, t, v, el, true)?;
+            own_attrs_to_xml(vm, cx, sdl, t, v, el)?;
         }
-    } else {
-        content_to_xml(vm, cx, sdl, t, v, el, literal)?;
-        attrs_to_xml(vm, cx, sdl, t, v, el, true)?;
+        return Ok(());
     }
-    if !literal {
-        let (ns, n) = (ty.ns.clone(), ty.name.clone());
-        cx.set_type(el, &ns, &n);
+    if let Some(m) = ty.model.clone() {
+        model_to_xml(vm, cx, sdl, &m, v, el, literal, true)?;
     }
-    Ok(())
+    own_attrs_to_xml(vm, cx, sdl, t, v, el)
 }
 
 /// The element content of a complex type (the base type's first for
@@ -1283,24 +1354,17 @@ fn content_to_xml(
     Ok(())
 }
 
-/// Attributes of type `t` (and its bases).
-fn attrs_to_xml(
+/// The attributes type `t` declares.
+fn own_attrs_to_xml(
     vm: &mut Vm,
     cx: &mut Cx,
     sdl: &Rc<Sdl>,
     t: TId,
     v: &Value,
     el: El,
-    _top: bool,
 ) -> R<()> {
-    let ty = &sdl.types[t];
-    if ty.deriv == Deriv::ComplexExtension || ty.deriv == Deriv::SimpleExtension {
-        if let Some(Enc::Type(b)) = ty.base.as_ref().and_then(|b| sdl.resolve(b))
-            && b != t
-            && sdl.types[b].kind == Kind::Complex
-        {
-            attrs_to_xml(vm, cx, sdl, b, v, el, false)?;
-        }
+    if !matches!(v, Value::Object(_) | Value::Array(_)) {
+        return Ok(());
     }
     for a in sdl.attrs_of(t) {
         if a.name.is_empty() {
@@ -1454,7 +1518,7 @@ fn element_to_xml(
     let ed: &SType = &sdl.types[ed_id];
     let decl = &sdl.types[e];
     let name = ed.name.clone();
-    let qualified = decl.qualified || ed.qualified;
+    let qualified = ed.qualified;
     let nillable = ed.nillable || decl.nillable;
     let val = get_field(vm, v, &name)?;
     let min = m.min;
