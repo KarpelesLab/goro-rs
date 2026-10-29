@@ -52,6 +52,8 @@ pub struct ServerData {
     pub last_response: Option<Vec<u8>>,
     pub in_handle: bool,
     pub constructed: bool,
+    /// The operation of the request being handled.
+    pub cur_func: Option<Function>,
 }
 
 impl goro_runtime::NativeData for ServerData {
@@ -212,7 +214,7 @@ pub fn fault_xml(
             let n = cx.doc.add_child(f, "env:Node");
             cx.doc.add_text(n, &a);
         }
-        if !matches!(detail, Value::Null) {
+        if !matches!(detail, Value::Null) || wsdl_fault(func, name.as_deref()) {
             let d = cx.doc.add_child(f, "env:Detail");
             write_detail(vm, &mut cx, d, &detail, name.as_deref(), func)?;
         }
@@ -233,12 +235,20 @@ pub fn fault_xml(
             let n = cx.doc.add_child(f, "faultactor");
             cx.doc.add_text(n, &a);
         }
-        if !matches!(detail, Value::Null) {
+        if !matches!(detail, Value::Null) || wsdl_fault(func, name.as_deref()) {
             let d = cx.doc.add_child(f, "detail");
             write_detail(vm, &mut cx, d, &detail, name.as_deref(), func)?;
         }
     }
     Ok(cx.doc.serialize(env))
+}
+
+/// Whether a fault name is one the operation declares.
+fn wsdl_fault(func: Option<&Function>, name: Option<&str>) -> bool {
+    match (func, name) {
+        (Some(f), Some(n)) => f.faults.iter().any(|x| x.name == n && !x.parts.is_empty()),
+        _ => false,
+    }
 }
 
 fn write_detail(
@@ -255,12 +265,38 @@ fn write_detail(
         && let Some(p) = fd.parts.first()
     {
         let mut val = detail.clone();
-        if let Value::Object(_) | Value::Array(_) = detail
+        if fd.parts.len() > 1
+            && let Value::Object(_) | Value::Array(_) = detail
             && let Some(v) = super::encode::get_field(vm, detail, &p.name)?
         {
             val = v;
         }
-        part_to_xml(vm, cx, &sdl, p, &val, d, fd.literal, false)?;
+        if p.element.is_some() {
+            part_to_xml(vm, cx, &sdl, p, &val, d, fd.literal, false)?;
+        } else {
+            // A type part: named after the part, in the fault's namespace
+            // (observed on PHP 8.5; tests
+            // interop/Round4/GroupH/r4_groupH_complex_rpcenc_*).
+            let el = cx.doc.add_child(d, &p.name);
+            let enc = p.typ.as_ref().and_then(|t| sdl.resolve(t));
+            to_xml(vm, cx, enc, &val, el, fd.literal)?;
+            if !fd.ns.is_empty() {
+                let q = cx.doc.qname(Some(el), &fd.ns, &p.name);
+                cx.doc.rename(el, &q);
+            }
+        }
+        if !fd.literal
+            && let Some(env) = cx.doc.root
+        {
+            cx.doc.ensure_ns(Some(env), super::xmlout::NS_XSD);
+            if cx.version == 2 {
+                cx.doc.ensure_ns(Some(env), NS_SOAP12_ENC);
+            } else {
+                cx.doc.ensure_ns(Some(env), NS_SOAP11_ENC);
+                cx.doc
+                    .set_attr(env, "SOAP-ENV:encodingStyle", NS_SOAP11_ENC);
+            }
+        }
         return Ok(());
     }
     match detail {
@@ -711,7 +747,8 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Ok(o) => o,
         Err(Unwind::Throw(e)) => {
             if super::is_fault_obj(vm, &Value::Object(e.clone())) {
-                Out::Fault(e, None)
+                let f = with(&this, |d| d.cur_func.take()).flatten();
+                Out::Fault(e, f)
             } else {
                 // Other exceptions become Server faults (observed on PHP
                 // 8.5; tests server014.phpt, bugs/bug31422.phpt).
@@ -912,6 +949,7 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
         }
         (None, Some(c)) => (Some(doc.local(c).to_string()), None),
     };
+    with(this, |d| d.cur_func = func_def.clone());
     // SOAP 1.2 encodingStyle of the call.
     if version == 2
         && let Some(c) = call

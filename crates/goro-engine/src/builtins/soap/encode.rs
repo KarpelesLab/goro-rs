@@ -1585,7 +1585,9 @@ fn element_to_xml(
         Some(Value::Null) if !nillable && min == 0 => Ok(true),
         Some(Value::Null) => {
             let c = cx.doc.add_child(el, &name);
-            if nillable || !literal {
+            if !literal {
+                to_xml(vm, cx, enc, &Value::Null, c, literal)?;
+            } else if nillable {
                 cx.set_nil(c);
             }
             qualify(cx, c);
