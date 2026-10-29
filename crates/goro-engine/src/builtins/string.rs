@@ -1734,6 +1734,22 @@ fn http_build_query(vm: &mut Vm, a: &mut Args) -> R<Value> {
             };
             match &v {
                 Value::Null => {}
+                // enums give their value (test http/gh15650.phpt)
+                Value::Object(o) if vm.class_of(o).is_enum() => {
+                    let cls = vm.class_of(o);
+                    if cls.enum_backing.is_none() {
+                        return vm.throw(
+                            "ValueError",
+                            &format!(
+                                "Unbacked enum {} cannot be converted to a string",
+                                cls.name.to_string_lossy()
+                            ),
+                        );
+                    }
+                    let bv = vm.get_prop_raw(o, b"value");
+                    let s = vm.to_php_str(&bv)?;
+                    qb.push(&name, &s);
+                }
                 Value::Array(_) | Value::Object(_) => {
                     walk(vm, qb, &v, Some(&name), prefix, depth + 1)?;
                 }
@@ -1746,6 +1762,16 @@ fn http_build_query(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         Ok(())
+    }
+    if let Value::Object(o) = &data
+        && vm.class_of(o).is_enum()
+    {
+        let n = vm.class_of(o).name.to_string_lossy();
+        return vm.fthrow(
+            a,
+            "TypeError",
+            &format!("Argument #1 ($data) must not be an enum, {n} given"),
+        );
     }
     walk(vm, &mut qb, &data, None, &prefix, 0)?;
     Ok(sv(qb.finish()))

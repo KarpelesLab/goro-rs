@@ -36,7 +36,15 @@ pub static MODULE: Module = Module {
             "function get_meta_tags(string $filename, bool $use_include_path = false): array|false",
             get_meta_tags,
         ),
+        (
+            "function request_parse_body(?array $options = null): array",
+            request_parse_body,
+        ),
     ],
+    classes: &[(
+        "requestparsebodyexception",
+        "<?php class RequestParseBodyException extends Exception {}",
+    )],
     constants: &[
         ("ABDAY_1", ConstVal::Int(131072)),
         ("ABDAY_2", ConstVal::Int(131073)),
@@ -372,4 +380,90 @@ fn get_meta_tags(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     Ok(Value::Array(o))
+}
+
+/// request_parse_body() (PHP manual; RFC "Expose request_parse_body()"):
+/// the request body as [$_POST, $_FILES], with option overrides.
+fn request_parse_body(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Some(Value::Array(opts)) = a.get(0).map(|v| v.deref()) {
+        for (k, v) in opts.iter() {
+            let k = match k {
+                goro_runtime::KeyRef::Str(k) => k.to_vec(),
+                goro_runtime::KeyRef::Int(_) => {
+                    return vm.throw("ValueError", "Invalid integer key in $options argument");
+                }
+            };
+            let size = match &k[..] {
+                b"post_max_size" | b"upload_max_filesize" => true,
+                b"max_input_vars" | b"max_multipart_body_parts" | b"max_file_uploads" => false,
+                _ => {
+                    return vm.throw(
+                        "ValueError",
+                        &format!(
+                            "Invalid key \"{}\" in $options argument",
+                            String::from_utf8_lossy(&k)
+                        ),
+                    );
+                }
+            };
+            let v = v.deref();
+            if matches!(v, Value::Array(_) | Value::Object(_)) {
+                return vm.throw("ValueError", "Invalid array value in $options argument");
+            }
+            let s = vm.to_php_str(&v)?;
+            if size {
+                let (_, w) = crate::vm::setup::parse_quantity(&s);
+                if let Some(w) = w {
+                    vm.warn(&w)?;
+                }
+            }
+        }
+    }
+    let server = vm.globals_array().get_bytes(b"_SERVER").map(|v| v.deref());
+    let ct = match server {
+        Some(Value::Array(s)) => s.get_bytes(b"CONTENT_TYPE").map(|v| v.deref()),
+        _ => None,
+    };
+    let Some(Value::Str(ct)) = ct else {
+        return vm.throw(
+            "RequestParseBodyException",
+            "Request does not provide a content type",
+        );
+    };
+    let body = vm.out.sapi.input.clone();
+    let mime = ct
+        .split(|&c| c == b';')
+        .next()
+        .unwrap_or_default()
+        .trim_ascii()
+        .to_ascii_lowercase();
+    let mut post = PhpArray::new();
+    let mut files = PhpArray::new();
+    match &mime[..] {
+        b"application/x-www-form-urlencoded" => {
+            post = super::string::parse_query(&body, b"&");
+        }
+        b"multipart/form-data" => {
+            let Some(b) = crate::cli_server::upload::boundary(&ct) else {
+                return vm.throw(
+                    "RequestParseBodyException",
+                    "Missing boundary in multipart/form-data POST data",
+                );
+            };
+            crate::cli_server::upload::parse(vm, &body, &b, &mut post, &mut files);
+        }
+        _ => {
+            return vm.throw(
+                "RequestParseBodyException",
+                &format!(
+                    "Content-Type \"{}\" is not supported",
+                    String::from_utf8_lossy(&ct)
+                ),
+            );
+        }
+    }
+    Ok(Value::Array(PhpArray::from_values([
+        Value::Array(post),
+        Value::Array(files),
+    ])))
 }
