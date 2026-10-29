@@ -971,6 +971,7 @@ fn set_alias(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Some(o) = old {
         state(vm).aliases.remove(&o);
     }
+    state(vm).explicit.insert(al.clone());
     state(vm).aliases.insert(al, p.key.clone());
     save(vm, &s)?;
     Ok(Value::Bool(true))
@@ -1798,6 +1799,7 @@ fn register_alias(vm: &mut Vm, s: &Shared, key: &[u8], alias: Option<Vec<u8>>) -
         );
     }
     state(vm).aliases.insert(al.clone(), key.to_vec());
+    state(vm).explicit.insert(al.clone());
     let mut l = s.borrow_mut();
     if l.a.alias.is_none() {
         l.a.alias = Some(al);

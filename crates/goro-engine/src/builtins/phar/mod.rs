@@ -177,6 +177,9 @@ pub struct PharState {
     pub archives: HashMap<Vec<u8>, Shared>,
     /// Alias → absolute file name.
     pub aliases: HashMap<Vec<u8>, Vec<u8>>,
+    /// Aliases given explicitly (setAlias(), mapPhar(), loadPhar(), the
+    /// constructor).
+    pub explicit: std::collections::HashSet<Vec<u8>>,
     /// Phar::interceptFileFuncs() was called.
     pub intercept: bool,
     /// php.ini turned phar.readonly / phar.require_hash off.
@@ -442,6 +445,17 @@ pub(crate) fn load(vm: &mut Vm, abs: &[u8], create: bool, is_data: bool) -> Resu
         }
     };
     if let Some(al) = loaded.a.alias.clone() {
+        // an alias taken explicitly (setAlias, mapPhar...) can't be
+        // reused; one only read from another archive is just not
+        // registered again (tests alias_acrobatics, phar_metadata_write2)
+        if let Some(other) = state(vm).aliases.get(&al)
+            && other != abs
+            && !state(vm).explicit.contains(&al)
+        {
+            let s = Rc::new(RefCell::new(loaded));
+            state(vm).archives.insert(abs.to_vec(), s.clone());
+            return Ok(s);
+        }
         if let Some(other) = state(vm).aliases.get(&al)
             && other != abs
         {

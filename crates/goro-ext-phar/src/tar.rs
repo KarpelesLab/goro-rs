@@ -61,10 +61,13 @@ pub fn looks_like_tar(data: &[u8]) -> bool {
     if &h[257..262] == b"ustar" {
         return true;
     }
-    match octal(&h[148..156]) {
-        Some(c) => c != 0 && c == checksum(h),
-        None => false,
-    }
+    // older tars (and the tests' tar maker): octal size and checksum
+    // fields and a name
+    let digits = |f: &[u8]| {
+        let t: Vec<u8> = f.iter().copied().filter(|&c| c != 0 && c != b' ').collect();
+        !t.is_empty() && t.iter().all(|c| (b'0'..=b'7').contains(c))
+    };
+    h[0] != 0 && digits(&h[124..136]) && digits(&h[148..156])
 }
 
 fn corrupt(fname: &[u8], what: &str) -> String {
@@ -455,7 +458,8 @@ pub fn write(a: &mut Archive, now: u32, sign: &sig::Signer) -> Result<Vec<u8>, S
             &stub,
             b"",
         )?;
-        if let Some(al) = a.alias.clone() {
+        // a file name standing as alias is not written (conversions)
+        if let Some(al) = a.alias.clone().filter(|al| !al.contains(&b'/')) {
             push(
                 &mut out,
                 &fname,
