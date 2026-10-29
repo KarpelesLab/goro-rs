@@ -672,10 +672,17 @@ impl<'a> Compiler<'a> {
                 }
                 Some(p.modifiers.0)
             };
-            let default_text = p
-                .default
-                .as_ref()
-                .map(|d| self.resolved_source_text(d.span.start as usize, d.span.end as usize));
+            let default_text = p.default.as_ref().map(|d| {
+                // Internal signatures show their defaults as declared
+                // (test ext/standard/tests/strings/bug61116.phpt); user
+                // code shows the exported expression (test
+                // ext/reflection/tests/gh9447.phpt).
+                if self.file.is_empty() {
+                    self.resolved_source_text(d.span.start as usize, d.span.end as usize)
+                } else {
+                    self.export_const_expr(d)
+                }
+            });
             let attrs = self.attributes(p.attrs)?;
             // Promoted parameters are properties too.
             let t = if p.modifiers.0 != 0 { 32 | 8 } else { 32 };
