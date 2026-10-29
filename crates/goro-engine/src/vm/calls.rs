@@ -1912,6 +1912,14 @@ impl Vm {
                 }
                 let items = self.iterate_to_vec(&Value::Object(o), true)?;
                 for (k, x) in items {
+                    // An integer-like string key is positional, as in an
+                    // array (test Zend/tests/gh18581).
+                    let k = match k {
+                        Value::Str(s) if goro_runtime::array::canonical_int(&s).is_some() => {
+                            Value::Null
+                        }
+                        k => k,
+                    };
                     match k {
                         Value::Str(s) => self.send_named(Value::Str(s), x, true)?,
                         Value::Int(_) | Value::Null => {

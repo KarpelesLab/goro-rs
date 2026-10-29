@@ -907,7 +907,13 @@ impl ArrayData {
             if (i as u64) >= len {
                 return None;
             }
-            if i as u64 == len - 1 {
+            // The last element goes unless a pointer or iterator stands
+            // past it: positions stay as they were, as PHP's array holes
+            // keep them (tests Zend/tests/gh13178_*).
+            if i as u64 == len - 1
+                && self.pos as u64 <= i as u64
+                && self.iters.iter().all(|it| (it.1 as u64) <= i as u64)
+            {
                 return vec.pop();
             }
             self.convert_to_hash(0);
@@ -918,7 +924,7 @@ impl ArrayData {
         let idx = h.find(k, bucket_hash(k))?;
         let v = h.entries[idx as usize].val.take();
         h.live -= 1;
-        if h.live == 0 && self.iters.is_empty() {
+        if h.live == 0 && self.iters.is_empty() && self.pos == 0 {
             // Reset storage but keep the next index (PHP keeps counting).
             let pos_end = 0;
             self.store = Store::Packed(Vec::new());
