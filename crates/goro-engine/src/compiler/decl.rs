@@ -1053,6 +1053,22 @@ impl<'a> Compiler<'a> {
     /// Compiles an initializer (constant, property default, parameter
     /// default, attribute argument).
     pub(crate) fn const_expr(&mut self, e: &'a Expr<'a>) -> CResult<ConstExpr> {
+        // A class member's constant expression inside a plain function has
+        // an empty __METHOD__ (an enclosing method's name is kept). Test
+        // Zend/tests/constants/bug76430, observed on PHP 8.5.
+        let method_name = self.f.method_name.clone();
+        if self.class.is_some()
+            && self.f.flags & fflags::CLOSURE == 0
+            && !method_name.contains(&b':')
+        {
+            self.f.method_name = PhpStr::empty();
+        }
+        let r = self.const_expr_inner(e);
+        self.f.method_name = method_name;
+        r
+    }
+
+    fn const_expr_inner(&mut self, e: &'a Expr<'a>) -> CResult<ConstExpr> {
         if let Some(v) = self.const_value(e) {
             return Ok(ConstExpr::Value(v));
         }
@@ -1062,6 +1078,7 @@ impl<'a> Compiler<'a> {
         self.f.flags |= fflags::CONST_EXPR;
         self.f.func_name = parent_f.func_name.clone();
         self.f.method_name = parent_f.method_name.clone();
+        self.f.prop_name = parent_f.prop_name.clone();
         self.in_const_expr = true;
         let r = (|| -> CResult<FuncCode> {
             let v = self.expr(e)?;
@@ -1581,7 +1598,12 @@ impl<'a> Compiler<'a> {
                             p.span.line,
                         );
                     }
-                    let attrs = self.attributes(p.attrs)?;
+                    // __PROPERTY__ in the attributes and the default value
+                    // (test Zend/tests/constants/gh17222).
+                    let saved_prop = self.f.prop_name.replace(PhpStr::new(p.props[0].name.name));
+                    let attrs = self.attributes(p.attrs);
+                    self.f.prop_name = saved_prop;
+                    let attrs = attrs?;
                     self.check_internal_attrs(&attrs, 8, p.span.line)?;
                     for (pi, it) in p.props.iter().enumerate() {
                         if props.iter().any(|x| x.name.as_bytes() == it.name.name) {
@@ -1607,7 +1629,10 @@ impl<'a> Compiler<'a> {
                                     );
                                 }
                                 self.member_init_checks(d)?;
-                                let ce = self.const_expr(d)?;
+                                let saved = self.f.prop_name.replace(PhpStr::new(it.name.name));
+                                let ce = self.const_expr(d);
+                                self.f.prop_name = saved;
+                                let ce = ce?;
                                 if let (Some(t), ConstExpr::Value(Value::Null)) = (&ty, &ce)
                                     && !t.allows_null()
                                     && !t.classes.iter().any(|g| g.len() > 1)

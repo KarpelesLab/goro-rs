@@ -108,7 +108,7 @@ pub static METHODS: &[(&str, NativeFn)] = methods!([
     "mount" => mount,
     "mungserver" => mung_server,
     "unlinkarchive" => unlink_archive,
-    "webphar" => web_phar,
+    "webphar" => super::web::web_phar,
 ] [
     ("pharfileinfo::__h_pharinit", info_init),
     ("pharfileinfo::chmod", info_chmod),
@@ -1824,9 +1824,15 @@ fn load_phar(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn map_phar(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let alias = a.opt_str(0).map(|x| x.to_vec());
+    map_running(vm, alias)
+}
+
+/// Opens the running file as a phar archive (Phar::mapPhar(),
+/// Phar::webPhar()).
+pub(super) fn map_running(vm: &mut Vm, alias: Option<Vec<u8>>) -> R<Value> {
     let file = vm.cur_file().to_vec();
     let key = super::abs_path(vm, &file);
-    let alias = a.opt_str(0).map(|x| x.to_vec());
     if let Some(s) = state(vm).archives.get(&key).cloned() {
         register_alias(vm, &s, &key, alias)?;
         return Ok(Value::Bool(true));
@@ -1912,8 +1918,18 @@ fn mount(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     } else {
-        match super::running(vm) {
-            Some((k, _)) => (k, super::norm_inner(&pp)),
+        // inside the running archive, or from the stub of a phar run as
+        // the script (test front.phar.phpt)
+        let running = match super::running(vm) {
+            Some((k, _)) => Some(k),
+            None => {
+                let f = vm.cur_file().to_vec();
+                let k = super::abs_path(vm, &f);
+                (state(vm).archives.contains_key(&k) || name_info(&k).exec).then_some(k)
+            }
+        };
+        match running {
+            Some(k) => (k, super::norm_inner(&pp)),
             None => {
                 return vm.throw(
                     "PharException",
@@ -1960,19 +1976,24 @@ fn mung_server(vm: &mut Vm, a: &mut Args) -> R<Value> {
             &format!("Too many values passed to Phar::mungServer(), {WHICH}"),
         );
     }
+    let mut names = Vec::new();
     for (_, v) in arr.iter() {
-        if !matches!(v.deref(), Value::Str(_)) {
+        let Value::Str(s) = v.deref() else {
             return vm.throw(
                 "PharException",
                 &format!("Non-string value passed to Phar::mungServer(), {WHICH}"),
             );
+        };
+        // other names are left out (PHP manual: Phar::mungServer)
+        if matches!(
+            s.as_bytes(),
+            b"PHP_SELF" | b"REQUEST_URI" | b"SCRIPT_FILENAME" | b"SCRIPT_NAME"
+        ) && !names.iter().any(|n: &Vec<u8>| n == s.as_bytes())
+        {
+            names.push(s.as_bytes().to_vec());
         }
     }
-    Ok(Value::Null)
-}
-
-fn web_phar(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    // the CLI is not a web request (PHP manual: Phar::webPhar)
+    state(vm).mung = names;
     Ok(Value::Null)
 }
 

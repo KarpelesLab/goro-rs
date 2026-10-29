@@ -753,7 +753,10 @@ fn lint(script: Option<Script>) -> i32 {
         Err(e) => {
             let (label, msg) = match e.message.strip_prefix('\u{1}') {
                 Some(m) => ("Parse error", m.to_string()),
-                None => ("Fatal error", e.message.clone()),
+                None => (
+                    "Fatal error",
+                    e.message.trim_start_matches('\u{2}').to_string(),
+                ),
             };
             println!("\n{}: {} in {} on line {}", label, msg, name, e.line);
             println!("Errors parsing {}", name);

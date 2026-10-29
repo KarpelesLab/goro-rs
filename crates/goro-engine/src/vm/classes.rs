@@ -373,6 +373,35 @@ impl Vm {
         }
         // Interfaces (and their parents).
         for ic in &ifaces {
+            // An interface constant that meets a different inherited one
+            // (from the parent or an earlier interface) is ambiguous unless
+            // the class declares it itself; observed on PHP 8.5, tests
+            // Zend/tests/constants/final_constants/final_const8/11/12.
+            for c in ic.consts.borrow().iter() {
+                if decl.consts.iter().any(|d| d.name == c.name) {
+                    continue;
+                }
+                if let Some(prev) = cls.find_const(&c.name)
+                    && prev.flags & mflags::PRIVATE == 0
+                    && !std::ptr::eq(prev.class, c.class)
+                {
+                    let what = match decl.kind {
+                        ClassKind::Interface => "Interface",
+                        ClassKind::Enum => "Enum",
+                        _ => "Class",
+                    };
+                    let msg = format!(
+                        "{} {} inherits both {}::{} and {}::{}, which is ambiguous",
+                        what,
+                        cname,
+                        unsafe { (*prev.class).name.dname() },
+                        c.name.dname(),
+                        unsafe { (*c.class).name.dname() },
+                        c.name.dname()
+                    );
+                    return self.link_err(decl, &msg);
+                }
+            }
             self.add_interface(&cls, ic);
         }
         if decl.kind != ClassKind::Interface {
@@ -539,10 +568,15 @@ impl Vm {
                     return self.link_err(
                         decl,
                         &format!(
-                            "Access level to {}::{} must be {} (as in class {}){}",
+                            "Access level to {}::{} must be {} (as in {} {}){}",
                             cname,
                             c.name.dname(),
                             vis_name(pvis),
+                            if unsafe { (*prev.class).is_interface() } {
+                                "interface"
+                            } else {
+                                "class"
+                            },
                             pcn,
                             if pvis == mflags::PROTECTED {
                                 " or weaker"

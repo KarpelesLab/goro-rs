@@ -271,7 +271,14 @@ pub fn run(opts: RunOptions) -> i32 {
     let src = if let Script::Code(_) = &opts.script {
         src
     } else {
-        strip_shebang(src)
+        // Test Zend/tests/constants/halt_compiler/bug48930: the halt
+        // offset counts the original `#!` line.
+        let before = src.len() as i64;
+        let s = strip_shebang(src);
+        if before != s.len() as i64 {
+            vm.halt_shift = Some((goro_runtime::PhpStr::new(&path), before - s.len() as i64));
+        }
+        s
     };
     builtins::output::start_ini_handler(&mut vm);
     vm.run_script(&src, &path)

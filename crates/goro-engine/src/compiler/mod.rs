@@ -917,7 +917,9 @@ impl<'a> Compiler<'a> {
                         ),
                         line,
                     ),
-                    _ => return self.err("Encoding must be a literal", line),
+                    // A parser-level error (eval throws it as CompileError,
+                    // test Zend/tests/bug75218): see Vm::compile_error.
+                    _ => return self.err("\u{2}Encoding must be a literal", line),
                 }
             } else if k.name.eq_ignore_ascii_case(b"strict_types") {
             } else {

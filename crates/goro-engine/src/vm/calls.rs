@@ -1624,23 +1624,32 @@ impl Vm {
     /// ext/standard/tests/array/array_map_object*.phpt).
     pub fn callable_error(&mut self, v: &Value) -> String {
         let v = v.deref();
-        let class_named = |vm: &mut Vm, n: &[u8]| -> Option<Rc<Class>> {
+        // Relative names out of scope (observed on PHP 8.5; test
+        // ext/pdo/tests/pdo_fetch_function_incorrect_callables).
+        let class_named = |vm: &mut Vm, n: &[u8]| -> Result<Rc<Class>, String> {
             let l = crate::class::lower(n);
             match l.as_bytes() {
                 b"self" | b"static" | b"parent" => {
+                    let w = String::from_utf8_lossy(l.as_bytes()).into_owned();
                     let p = if l.as_bytes() == b"static" {
                         vm.static_class_ptr()
                     } else {
                         vm.scope_ptr()
                     };
                     if p.is_null() {
-                        return None;
+                        return Err(format!(
+                            "cannot access \"{}\" when no class scope is active",
+                            w
+                        ));
                     }
                     let c = vm.rc_class(p);
                     if l.as_bytes() == b"parent" {
-                        c.parent.clone()
+                        c.parent.clone().ok_or_else(|| {
+                            "cannot access \"parent\" when current class scope has no parent"
+                                .to_string()
+                        })
                     } else {
-                        Some(c)
+                        Ok(c)
                     }
                 }
                 _ => {
@@ -1649,7 +1658,7 @@ impl Vm {
                     let saved = vm.err.deferred.take();
                     let r = vm.find_class(n, false).ok().flatten();
                     vm.err.deferred = saved;
-                    r
+                    r.ok_or_else(|| format!("class \"{}\" not found", String::from_utf8_lossy(n)))
                 }
             }
         };
@@ -1688,8 +1697,8 @@ impl Vm {
                 if let Some(p) = find_double_colon(s) {
                     let cn = &s[..p];
                     return match class_named(self, cn) {
-                        Some(c) => method_reason(self, &c, &s[p + 2..], false),
-                        None => format!("class \"{}\" not found", String::from_utf8_lossy(cn)),
+                        Ok(c) => method_reason(self, &c, &s[p + 2..], false),
+                        Err(e) => e,
                     };
                 }
                 format!(
@@ -1723,12 +1732,12 @@ impl Vm {
                         }
                     }
                     Value::Str(cn) => match class_named(self, &cn) {
-                        Some(c) => match self.qualified_method(&c, &m) {
+                        Ok(c) => match self.qualified_method(&c, &m) {
                             Some(Ok((q, mm))) => method_reason(self, &q, mm, false),
                             Some(Err(e)) => e,
                             None => method_reason(self, &c, &m, false),
                         },
-                        None => format!("class \"{}\" not found", cn.to_string_lossy()),
+                        Err(e) => e,
                     },
                     _ => "first array member is not a valid class name or object".to_string(),
                 }
@@ -2532,7 +2541,27 @@ impl Vm {
                 {
                     // PHP explains why a value is not callable (observed on
                     // PHP 8.5: "must be a valid callback or null, function
-                    // \"x\" not found or invalid function name").
+                    // \"x\" not found or invalid function name"), after the
+                    // relative-callable deprecation.
+                    let relative = |v: &Value| {
+                        let c = match v.deref() {
+                            Value::Str(s) => match find_double_colon(&s) {
+                                Some(p) => s[..p].to_ascii_lowercase(),
+                                None => return false,
+                            },
+                            Value::Array(a) if a.len() == 2 => {
+                                match a.get_int(0).map(|x| x.deref()) {
+                                    Some(Value::Str(c)) => c.to_ascii_lowercase(),
+                                    _ => return false,
+                                }
+                            }
+                            _ => return false,
+                        };
+                        matches!(&c[..], b"self" | b"parent" | b"static")
+                    };
+                    if relative(&args[i]) {
+                        self.callable_deprecation(&args[i])?;
+                    }
                     let why = self.callable_error(&args[i]);
                     return self.throw(
                         "TypeError",

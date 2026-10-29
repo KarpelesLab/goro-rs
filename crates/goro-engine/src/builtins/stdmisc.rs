@@ -468,7 +468,7 @@ fn request_parse_body(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     match &mime[..] {
         b"application/x-www-form-urlencoded" => {
-            post = super::string::parse_query(&body, b"&");
+            post = super::string::parse_query(&body, b"&", super::string::nesting_limit(vm));
         }
         b"multipart/form-data" => {
             let b = match crate::cli_server::upload::boundary(&ct) {

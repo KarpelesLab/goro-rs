@@ -94,7 +94,7 @@ impl Vm {
                     if e.kind == goro_syntax::ErrorKind::Parse {
                         "\u{1}"
                     } else {
-                        ""
+                        "\u{2}"
                     },
                     e.message
                 ),
@@ -152,7 +152,13 @@ impl Vm {
             } else {
                 off
             };
-            self.halt_offsets.insert(PhpStr::new(file), off as i64);
+            let mut off = off as i64;
+            if let Some((f, d)) = &self.halt_shift
+                && f.as_bytes() == file
+            {
+                off += d;
+            }
+            self.halt_offsets.insert(PhpStr::new(file), off);
         }
         Ok(unit)
     }
@@ -203,8 +209,15 @@ impl Vm {
             Some(m) => (true, m.to_string()),
             None => (false, e.message),
         };
-        // eval() throws compile errors too; include only parse errors.
-        let throw_compile = throw && self.compiling_eval;
+        // eval() throws the parser's other errors as CompileError (test
+        // Zend/tests/bug75218); the compiler's are fatal there too
+        // (observed on PHP 8.5: "Key element cannot be a reference").
+        // include throws only parse errors.
+        let (from_parser, msg) = match msg.strip_prefix('\u{2}') {
+            Some(m) => (true, m.to_string()),
+            None => (false, msg),
+        };
+        let throw_compile = throw && self.compiling_eval && from_parser;
         if (is_parse && throw) || throw_compile {
             let class = if is_parse {
                 "ParseError"
@@ -389,17 +402,32 @@ impl Vm {
             // hook (phar://): include_path entries of that wrapper, then
             // the directory of the calling script (PHP manual: Phar, using
             // Phar archives).
-            let mut dirs: Vec<Vec<u8>> =
-                crate::builtins::streams::split_include_path(&self.ini.include_path)
-                    .into_iter()
-                    .filter(|d| d.windows(3).any(|w| w == b"://"))
-                    .collect();
-            let cur = self.cur_file();
-            if let Some(p) = cur.iter().rposition(|&c| c == b'/')
-                && cur.windows(3).any(|w| w == b"://")
-            {
-                dirs.push(cur[..p].to_vec());
-            }
+            // A path starting with ./ or ../ is relative to the working
+            // directory only (PHP manual: include), which a front controller
+            // sets inside its archive (test ext/phar/tests/frontcontroller34).
+            let dotted = path.starts_with(b"./") || path.starts_with(b"../");
+            let virtual_cwd = if dotted {
+                crate::builtins::streams::virtual_cwd(self)
+            } else {
+                None
+            };
+            let dirs: Vec<Vec<u8>> = match virtual_cwd {
+                Some(d) => vec![d],
+                None => {
+                    let mut dirs: Vec<Vec<u8>> =
+                        crate::builtins::streams::split_include_path(&self.ini.include_path)
+                            .into_iter()
+                            .filter(|d| d.windows(3).any(|w| w == b"://"))
+                            .collect();
+                    let cur = self.cur_file();
+                    if let Some(p) = cur.iter().rposition(|&c| c == b'/')
+                        && cur.windows(3).any(|w| w == b"://")
+                    {
+                        dirs.push(cur[..p].to_vec());
+                    }
+                    dirs
+                }
+            };
             for mut d in dirs {
                 let Some(op) =
                     crate::builtins::streams::wrapper_for(self, &d).and_then(|w| w.include)
@@ -564,6 +592,19 @@ impl Vm {
         Ok(true)
     }
 
+    /// Runs a file in the current scope as a front controller does
+    /// (Phar::webPhar): like an include, but without a frame of its own in
+    /// stack traces (test ext/phar/tests/frontcontroller29.phpt: the trace
+    /// goes from the file's code straight to Phar::webPhar()).
+    pub fn run_front_file(&mut self, src: &[u8], file: &[u8]) -> R<Value> {
+        let key = PhpStr::new(file);
+        if !self.included_set.contains(&key) {
+            self.included_set.insert(key.clone());
+            self.included.push(key);
+        }
+        self.run_attached(src, file, false, "front controller")
+    }
+
     /// Compiles and runs code in the current scope (include, eval).
     fn run_attached(&mut self, src: &[u8], file: &[u8], eval: bool, what: &str) -> R<Value> {
         let unit = match self.compile_source(src, file, eval) {
@@ -583,6 +624,7 @@ impl Vm {
             "include_once" => 2,
             "require" => 3,
             "require_once" => 4,
+            "front controller" => 6,
             _ => 5,
         };
         // The owner of the variables.
