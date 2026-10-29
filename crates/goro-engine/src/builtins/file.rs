@@ -68,10 +68,6 @@ pub static MODULE: Module = Module {
             stream_get_meta_data,
         ),
         ("function stream_isatty($stream): bool", stream_isatty),
-        (
-            "function posix_isatty($file_descriptor): bool",
-            stream_isatty,
-        ),
         // stream_set_blocking() and the stream_context_*() functions are in
         // builtins/sockets.rs.
         (

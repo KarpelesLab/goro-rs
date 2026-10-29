@@ -35,6 +35,7 @@ pub mod output;
 pub mod password;
 pub mod pcntl;
 pub mod pcre;
+pub mod posix;
 pub mod phar;
 pub mod random;
 pub mod reflection;
@@ -76,6 +77,7 @@ pub fn modules() -> Vec<&'static Module> {
         &sockets::MODULE,
         &http::MODULE,
         &pcntl::MODULE,
+        &posix::MODULE,
         &streams::MODULE,
         &serialize::MODULE,
         &json::MODULE,

@@ -2218,6 +2218,10 @@ impl Vm {
         };
         self.ex.native_calls.pop();
         self.give_args_vec(args);
+        // ext/pcntl: signals queued while async delivery is on run here.
+        if r.is_ok() {
+            crate::builtins::pcntl::after_native_call(self)?;
+        }
         r
     }
 

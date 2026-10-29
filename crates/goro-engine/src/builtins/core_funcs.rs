@@ -2540,6 +2540,8 @@ impl Vm {
     /// Op::Tick: every `every` statements the tick functions run (PHP
     /// manual: declare, ticks).
     pub(crate) fn tick(&mut self, every: u32) -> R<()> {
+        // ext/pcntl delivers queued signals on ticks.
+        crate::builtins::pcntl::on_tick(self)?;
         self.tick_count += 1;
         if self.tick_funcs.is_empty()
             || self.in_tick
