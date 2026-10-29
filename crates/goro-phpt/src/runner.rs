@@ -116,6 +116,9 @@ pub const ONLINE_TESTS: &[&str] = &[
     "ext/standard/tests/file/file_get_contents_error002.phpt",
     "ext/standard/tests/file/file_get_contents_with_custom_uri_parser.phpt",
     "ext/standard/tests/network/gethostbyname_basic001.phpt",
+    // DNS queries for unknown names ("asdfasdf", ".toto.toto.toto")
+    "ext/standard/tests/network/gethostbyname_error003.phpt",
+    "ext/standard/tests/network/gethostbyname_error006.phpt",
 ];
 
 /// Tests that need several gigabytes of memory or disk: skipped unless
