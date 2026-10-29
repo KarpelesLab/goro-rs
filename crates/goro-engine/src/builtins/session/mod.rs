@@ -759,7 +759,7 @@ fn send_cookie(vm: &mut Vm) -> R<()> {
     }
     // The CLI keeps no headers (observed on PHP 8.5: headers_list() is
     // empty).
-    if vm.out.sapi.server {
+    if vm.out.sapi.web() {
         super::headers::add_header(vm, &h, false, 0)?;
     }
     Ok(())
@@ -833,7 +833,7 @@ fn cache_limiter(vm: &mut Vm) -> R<bool> {
             return Ok(true);
         }
     }
-    if vm.out.sapi.server {
+    if vm.out.sapi.web() {
         for l in lines {
             super::headers::add_header(vm, l.as_bytes(), true, 0)?;
         }

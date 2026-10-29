@@ -20,6 +20,7 @@
 
 pub mod builtins;
 pub mod bytecode;
+pub mod cgi;
 pub mod class;
 pub mod cli_server;
 pub mod compiler;
@@ -157,17 +158,43 @@ fn run_lines(vm: &mut Vm, lm: &LineMode) -> i32 {
 /// A started engine: the modules, then the startup settings (`-d`, in
 /// order) and what derives from them.
 pub fn startup(ini: &[(Vec<u8>, Vec<u8>)], extra: &[&'static Module]) -> Vm {
+    startup_with(ini, extra, |_| {})
+}
+
+/// [`startup`], with `before` run on the new engine before the settings
+/// (a SAPI's response state, so that startup diagnostics reach it).
+pub fn startup_with(
+    ini: &[(Vec<u8>, Vec<u8>)],
+    extra: &[&'static Module],
+    before: impl FnOnce(&mut Vm),
+) -> Vm {
     let mut modules = builtins::modules();
     modules.extend(extra.iter().copied());
     let mut vm = Vm::new(&modules);
+    before(&mut vm);
     for (k, v) in ini {
         vm.set_ini(k, v);
+    }
+    // Startup diagnostics are shown only with display_startup_errors (PHP
+    // manual: display_startup_errors; test ext/session/tests/bug71974.phpt).
+    let hide = vm.get_ini(b"display_startup_errors").is_some_and(|v| {
+        matches!(
+            &v.trim_ascii().to_ascii_lowercase()[..],
+            b"0" | b"" | b"off" | b"false" | b"no" | b"none"
+        )
+    });
+    let shown = vm.ini.display_errors;
+    if hide {
+        vm.ini.display_errors = 0;
     }
     builtins::misc::startup_ini_deprecations(&mut vm, ini);
     for m in vm.modules.clone() {
         if let Some(f) = m.startup_ini {
             f(&mut vm, ini);
         }
+    }
+    if hide {
+        vm.ini.display_errors = shown;
     }
     // disable_functions: since PHP 8.0 disabled functions are not defined
     // at all (PHP manual: php.ini directives; test

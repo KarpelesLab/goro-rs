@@ -93,21 +93,25 @@ pub fn add_header(vm: &mut Vm, line: &[u8], replace: bool, code: i64) -> R<bool>
         warn_sent(vm)?;
         return Ok(false);
     }
-    // (observed on PHP 8.5)
-    if line.contains(&b'\n') || line.contains(&b'\r') {
-        vm.warn("Header may not contain more than a single header, new line detected")?;
-        return Ok(false);
-    }
-    if line.contains(&0) {
-        vm.warn("Header may not contain NUL bytes")?;
-        return Ok(false);
-    }
+    let given_blank = !line.is_empty() && line.trim_ascii().is_empty();
+    // Trailing whitespace goes first: a line break there is no second
+    // header (test ext/standard/tests/general_functions/bug60227_1.phpt).
     let mut line = line.to_vec();
     while line.last().is_some_and(|c| c.is_ascii_whitespace()) {
         line.pop();
     }
+    // (observed on PHP 8.5; NUL first: test
+    // ext/standard/tests/general_functions/bug60227_3.phpt)
+    if line.contains(&0) {
+        vm.warn("Header may not contain NUL bytes")?;
+        return Ok(false);
+    }
+    if line.contains(&b'\n') || line.contains(&b'\r') {
+        vm.warn("Header may not contain more than a single header, new line detected")?;
+        return Ok(false);
+    }
     let s = &mut vm.out.sapi;
-    if s.status == 0 && s.server {
+    if s.status == 0 && s.web() {
         s.status = 200;
     }
     if line.len() >= 5 && line[..5].eq_ignore_ascii_case(b"HTTP/") {
@@ -134,7 +138,7 @@ pub fn add_header(vm: &mut Vm, line: &[u8], replace: bool, code: i64) -> R<bool>
         // header(" ") is accepted and does nothing visible (test
         // sapi/cli/tests/bug66830); the server keeps an empty entry
         // (observed on PHP 8.5).
-        if s.server && !line.is_empty() {
+        if s.web() && given_blank {
             s.headers.push(Vec::new());
         }
         return Ok(true);
@@ -145,6 +149,9 @@ pub fn add_header(vm: &mut Vm, line: &[u8], replace: bool, code: i64) -> R<bool>
         // PHP manual: header(): a redirect unless a 201 or 3xx status is set.
         if s.status != 201 && !(300..400).contains(&s.status) {
             s.status = 302;
+            // The status line goes with its code (test
+            // ext/standard/tests/general_functions/header_redirection_002).
+            s.status_line = None;
         }
     } else if has_colon && name.eq_ignore_ascii_case(b"www-authenticate") {
         // (test sapi/cli/tests/php_cli_server_007)
@@ -174,7 +181,7 @@ pub fn add_header(vm: &mut Vm, line: &[u8], replace: bool, code: i64) -> R<bool>
     if code > 0 {
         s.status = code;
     }
-    if s.server {
+    if s.web() {
         if replace && has_colon {
             s.headers
                 .retain(|h| !(h.contains(&b':') && header_name(h).eq_ignore_ascii_case(&name)));
