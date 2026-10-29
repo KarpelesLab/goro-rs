@@ -96,6 +96,7 @@ pub static MODULE: Module = Module {
     classes: user::CLASSES,
     methods: user::METHODS,
     hooks: &[],
+    info: None,
     constants: &[
         ("PHP_SESSION_DISABLED", ConstVal::Int(0)),
         ("PHP_SESSION_NONE", ConstVal::Int(1)),
