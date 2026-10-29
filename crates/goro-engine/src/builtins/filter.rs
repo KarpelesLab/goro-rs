@@ -121,7 +121,14 @@ impl FilterHost for Vm {
         let name: &[u8] = match ty {
             InputType::Server => b"_SERVER",
             InputType::Env => b"_ENV",
-            _ => return None,
+            _ => {
+                let req = self.ext::<InputArrays>().request.as_ref()?;
+                return Some(match ty {
+                    InputType::Get => req[0].clone(),
+                    InputType::Post => req[1].clone(),
+                    _ => req[2].clone(),
+                });
+            }
         };
         let st = self.ext::<InputArrays>();
         if let Some(a) = match ty {
@@ -176,6 +183,39 @@ impl FilterHost for Vm {
 struct InputArrays {
     server: Option<PhpArray>,
     env: Option<PhpArray>,
+    /// A web request's GET, POST and COOKIE variables as received.
+    request: Option<[PhpArray; 3]>,
+}
+
+/// A web SAPI's request variables: filter_input() keeps them as received;
+/// the superglobals get them through `filter.default` (PHP manual: Filter
+/// runtime configuration; tests ext/filter/tests/004.phpt, 011.phpt).
+pub(crate) fn register_request(vm: &mut Vm, vars: [&mut PhpArray; 3]) {
+    vm.ext::<InputArrays>().request = Some([vars[0].clone(), vars[1].clone(), vars[2].clone()]);
+    let default = vm.get_ini(b"filter.default").unwrap_or_default();
+    let flags = vm
+        .get_ini(b"filter.default_flags")
+        .filter(|f| !f.trim_ascii().is_empty())
+        .map(|f| goro_runtime::convert::str_to_int(f.trim_ascii()));
+    let filter = f::InputFilter::from_ini(&default, flags);
+    if filter.is_raw() {
+        return;
+    }
+    fn walk(vm: &mut Vm, filter: &f::InputFilter, a: &PhpArray) -> PhpArray {
+        let mut out = PhpArray::new();
+        for (k, v) in a.iter() {
+            let nv = match v.deref() {
+                Value::Array(inner) => Value::Array(walk(vm, filter, &inner)),
+                Value::Str(s) => filter.apply(vm, &s).unwrap_or(Value::Bool(false)),
+                other => other,
+            };
+            out.insert(k.to_owned(), nv);
+        }
+        out
+    }
+    for a in vars {
+        *a = walk(vm, &filter, a);
+    }
 }
 
 fn options(a: &Args, i: usize, default: i64) -> (Option<PhpArray>, i64) {

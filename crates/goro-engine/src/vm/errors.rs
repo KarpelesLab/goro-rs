@@ -158,7 +158,7 @@ impl Vm {
         let fatal_level =
             level & (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE) != 0;
         if fatal_level
-            && self.out.sapi.server
+            && self.out.sapi.web()
             && self.ini.display_errors == 0
             && !crate::builtins::headers::sent(self)
         {
@@ -784,7 +784,13 @@ impl Vm {
                 // The innermost frame (code of the included file itself
                 // running) shows no argument (observed on PHP 8.5; test
                 // sapi/cli/tests/php_cli_server_015).
-                let args = if with_args && fname != "eval" && !out.is_empty() {
+                let called_above = out.iter().any(|f| {
+                    !matches!(
+                        f.function.as_bytes(),
+                        b"debug_backtrace" | b"debug_print_backtrace"
+                    )
+                });
+                let args = if with_args && fname != "eval" && called_above {
                     Some(vec![Value::Str(code.file.clone())])
                 } else if with_args {
                     Some(Vec::new())

@@ -1438,6 +1438,14 @@ impl Vm {
                     Value::Ref(r) => r,
                     other => PhpRef::new(other),
                 };
+                // Test tests/classes/static_properties_003.
+                let cls = self.class_of(o);
+                if matches!(
+                    self.lookup_prop(&cls, name, self.scope_ptr()),
+                    PropLookup::Dynamic
+                ) {
+                    self.static_as_instance(&cls, name)?;
+                }
                 // A hooked property: its write fetch (a `&get` call or the
                 // indirect-modification error) comes first (observed on
                 // PHP 8.5; test Zend/tests/property_hooks/bug007).
@@ -1877,6 +1885,8 @@ impl Vm {
                 )
             }
             PropLookup::Dynamic => {
+                // Test tests/classes/static_properties_003.
+                self.static_as_instance(&cls, name)?;
                 if let Some(h) = cls.native.prop
                     && let Some(r) = h(self, o, name, crate::class::ObjAccess::Unset)
                 {

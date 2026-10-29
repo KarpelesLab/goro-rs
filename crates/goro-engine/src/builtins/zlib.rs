@@ -906,6 +906,16 @@ fn ob_gzhandler(vm: &mut Vm, a: &mut Args) -> R<Value> {
             })
             .ok()
         });
+        // A web SAPI tells the client: Content-Encoding when compressing,
+        // and Vary in any case, added to the script's own (tests
+        // ext/zlib/tests/gh7953.phpt, bug65391.phpt).
+        if vm.out.sapi.web() && !crate::builtins::headers::sent(vm) {
+            if let Some(c) = coding {
+                let ce = format!("Content-Encoding: {}", c);
+                crate::builtins::headers::add_header(vm, ce.as_bytes(), true, 0)?;
+            }
+            crate::builtins::headers::add_header(vm, b"Vary: Accept-Encoding", false, 0)?;
+        }
     }
     let st = vm.ext::<ObGz>();
     let Some(d) = st.d.as_mut() else {

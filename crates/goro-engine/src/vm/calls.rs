@@ -1145,6 +1145,21 @@ impl Vm {
                     "protected"
                 };
                 let from = self.scope_desc(scope);
+                // From an instance of the class, __call takes the invisible
+                // method first (test Zend/tests/magic_methods/bug53826).
+                if let Some(t) = &this
+                    && self.class_of(t).is_subclass_of(cls)
+                    && let Some(c) = self.class_of(t).magic.borrow().call.clone()
+                {
+                    return Ok(Callee {
+                        scope: c.scope.get(),
+                        func: c,
+                        this: Some(t.clone()),
+                        static_class: Rc::as_ptr(cls),
+                        closure: None,
+                        magic_name: Some(PhpStr::new(name)),
+                    });
+                }
                 // __callStatic may take an invisible method.
                 if let Some(cs) = cls.magic.borrow().call_static.clone() {
                     return Ok(Callee {
@@ -1155,6 +1170,17 @@ impl Vm {
                         closure: None,
                         magic_name: Some(PhpStr::new(name)),
                     });
+                }
+                // `parent::__construct()` (test tests/classes/ctor_visibility).
+                if lname.as_bytes() == b"__construct" {
+                    let owner = m
+                        .scope()
+                        .map(|c| c.name.dname())
+                        .unwrap_or_else(|| cls.name.dname());
+                    return self.throw(
+                        "Error",
+                        &format!("Cannot call {} {}::__construct()", vis, owner),
+                    );
                 }
                 return self.throw(
                     "Error",
@@ -1226,8 +1252,9 @@ impl Vm {
         // __call in object context, else __callStatic.
         if let Some(t) = this.clone() {
             let tc = self.class_of(&t);
+            // The object's own __call (test tests/classes/__call_004).
             if tc.is_subclass_of(cls)
-                && let Some(c) = cls.magic.borrow().call.clone()
+                && let Some(c) = tc.magic.borrow().call.clone()
             {
                 return Ok(Callee {
                     scope: c.scope.get(),
@@ -1615,8 +1642,10 @@ impl Vm {
                     }
                 }
                 _ => {
+                    // The resolution that failed already ran the autoloader
+                    // (test tests/classes/autoload_012).
                     let saved = vm.err.deferred.take();
-                    let r = vm.find_class(n, true).ok().flatten();
+                    let r = vm.find_class(n, false).ok().flatten();
                     vm.err.deferred = saved;
                     r
                 }
@@ -1915,6 +1944,14 @@ impl Vm {
                 }
                 let items = self.iterate_to_vec(&Value::Object(o), true)?;
                 for (k, x) in items {
+                    // An integer-like string key is positional, as in an
+                    // array (test Zend/tests/gh18581).
+                    let k = match k {
+                        Value::Str(s) if goro_runtime::array::canonical_int(&s).is_some() => {
+                            Value::Null
+                        }
+                        k => k,
+                    };
                     match k {
                         Value::Str(s) => self.send_named(Value::Str(s), x, true)?,
                         Value::Int(_) | Value::Null => {
@@ -2851,7 +2888,14 @@ impl Vm {
             }
             let slot = unsafe { &mut *base.add(i) };
             if slot.is_none() {
-                match &param.default {
+                // An optional parameter before a required one is required
+                // (test Zend/tests/required_param_after_optional_named_args).
+                let default = if has_named && (i as u32) < code.num_required {
+                    &ParamDefault::None
+                } else {
+                    &param.default
+                };
+                match default {
                     ParamDefault::Const(v) => {
                         let mut v = v.clone();
                         if let Some(ty) = &param.ty

@@ -74,6 +74,7 @@ impl Vm {
             disabled_wrappers: Vec::new(),
             autoloading: Vec::new(),
             shutdown_functions: Vec::new(),
+            rmw_key_warned: false,
             header_callback: None,
             exit_status: 0,
             script_path: PhpStr::empty(),

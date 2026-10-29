@@ -518,6 +518,9 @@ pub struct Vm {
     pub disabled_wrappers: Vec<Vec<u8>>,
     pub autoloading: Vec<PhpStr>,
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
+    /// The "Undefined array key" warning of a compound assignment was
+    /// raised before the write started.
+    pub rmw_key_warned: bool,
     /// header_register_callback(): called when the headers are sent (at
     /// the first output, or at the end of the request).
     pub header_callback: Option<Value>,

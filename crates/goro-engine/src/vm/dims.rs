@@ -945,6 +945,48 @@ impl Vm {
             value_lazy,
             action: path.action,
         };
+        // `$a[k] op= v` on a missing key warns before anything is written,
+        // so an error handler throwing stops it (test Zend/tests/
+        // undef_index_to_exception).
+        if let PathBase::Var(r) = path.base
+            && path.elems.len() == 1
+            && matches!(path.elems[0], PathElem::Dim(_))
+            && matches!(
+                path.action,
+                PathAction::AssignOp(..) | PathAction::IncDec(_)
+            )
+            && ctx.lazy[0] == NONE
+            && let Some(k) = &ctx.keys[0]
+        {
+            let key = match k {
+                Value::Int(i) => Some(Key::Int(*i)),
+                Value::Str(s) => Some(Key::from_php_str(s)),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let missing = self.peek(r).is_some_and(|v| {
+                    v.with_deref(|v| matches!(v, Value::Array(a) if a.get(key.as_ref()).is_none()))
+                });
+                if missing {
+                    self.warn(&format!("Undefined array key {}", key_desc(&key)))?;
+                    // An error handler that set the element wins (test
+                    // Zend/tests/bug70662).
+                    let now = self.peek(r).and_then(|v| {
+                        v.with_deref(|v| match v {
+                            Value::Array(a) => a.get(key.as_ref()).map(|x| x.deref()),
+                            _ => None,
+                        })
+                    });
+                    if let Some(v) = now {
+                        if res != NONE {
+                            self.put(res, v);
+                        }
+                        return Ok(());
+                    }
+                    self.rmw_key_warned = true;
+                }
+            }
+        }
         // Resolve the base place.
         let mut place = match path.base {
             PathBase::Var(r) => {
@@ -1518,10 +1560,11 @@ impl Vm {
             PathAction::AssignOp(_, _) | PathAction::IncDec(_) => {
                 if let Some(key) = &k {
                     let missing = arr!().get(key.as_ref()).is_none();
-                    if missing {
+                    if missing && !std::mem::take(&mut self.rmw_key_warned) {
                         self.warn(&format!("Undefined array key {}", key_desc(key)))?;
                     }
                 }
+                self.rmw_key_warned = false;
                 let a = arr!();
                 let slot: *mut Value = match k {
                     None => match a.make_mut().push_entry() {
@@ -1608,6 +1651,15 @@ impl Vm {
                     match p.kind {
                         goro_runtime::numeric::Numericness::Numeric => {
                             self.warn("String offset cast occurred")?;
+                            p.num.to_f64() as i64
+                        }
+                        // A leading-numeric offset (observed on PHP 8.5;
+                        // test tests/lang/bug19943).
+                        goro_runtime::numeric::Numericness::Leading => {
+                            self.warn(&format!(
+                                "Illegal string offset \"{}\"",
+                                s.to_string_lossy()
+                            ))?;
                             p.num.to_f64() as i64
                         }
                         _ => {

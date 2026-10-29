@@ -1466,6 +1466,9 @@ impl<'s> Exporter<'s> {
                 self.expr(&f.expr, 0);
                 self.s(" as ");
                 if let Some(k) = &f.key {
+                    if f.key_by_ref {
+                        self.s("&");
+                    }
                     self.expr(k, 0);
                     self.s(" => ");
                 }

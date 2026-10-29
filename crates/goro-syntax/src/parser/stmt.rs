@@ -706,7 +706,9 @@ impl<'a> Parser<'a> {
         let expr = self.expr()?;
         self.expect(T::As, &[])?;
         let (first, first_ref) = self.foreach_target()?;
+        let mut key_by_ref = false;
         let (key, value, by_ref) = if self.eat(T::DoubleArrow) {
+            key_by_ref = first_ref;
             let (v, r) = self.foreach_target()?;
             (Some(first), v, r)
         } else {
@@ -727,6 +729,7 @@ impl<'a> Parser<'a> {
                 key,
                 value,
                 by_ref,
+                key_by_ref,
                 body,
                 alt_syntax: alt,
             })),

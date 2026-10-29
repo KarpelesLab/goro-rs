@@ -878,6 +878,16 @@ impl Vm {
             self.unset_owner_var(usize::MAX, name);
             return Ok(());
         }
+        // `$GLOBALS['x'] op= v` on a missing global warns first (test
+        // Zend/tests/undef_index_to_exception).
+        if matches!(action, PathAction::AssignOp(..) | PathAction::IncDec(_))
+            && self.global_var_ptr(name, false).is_none()
+        {
+            self.warn(&format!(
+                "Undefined global variable ${}",
+                name.to_string_lossy()
+            ))?;
+        }
         let p = self.global_place(name);
         let r = unsafe { (*p).make_ref() };
         self.cell_action(&r, action, value, res)

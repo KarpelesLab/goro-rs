@@ -21,6 +21,9 @@ options:
   -q, --quiet         print only FAIL and BORK lines (and the summary)
   -j N                parallel workers (default: half the CPUs, at most 8)
   --php PATH          PHP binary under test (default: this goro binary)
+  --php-cgi PATH      CGI binary for tests with request sections (GET, POST,
+                      COOKIE, EXPECTHEADERS...); default: `goro --cgi` with
+                      the default --php, else php-cgi next to --php
   --timeout SECS      per-run timeout (default 60)
   -d KEY=VALUE        extra ini setting for every run (after the defaults)
   --root DIR          test-suite root: working directory of the runs and
@@ -50,6 +53,7 @@ struct Options {
     quiet: bool,
     jobs: usize,
     php: Option<PathBuf>,
+    php_cgi: Option<PathBuf>,
     timeout: u64,
     ini: Vec<(String, String)>,
     root: Option<PathBuf>,
@@ -75,6 +79,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         quiet: false,
         jobs: default_jobs(),
         php: None,
+        php_cgi: None,
         timeout: 60,
         ini: Vec::new(),
         root: None,
@@ -125,6 +130,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
                     .map_err(|_| "bad -j value".to_string())?;
             }
             "--php" => o.php = Some(value(&mut it, "--php")?.into()),
+            "--php-cgi" => o.php_cgi = Some(value(&mut it, "--php-cgi")?.into()),
             "--timeout" => {
                 let v = value(&mut it, "--timeout")?;
                 o.timeout = v
@@ -258,6 +264,25 @@ fn idx(s: Status) -> usize {
     }
 }
 
+fn cgi_link_dir_name() -> String {
+    format!("goro-phpt-cgi-{}", std::process::id())
+}
+
+/// A `php-cgi` symbolic link to `php` in a directory of its own under the
+/// temporary directory (removed after the run).
+fn cgi_link(php: &Path) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join(cgi_link_dir_name());
+    std::fs::create_dir(&dir).ok()?;
+    let link = dir.join("php-cgi");
+    match std::os::unix::fs::symlink(php, &link) {
+        Ok(()) => Some(link),
+        Err(_) => {
+            let _ = std::fs::remove_dir(&dir);
+            None
+        }
+    }
+}
+
 /// `goro --test ARGS...`: returns the process exit code.
 pub fn test_main(args: &[OsString]) -> i32 {
     let o = match parse_options(args) {
@@ -378,6 +403,32 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
     }
     files.dedup();
     let extensions = Extensions::probe(&php, &root);
+    let cgi = match (&o.php_cgi, &o.php) {
+        (Some(c), _) => Some(runner::CgiCommand {
+            program: find_program(c),
+            args: Vec::new(),
+        }),
+        // goro is the CGI SAPI when run as php-cgi: a link with that name
+        // can be given to tests as one program (TEST_PHP_CGI_EXECUTABLE).
+        (None, None) => Some(match cgi_link(&php) {
+            Some(program) => runner::CgiCommand {
+                program,
+                args: Vec::new(),
+            },
+            None => runner::CgiCommand {
+                program: php.clone(),
+                args: vec!["--cgi".into()],
+            },
+        }),
+        (None, Some(_)) => php
+            .parent()
+            .map(|d| d.join("php-cgi"))
+            .filter(|c| c.is_file())
+            .map(|program| runner::CgiCommand {
+                program,
+                args: Vec::new(),
+            }),
+    };
     let cfg = Config {
         php: php.clone(),
         root,
@@ -389,6 +440,7 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         mem_limit: (o.mem_limit_mb > 0).then_some(o.mem_limit_mb << 20),
         heavy: o.heavy,
         online: o.online,
+        cgi,
     };
     let jobs = schedule::jobs(&files);
     let all: Mutex<(Vec<TestResult>, Counts)> =
@@ -423,6 +475,15 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
             g.0.push(r);
         }
     });
+    if let Some(c) = &cfg.cgi
+        && let Some(dir) = c.program.parent()
+        && dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == cgi_link_dir_name())
+    {
+        let _ = std::fs::remove_file(&c.program);
+        let _ = std::fs::remove_dir(dir);
+    }
     let (results_list, counts) = all.into_inner().unwrap();
     let elapsed = start.elapsed();
     let c = counts.by_status;

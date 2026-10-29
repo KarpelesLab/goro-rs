@@ -385,6 +385,11 @@ fn get_meta_tags(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// request_parse_body() (PHP manual; RFC "Expose request_parse_body()"):
 /// the request body as [$_POST, $_FILES], with option overrides.
 fn request_parse_body(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let mut limits = crate::cli_server::upload::Limits::from_ini(vm);
+    let mut post_max = vm
+        .get_ini(b"post_max_size")
+        .map(|v| crate::vm::setup::parse_size(&v))
+        .unwrap_or(8 << 20);
     if let Some(Value::Array(opts)) = a.get(0).map(|v| v.deref()) {
         for (k, v) in opts.iter() {
             let k = match k {
@@ -411,11 +416,23 @@ fn request_parse_body(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 return vm.throw("ValueError", "Invalid array value in $options argument");
             }
             let s = vm.to_php_str(&v)?;
-            if size {
-                let (_, w) = crate::vm::setup::parse_quantity(&s);
+            let n = if size {
+                let (n, w) = crate::vm::setup::parse_quantity(&s);
                 if let Some(w) = w {
                     vm.warn(&w)?;
                 }
+                n
+            } else {
+                goro_runtime::convert::str_to_int(s.trim_ascii())
+            };
+            // The options replace the ini settings (tests
+            // ext/standard/tests/http/request_parse_body/multipart_options_*).
+            match &k[..] {
+                b"post_max_size" => post_max = n,
+                b"upload_max_filesize" => limits.upload_max_filesize = n,
+                b"max_input_vars" => limits.max_input_vars = n,
+                b"max_multipart_body_parts" => limits.max_parts = n,
+                _ => limits.max_file_uploads = n,
             }
         }
     }
@@ -432,25 +449,36 @@ fn request_parse_body(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let body = vm.out.sapi.input.clone();
     let mime = ct
-        .split(|&c| c == b';')
+        .split(|&c| c == b';' || c == b',')
         .next()
         .unwrap_or_default()
         .trim_ascii()
         .to_ascii_lowercase();
     let mut post = PhpArray::new();
     let mut files = PhpArray::new();
+    if post_max > 0 && body.len() as i64 > post_max {
+        return vm.throw(
+            "RequestParseBodyException",
+            &format!(
+                "POST Content-Length of {} bytes exceeds the limit of {} bytes",
+                body.len(),
+                post_max
+            ),
+        );
+    }
     match &mime[..] {
         b"application/x-www-form-urlencoded" => {
             post = super::string::parse_query(&body, b"&");
         }
         b"multipart/form-data" => {
-            let Some(b) = crate::cli_server::upload::boundary(&ct) else {
-                return vm.throw(
-                    "RequestParseBodyException",
-                    "Missing boundary in multipart/form-data POST data",
-                );
+            let b = match crate::cli_server::upload::boundary(&ct) {
+                Ok(b) => b,
+                Err(m) => return vm.throw("RequestParseBodyException", m),
             };
-            crate::cli_server::upload::parse(vm, &body, &b, &mut post, &mut files);
+            let r = crate::cli_server::upload::parse(vm, &body, &b, limits, &mut post, &mut files);
+            if let Err(m) = r {
+                return vm.throw("RequestParseBodyException", &m);
+            }
         }
         _ => {
             return vm.throw(

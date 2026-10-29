@@ -23,7 +23,10 @@
 //!   `--` inside ARGS to reach the script.
 //! - FLAKY tests (section or SKIPIF answer) are retried once on failure.
 //! - XFAIL tests that fail report XFAIL; ones that pass report PASS.
-//! - Tests needing a web SAPI or phpdbg are skipped until those exist.
+//! - Tests with request sections (GET, POST, COOKIE, CGI...) or
+//!   EXPECTHEADERS run through the CGI SAPI (see [`crate::cgi`]), with
+//!   `-C` so the working directory stays the root; the SKIPIF and CLEAN
+//!   code still runs with the CLI. Tests needing phpdbg are skipped.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -102,6 +105,15 @@ pub struct Config {
     pub heavy: bool,
     /// Run tests reaching hosts on the Internet (see [`ONLINE_TESTS`]).
     pub online: bool,
+    /// How to run the CGI SAPI; none: tests needing it are skipped.
+    pub cgi: Option<CgiCommand>,
+}
+
+/// The CGI SAPI binary and the arguments that come first (`goro --cgi`).
+#[derive(Debug, Clone)]
+pub struct CgiCommand {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
 }
 
 /// Tests that reach hosts on the Internet without checking
@@ -361,7 +373,7 @@ pub fn base_env(cfg: &Config) -> Env {
         extra.push(format!("{k}={v}"));
     }
     let extra: Vec<String> = extra.iter().map(|s| shell_quote(s)).collect();
-    vec![
+    let mut env: Env = vec![
         ("TEST_PHP_EXECUTABLE".into(), php.clone().into()),
         (
             "TEST_PHP_EXECUTABLE_ESCAPED".into(),
@@ -375,7 +387,18 @@ pub fn base_env(cfg: &Config) -> Env {
             "SKIP_ONLINE_TESTS".into(),
             std::env::var_os("SKIP_ONLINE_TESTS").unwrap_or_else(|| "1".into()),
         ),
-    ]
+    ];
+    // run-tests' name for the CGI binary (tests/basic/gh16998.phpt), when
+    // it is one program.
+    if let Some(c) = &cfg.cgi
+        && c.args.is_empty()
+    {
+        env.push((
+            "TEST_PHP_CGI_EXECUTABLE".into(),
+            c.program.clone().into_os_string(),
+        ));
+    }
+    env
 }
 
 /// Runs the test at `path` (and, for a REDIRECTTEST, the tests it points
@@ -445,6 +468,40 @@ fn prepare(
         stem,
         ini_args,
         env,
+    })
+}
+
+/// Runs the test script through the CGI SAPI.
+fn exec_cgi(
+    cfg: &Config,
+    cgi: &CgiCommand,
+    prep: &Prepared,
+    script: &Path,
+    args: &[String],
+    req: &crate::cgi::Request,
+    capture: Capture,
+) -> std::io::Result<RunOutput> {
+    let mut argv = cgi.args.clone();
+    argv.push("-C".into());
+    argv.extend(prep.ini_args.iter().cloned());
+    argv.push("-f".into());
+    argv.push(script.into());
+    if !args.is_empty() {
+        argv.push("--".into());
+        argv.extend(args.iter().map(OsString::from));
+    }
+    // The ENV section comes last: it can change the request's variables.
+    let mut env = req.env.clone();
+    env.extend(prep.env.iter().cloned());
+    run(&Run {
+        program: &cgi.program,
+        args: &argv,
+        cwd: &cfg.root,
+        env: &env,
+        stdin: req.body.as_deref(),
+        capture,
+        timeout: cfg.timeout,
+        mem_limit: cfg.mem_limit,
     })
 }
 
@@ -594,14 +651,18 @@ fn run_single_inner(
             "reaches the Internet (run with --online)",
         );
     }
-    if let Some(sec) = phpt.cgi_section() {
-        return result(
-            name,
-            &title,
-            Status::Skip,
-            format!("needs the CGI SAPI (--{sec}--)"),
-        );
-    }
+    let cgi = match (phpt.cgi_section(), &cfg.cgi) {
+        (None, _) => None,
+        (Some(_), Some(c)) => Some(c),
+        (Some(sec), None) => {
+            return result(
+                name,
+                &title,
+                Status::Skip,
+                format!("needs the CGI SAPI (--{sec}--), and no CGI binary was found"),
+            );
+        }
+    };
     if phpt.has("PHPDBG") {
         return result(name, &title, Status::Skip, "needs phpdbg (--PHPDBG--)");
     }
@@ -647,18 +708,44 @@ fn run_single_inner(
         .unwrap_or_default();
     let stdin = phpt.get("STDIN");
     let capture = capture_spec(phpt);
+    let request = cgi.map(|_| {
+        let mut r = crate::cgi::request(phpt, &script_path.to_string_lossy());
+        if r.body.is_none() {
+            r.body = stdin.map(<[u8]>::to_vec);
+        }
+        r
+    });
+    let want_headers = phpt
+        .get("EXPECTHEADERS")
+        .map(crate::cgi::expected_headers)
+        .unwrap_or_default();
 
     let mut attempts = if flaky { 2 } else { 1 };
     let outcome = loop {
         attempts -= 1;
-        let out = match exec(cfg, &prep, &script_path, &args, stdin, capture) {
+        let out = match (cgi, &request) {
+            (Some(c), Some(req)) => exec_cgi(cfg, c, &prep, &script_path, &args, req, capture),
+            _ => exec(cfg, &prep, &script_path, &args, stdin, capture),
+        };
+        let out = match out {
             Ok(o) => o,
             Err(e) => break Err(format!("cannot run {}: {e}", cfg.php.display())),
         };
-        let actual = normalize(&out.output);
-        let ok = matches!(out.exit, Exit::Code(_)) && matcher.is_match(&actual);
+        // A CGI response: the headers are checked, the body compared.
+        let (body, header_problem) = if cgi.is_some() {
+            let (headers, body) = crate::cgi::split_response(&out.output);
+            let problem = crate::cgi::check_headers(&want_headers, &headers)
+                .map(|m| (m, crate::cgi::header_text(&headers)));
+            (body, problem)
+        } else {
+            (out.output, None)
+        };
+        let actual = normalize(&body);
+        let ok = matches!(out.exit, Exit::Code(_))
+            && header_problem.is_none()
+            && matcher.is_match(&actual);
         if ok || attempts == 0 {
-            break Ok((ok, out.exit, actual));
+            break Ok((ok, out.exit, actual, header_problem));
         }
     };
     if let Some(code) = phpt.get("CLEAN") {
@@ -667,7 +754,7 @@ fn run_single_inner(
     if !cfg.keep {
         let _ = std::fs::remove_file(&script_path);
     }
-    let (ok, exit, actual) = match outcome {
+    let (ok, exit, actual, header_problem) = match outcome {
         Ok(x) => x,
         Err(e) => return result(name, &title, Status::Bork, e),
     };
@@ -678,7 +765,26 @@ fn run_single_inner(
         Exit::Timeout => format!("timed out after {}s", cfg.timeout.as_secs()),
         Exit::Signal(s) => format!("killed by signal {s}"),
         Exit::TooMuchOutput => format!("more than {} bytes of output", crate::proc::OUTPUT_LIMIT),
-        Exit::Code(_) => "output differs".to_string(),
+        Exit::Code(_) => match &header_problem {
+            Some((missing, _)) if matcher.is_match(&actual) => {
+                format!("headers differ (missing {missing})")
+            }
+            Some((missing, _)) => format!("output and headers differ (missing {missing})"),
+            None => "output differs".to_string(),
+        },
+    };
+    // With wrong headers, the details show them before the body.
+    let (expected, actual) = match &header_problem {
+        Some((_, got)) => {
+            let mut e = crate::cgi::header_text(&want_headers);
+            e.push(b'\n');
+            e.extend_from_slice(&expected);
+            let mut a = got.clone();
+            a.push(b'\n');
+            a.extend_from_slice(&actual);
+            (e, a)
+        }
+        None => (expected, actual),
     };
     if cfg.keep {
         let _ = std::fs::write(prep.file(".out"), &actual);
