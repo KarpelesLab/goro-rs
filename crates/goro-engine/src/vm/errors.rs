@@ -771,7 +771,8 @@ impl Vm {
                 )
             };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
-                if f.flags & frame_flags::ATTACHED == 0 {
+                // (6: a front controller's file, without a frame of its own)
+                if f.flags & frame_flags::ATTACHED == 0 || f.line_hint == 6 {
                     continue;
                 }
                 let fname = match f.line_hint {
