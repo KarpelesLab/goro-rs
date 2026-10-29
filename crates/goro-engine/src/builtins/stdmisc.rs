@@ -263,7 +263,7 @@ thread_local! {
 fn stream_set_chunk_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let size = a.int(1);
     let id = match a.val(0) {
-        Value::Resource(r) => r.id() as i64,
+        Value::Resource(r) => r.id(),
         _ => 0,
     };
     super::file::with_stream(vm, a, 0, |_, _| Ok(()))?;

@@ -3337,7 +3337,7 @@ fn scandir(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm,
                 a,
                 &d,
-                &format!("Failed to open directory: {}", &io_err_msg(&e)),
+                &format!("Failed to open directory: {}", io_err_msg(&e)),
             )?;
             vm.fwarn(a, "(errno 2): No such file or directory")?;
             Ok(Value::Bool(false))
@@ -3389,7 +3389,7 @@ pub(crate) fn opendir(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 vm,
                 a,
                 &d,
-                &format!("Failed to open directory: {}", &io_err_msg(&e)),
+                &format!("Failed to open directory: {}", io_err_msg(&e)),
             )?;
             Ok(Value::Bool(false))
         }

@@ -1184,9 +1184,8 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     .unwrap_or(false)
             };
             if user_obj(&r).is_some() {
-                match user_cast_fd(vm, a, &r, 0)? {
-                    Some(fd) => entries.push((si, key, Some(fd))),
-                    None => {}
+                if let Some(fd) = user_cast_fd(vm, a, &r, 0)? {
+                    entries.push((si, key, Some(fd)));
                 }
                 continue;
             }

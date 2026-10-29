@@ -166,10 +166,11 @@ pub fn image_size(
     if d.len() >= 12 && d.starts_with(b"RIFF") && &d[8..12] == b"WEBP" {
         return webp(d);
     }
-    if d.len() >= 12 && &d[4..8] == b"ftyp" {
-        if let Some(i) = isobmff(d) {
-            return Some(i);
-        }
+    if d.len() >= 12
+        && &d[4..8] == b"ftyp"
+        && let Some(i) = isobmff(d)
+    {
+        return Some(i);
     }
     if let Some(i) = wbmp(d) {
         return Some(i);
