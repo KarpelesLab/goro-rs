@@ -103,10 +103,13 @@ impl Vm {
             }
         })?;
         let consts = &self.constants;
+        let attrs = &self.const_attrs;
         let kc = |n: &[u8]| -> Option<Value> {
             // Only engine constants that can't be redefined; deprecated
-            // ones warn at run time.
-            if crate::builtins::misc::const_deprecation(n).is_some() {
+            // ones (also those with attributes) warn at run time.
+            if crate::builtins::misc::const_deprecation(n).is_some()
+                || attrs.contains_key(&PhpStr::new(n))
+            {
                 return None;
             }
             let v = consts.get(&PhpStr::new(n))?;

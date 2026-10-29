@@ -453,6 +453,21 @@ fn prepare(
             }
         }
     }
+    // php-src's CI loads zend_test for every test; a test that only asks
+    // for it in SKIPIF (`function_exists('zend_test_…')`) gets it too, when
+    // the binary can load it.
+    if phpt
+        .get("SKIPIF")
+        .is_some_and(|s| s.windows(9).any(|w| w == b"zend_test"))
+        && !phpt
+            .get_list("EXTENSIONS", false)
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case("zend_test"))
+        && let ExtAction::Load(setting) = cfg.extensions.action("zend_test")
+    {
+        let (k, v) = setting.split_once('=').unwrap_or((&setting, ""));
+        push(k, v);
+    }
     let ini = parse_ini(&phpt.get_list("INI", false), &dir, &cfg.tmp);
     for (k, v) in &ini {
         push(k, v);
