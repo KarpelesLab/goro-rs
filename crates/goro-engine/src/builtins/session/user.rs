@@ -263,11 +263,18 @@ pub(super) fn session_set_save_handler(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let mut cbs = Vec::new();
         for (i, p) in PARAMS.iter().enumerate() {
             let v = a.val(i);
-            if i >= CREATE && matches!(v, Value::Null) {
-                cbs.push(None);
+            if i >= a.len() {
+                // Optional callbacks not given keep the previous ones (test
+                // session_set_save_handler_multiple.phpt).
+                let prev = st(vm)
+                    .user
+                    .as_ref()
+                    .filter(|u| u.obj.is_none())
+                    .and_then(|u| u.cbs.get(i).cloned().flatten());
+                cbs.push(prev);
                 continue;
             }
-            if i >= a.len() {
+            if i >= CREATE && matches!(v, Value::Null) {
                 cbs.push(None);
                 continue;
             }
@@ -313,6 +320,10 @@ pub(super) fn session_set_save_handler(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// handler; only the files handler can be called (test
 /// session_set_save_handler_error5.phpt).
 fn default_check(vm: &mut Vm) -> R<()> {
+    // (test user_session_module/bug55688.phpt)
+    if !st(vm).active {
+        return vm.throw("Error", "Session is not active");
+    }
     let files = match st(vm).default_files {
         Some(f) => f,
         None => super::module_of(vm) == Some(Mod::Files),

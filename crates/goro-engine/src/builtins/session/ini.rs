@@ -124,10 +124,18 @@ fn check(vm: &mut Vm, k: &[u8], v: &[u8], runtime: bool) -> R<bool> {
         }
         b"session.save_handler" => {
             if v == b"user" {
-                if runtime {
-                    warn(vm, "Session save handler \"user\" cannot be set by ini_set()")?;
+                if !runtime {
+                    // A startup error that does not stop the request (tests
+                    // user_session_module/bug60860.phpt, class_014).
+                    super::raise(
+                        vm,
+                        crate::vm::errors::E_CORE_ERROR,
+                        "Session save handler \"user\" cannot be set by ini_set()",
+                    )?;
                     return Ok(false);
                 }
+                warn(vm, "Session save handler \"user\" cannot be set by ini_set()")?;
+                return Ok(false);
             } else if v != b"files" && runtime {
                 warn(
                     vm,
@@ -274,7 +282,17 @@ pub(super) fn startup_ini(vm: &mut Vm, given: &[(Vec<u8>, Vec<u8>)]) {
         let Some((_, v)) = given.iter().rev().find(|(n, _)| n == k.as_bytes()) else {
             continue;
         };
-        let v = v.clone();
+        let mut v = v.clone();
+        if def.len() <= 1 && !k.ends_with("lifetime") {
+            // php.ini booleans read as "1" and "" (test
+            // session_set_cookie_params_variation4.phpt: TRUE is "1").
+            match &v.to_ascii_lowercase()[..] {
+                b"true" | b"on" | b"yes" => v = b"1".to_vec(),
+                b"false" | b"off" | b"no" | b"none" => v = Vec::new(),
+                _ => {}
+            }
+            vm.set_ini(k.as_bytes(), &v);
+        }
         match check(vm, k.as_bytes(), &v, false) {
             Ok(true) => {}
             Ok(false) => vm.set_ini(k.as_bytes(), def.as_bytes()),

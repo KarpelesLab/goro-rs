@@ -234,8 +234,18 @@ fn sent_from(vm: &Vm) -> String {
     }
 }
 
+/// The headers were sent: output started (startup diagnostics don't
+/// count: tests 015.phpt, bug66481.phpt print them before
+/// session_start()).
 pub(crate) fn headers_sent(vm: &Vm) -> bool {
-    super::headers::sent(vm)
+    vm.out.sapi.sent
+        || (vm.out.written > 0
+            && vm
+                .out
+                .sapi
+                .output_start
+                .as_ref()
+                .is_some_and(|(f, l)| !f.is_empty() || *l > 0))
 }
 
 /// The warning of a setter called while a session is active.
@@ -489,7 +499,10 @@ fn initialize(vm: &mut Vm) -> R<bool> {
     match mod_open(vm, m, &path, &name) {
         Ok(true) => {}
         Ok(false) => {
+            // The handler is closed (test gh13856.phpt).
+            let r = mod_close(vm, m);
             fail_reset(vm);
+            r?;
             warn(
                 vm,
                 &format!(
@@ -505,6 +518,9 @@ fn initialize(vm: &mut Vm) -> R<bool> {
             return Err(e);
         }
     }
+    // $_SESSION exists once the module opened, even if reading fails
+    // (tests session_set_save_handler_error2.phpt, class_012).
+    bind_vars(vm, PhpArray::new());
     let r = settle_id(vm, m);
     match r {
         Ok(true) => {}
@@ -541,8 +557,6 @@ fn initialize(vm: &mut Vm) -> R<bool> {
         return Ok(false);
     };
     st(vm).data_read = Some(data.clone());
-    // $_SESSION is a new array for the data.
-    bind_vars(vm, PhpArray::new());
     if !decode_into(vm, &data)? {
         decode_failed(vm)?;
         return Ok(false);
@@ -588,10 +602,12 @@ fn settle_id(vm: &mut Vm, m: Mod) -> R<bool> {
     Ok(true)
 }
 
-/// The session did not start.
+/// The session did not start: no ID (test
+/// session_set_save_handler_class_005.phpt).
 fn fail_reset(vm: &mut Vm) {
     let s = st(vm);
     s.active = false;
+    s.id = None;
 }
 
 /// Runs the garbage collection with probability gc_probability /
@@ -722,7 +738,11 @@ fn send_cookie(vm: &mut Vm) -> R<()> {
     if ini_bool(vm, "session.cookie_partitioned") {
         h.extend_from_slice(b"; Partitioned");
     }
-    super::headers::add_header(vm, &h, false, 0)?;
+    // The CLI keeps no headers (observed on PHP 8.5: headers_list() is
+    // empty).
+    if vm.out.sapi.server {
+        super::headers::add_header(vm, &h, false, 0)?;
+    }
     Ok(())
 }
 
@@ -792,8 +812,10 @@ fn cache_limiter(vm: &mut Vm) -> R<bool> {
             return Ok(true);
         }
     }
-    for l in lines {
-        super::headers::add_header(vm, l.as_bytes(), true, 0)?;
+    if vm.out.sapi.server {
+        for l in lines {
+            super::headers::add_header(vm, l.as_bytes(), true, 0)?;
+        }
     }
     Ok(true)
 }
@@ -917,7 +939,7 @@ fn session_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 read_and_close = match &v {
                     Value::Str(s) => {
                         match goro_runtime::numeric::is_numeric_str(s) {
-                            true => goro_runtime::convert::str_to_float(s) != 0.0,
+                            true => goro_runtime::convert::str_to_float(s) >= 1.0,
                             false => {
                                 return vm.fthrow(
                                     a,
@@ -930,7 +952,9 @@ fn session_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
                             }
                         }
                     }
-                    Value::Int(i) => *i != 0,
+                    // A positive int (test session_start_read_and_close.phpt:
+                    // -1 keeps the session open).
+                    Value::Int(i) => *i > 0,
                     Value::Bool(b) => *b,
                     _ => false,
                 };
@@ -1009,9 +1033,14 @@ fn save_state(vm: &mut Vm) -> R<()> {
     Ok(())
 }
 
-/// Writes and closes the active session.
+/// Writes and closes the active session. A write that throws or exits
+/// skips the close (test user_session_module/bug60634.phpt).
 fn flush(vm: &mut Vm) -> R<()> {
     let r = save_state(vm);
+    if r.is_err() {
+        end_session(vm, false);
+        return r;
+    }
     let m = st(vm).module;
     let c = mod_close(vm, m);
     end_session(vm, false);
@@ -1063,6 +1092,7 @@ fn session_destroy(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     };
     let c = mod_close(vm, m);
     end_session(vm, true);
+    st(vm).vars = None;
     c?;
     if !ok {
         warn(vm, "Session object destruction failed")?;
@@ -1098,8 +1128,14 @@ fn session_gc(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     })
 }
 
+/// PHP_SESSION_DISABLED when no save handler module is usable (test
+/// session_status_disabled.phpt).
 fn session_status(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Int(if st(vm).active { 2 } else { 1 }))
+    if st(vm).active {
+        return Ok(Value::Int(2));
+    }
+    let h = ini_str(vm, "session.save_handler");
+    Ok(Value::Int(if matches!(&h[..], b"files" | b"user") { 1 } else { 0 }))
 }
 
 fn session_register_shutdown(vm: &mut Vm, _a: &mut Args) -> R<Value> {
@@ -1124,7 +1160,12 @@ fn rshutdown(vm: &mut Vm) {
     st(vm).phase = Phase::Shutdown;
     if st(vm).active {
         let r = flush(vm);
+        let thrown = matches!(r, Err(crate::vm::Unwind::Throw(_)));
         vm.handle_unwind(r);
+        if thrown {
+            // (test user_session_module/bug60634_error_4.phpt)
+            let _ = warn(vm, "Cannot call session save handler in a recursive manner");
+        }
     }
     ini::shutdown_restore(vm);
     st(vm).phase = Phase::Run;
@@ -1132,15 +1173,19 @@ fn rshutdown(vm: &mut Vm) {
 
 // ---------------------------------------------------------------- encode / decode
 
+/// The variables of the last session, active or not; none after
+/// session_destroy() (test session_encode_variation1.phpt).
 fn session_encode(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    let ok = st(vm).active && vars_array(vm).is_some();
+    let ok = vars_array(vm).is_some();
     if !ok {
         warn(vm, "Cannot encode non-existent session")?;
         return Ok(Value::Bool(false));
     }
+    // No variables encode to nothing, which is false (tests
+    // session_encode_variation*.phpt).
     Ok(match encode_vars(vm, false)? {
-        Some(d) => Value::Str(PhpStr::from(d)),
-        None => Value::Bool(false),
+        Some(d) if !d.is_empty() => Value::Str(PhpStr::from(d)),
+        _ => Value::Bool(false),
     })
 }
 
@@ -1168,7 +1213,7 @@ fn session_id(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if active_refusal(vm, "Session ID cannot be changed")? {
             return Ok(Value::Bool(false));
         }
-        if sent_refusal(vm, "Session ID cannot be changed")? {
+        if ini_bool(vm, "session.use_cookies") && sent_refusal(vm, "Session ID cannot be changed")? {
             return Ok(Value::Bool(false));
         }
         // The ID is a C string (observed on PHP 8.5: "a\0b" sets "a").

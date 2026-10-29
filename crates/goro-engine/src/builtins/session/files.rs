@@ -57,7 +57,12 @@ pub(super) fn open(vm: &mut Vm, save_path: &[u8]) -> R<bool> {
             )
         }
     };
-    if !dir.is_empty() && !vm.basedir_allows(dir) {
+    let dir_b = if dir.is_empty() {
+        temp_dir(vm).as_os_str().as_bytes().to_vec()
+    } else {
+        dir.to_vec()
+    };
+    if !vm.basedir_allows(&dir_b) {
         let bd = vm
             .get_ini(b"open_basedir")
             .map(|v| v.to_string_lossy())
@@ -66,7 +71,7 @@ pub(super) fn open(vm: &mut Vm, save_path: &[u8]) -> R<bool> {
             vm,
             &format!(
                 "open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
-                String::from_utf8_lossy(dir),
+                String::from_utf8_lossy(&dir_b),
                 bd
             ),
         )?;
