@@ -566,22 +566,23 @@ impl Image {
                 self.line(cx, cy, fx, fy, color);
             }
         } else {
-            // A pie: a fan of triangles from the centre, one per degree,
-            // whose union is painted once (imagefilledarc_basic.png,
-            // imagegammacorrect_basic.png).
+            // A pie: the polygon of the centre and the arc points,
+            // filled, plus the arc's horizontal steps, painted once
+            // (imagefilledarc_basic.png, imagegammacorrect_basic.png,
+            // bug73614.png).
             let fill_color = if color == ANTIALIASED {
                 self.aa_color
             } else {
                 color
             };
             let mut spans = Vec::new();
-            let mut prev = pts[1];
-            for &p in &pts[2..] {
-                polygon_spans(&[(cx, cy), prev, p], 0, self.sy - 1, &mut spans);
-                prev = p;
-            }
-            if pts.len() == 2 {
-                polygon_spans(&[(cx, cy), pts[1]], 0, self.sy - 1, &mut spans);
+            polygon_spans(&pts, 0, self.sy - 1, &mut spans);
+            // Horizontal steps of the arc, which the scanline fill
+            // leaves out.
+            for w in pts[1..].windows(2) {
+                if w[0].1 == w[1].1 {
+                    spans.push((w[0].1, w[0].0.min(w[1].0), w[0].0.max(w[1].0)));
+                }
             }
             self.paint_spans(&mut spans, fill_color);
         }
@@ -966,4 +967,51 @@ pub fn arc_point(cx: i32, cy: i32, w: i32, h: i32, deg: i32) -> (i32, i32) {
         cx + ((ct * w as i64 / 2) / 1024) as i32,
         cy + ((st * h as i64 / 2) / 1024) as i32,
     )
+}
+
+/// The pixels of a one-pixel Bresenham line (as imageline draws it).
+pub fn line_points(x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
+    let mut out = Vec::new();
+    let dx = (x2 - x1).abs();
+    let dy = (y2 - y1).abs();
+    if dy <= dx {
+        let mut d = 2 * dy - dx;
+        let (incr1, incr2) = (2 * dy, 2 * (dy - dx));
+        let (mut x, mut y, xend, ydir) = if x1 > x2 {
+            (x2, y2, x1, if y1 < y2 { -1 } else { 1 })
+        } else {
+            (x1, y1, x2, if y2 < y1 { -1 } else { 1 })
+        };
+        out.push((x, y));
+        while x < xend {
+            x += 1;
+            if d < 0 {
+                d += incr1;
+            } else {
+                y += ydir;
+                d += incr2;
+            }
+            out.push((x, y));
+        }
+    } else {
+        let mut d = 2 * dx - dy;
+        let (incr1, incr2) = (2 * dx, 2 * (dx - dy));
+        let (mut x, mut y, yend, xdir) = if y1 > y2 {
+            (x2, y2, y1, if x1 < x2 { -1 } else { 1 })
+        } else {
+            (x1, y1, y2, if x2 < x1 { -1 } else { 1 })
+        };
+        out.push((x, y));
+        while y < yend {
+            y += 1;
+            if d < 0 {
+                d += incr1;
+            } else {
+                x += xdir;
+                d += incr2;
+            }
+            out.push((x, y));
+        }
+    }
+    out
 }
