@@ -1377,8 +1377,39 @@ fn run_xinclude(vm: &mut Vm, fname: &str, d: NodeId, flags: u32) -> R<i64> {
         vm: vm as *mut Vm,
         _p: std::marker::PhantomData,
     };
+    // Node objects of the document whose nodes the substitution removes
+    // become unusable (observed on PHP 8.5: "Invalid State Error"; test
+    // gh17847.phpt).
+    let before: Vec<(NodeId, goro_runtime::WeakObj)> = xmlstore::with(|s| {
+        s.dom_objs
+            .iter()
+            .filter(|(n, _)| {
+                **n != d
+                    && s.arena.is_live(**n)
+                    && s.arena.doc_of(**n) == d
+                    && s.arena.is_connected(**n)
+            })
+            .map(|(n, w)| (*n, w.clone()))
+            .collect()
+    });
     let (n, errs) =
         xmlstore::with(|s| goro_xml::xinclude::process(&mut s.arena, d, flags, &mut host));
+    let gone: Vec<goro_runtime::ObjRef> = xmlstore::with(|s| {
+        let mut v = Vec::new();
+        for (id, w) in before {
+            if !s.arena.is_live(id) || !s.arena.is_connected(id) {
+                s.dom_objs.remove(&id);
+                if let Some(o) = w.upgrade() {
+                    v.push(o);
+                }
+            }
+        }
+        v
+    });
+    for o in gone {
+        let old = o.obj().native.borrow_mut().take();
+        drop(old);
+    }
     host.loader.finish(vm)?;
     libxml::report(vm, fname, &errs, Style::Dom, flags, None)?;
     Ok(n as i64)
@@ -2041,7 +2072,22 @@ pub(crate) fn dom_import_simplexml(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.obj(0).unwrap();
     let n = simplexml_node(&o);
     match n {
-        Some(n) => wrap_node(vm, n),
+        Some(n) => {
+            // A document is imported one way only (observed on PHP 8.5;
+            // test dom_import_simplexml.phpt).
+            let modern = a.func.lname.as_bytes().starts_with(b"dom\\");
+            let d = with_arena(|ar| ar.doc_of(n));
+            let prev = with_settings(d, |s| *s.sxe_imported.get_or_insert(modern));
+            if prev != modern {
+                let other = if prev { "Dom\\Node" } else { "DOMNode" };
+                return vm.fthrow(
+                    a,
+                    "TypeError",
+                    &format!("Argument #1 ($node) must not be already imported as a {other}"),
+                );
+            }
+            wrap_node(vm, n)
+        }
         None => vm.fthrow(
             a,
             "TypeError",

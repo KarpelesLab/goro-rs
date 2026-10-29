@@ -284,7 +284,22 @@ fn compute_items(s: &mut xmlstore::Store, kind: &ListKind, modern: bool) -> Vec<
                 return Vec::new();
             }
             if matches!(a.data(*n), NodeData::EntityRef(_)) {
-                return super::chardata::entity_decl_of(s, *n).into_iter().collect();
+                let Some(d) = super::chardata::entity_decl_of(s, *n) else {
+                    return Vec::new();
+                };
+                if modern {
+                    return vec![d];
+                }
+                // Legacy: the declaration and the ones after it (observed
+                // on PHP 8.5; test entity_reference_stale_02.phpt).
+                let Some(dt) = s.arena.doc(s.arena.doc_of(*n)).doctype else {
+                    return vec![d];
+                };
+                let all = super::chardata::dtd_nodes(s, dt, true);
+                return match all.iter().position(|&x| x == d) {
+                    Some(i) => all[i..].to_vec(),
+                    None => vec![d],
+                };
             }
             let a = &mut s.arena;
             match a.data(*n) {
@@ -363,7 +378,9 @@ fn l_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Value) -> R<Value> {
     // Legacy child lists iterate by node: the next one is the current
     // one's next sibling, none once it was removed (test gh13863.phpt).
-    if let Some((ListKind::Children(parent), false)) = list_of(o) {
+    if let Some((ListKind::Children(parent), false)) = list_of(o)
+        && !with_arena(|a| a.is_live(parent) && matches!(a.data(parent), NodeData::EntityRef(_)))
+    {
         let cur = match state {
             Value::Null => {
                 let f = with_arena(|a| {
@@ -407,13 +424,28 @@ fn iter_step(vm: &mut Vm, o: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Val
         list_of(o).map(|l| l.0),
         Some(ListKind::Attrs(_) | ListKind::Entities(_) | ListKind::Notations(_))
     );
+    // An entity reference's list keeps the object it moved to (it stays
+    // usable once the declarations go; test entity_reference_stale_02.phpt).
+    let keeps = matches!(list_of(o), Some((ListKind::Children(p), false))
+        if with_arena(|a| a.is_live(p) && matches!(a.data(p), NodeData::EntityRef(_))));
     match op {
-        ExtIterOp::Valid => Ok(Value::Bool(pos < v.len())),
+        ExtIterOp::Valid => Ok(Value::Bool(
+            pos < v.len() || (keeps && matches!(state, Value::Object(_))),
+        )),
         ExtIterOp::Current => match v.get(pos) {
+            _ if keeps && matches!(state, Value::Object(_)) => Ok(state.clone()),
             Some(&n) => wrap_node(vm, n),
             None => Ok(Value::Null),
         },
-        ExtIterOp::Next => Ok(Value::Null),
+        ExtIterOp::Next => {
+            if keeps {
+                *state = match v.get(pos + 1) {
+                    Some(&n) => wrap_node(vm, n)?,
+                    None => Value::Null,
+                };
+            }
+            Ok(Value::Null)
+        }
         ExtIterOp::Key => {
             if is_map && let Some(&n) = v.get(pos) {
                 let name = with_arena(|a| a.node_name(n));

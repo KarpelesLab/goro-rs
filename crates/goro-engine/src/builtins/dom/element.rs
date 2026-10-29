@@ -1624,6 +1624,17 @@ fn convert_nodes(
                     );
                 }
                 let s = vm.to_php_str(&v)?;
+                // Test parentnode_childnode_too_long_text.phpt.
+                if s.len() > i32::MAX as usize {
+                    return vm.fthrow(
+                        a,
+                        "ValueError",
+                        &format!(
+                            "Argument #{} must be less than or equal to 2147483647 bytes long",
+                            i + 1
+                        ),
+                    );
+                }
                 let t = with_arena(|ar| ar.new_text(doc, s8(&s)));
                 holds.push(xmlstore::with(|st| st.hold(t)));
                 out.push(t);

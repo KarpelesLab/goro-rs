@@ -115,7 +115,45 @@ fn process_inner(
         let xpointer = arena.get_attribute(inc, "xpointer").or(fragment);
         let doc_of_inc = arena.doc_of(inc);
         let mut replacement: Option<Vec<NodeId>> = None;
-        match host.load(&file, url.as_deref()) {
+        // No href: the xpointer selects from this document (XInclude 1.0
+        // 4.2; test ext/dom/tests/bug43364.phpt).
+        let local = file.is_empty() && parse != "text";
+        if local {
+            let expr = xpointer
+                .as_deref()
+                .and_then(|xp| xp.strip_prefix("xpointer("))
+                .and_then(|s| s.strip_suffix(')'));
+            match expr.and_then(|e| host.xpath(arena, doc_of_inc, e)) {
+                Some(v) => {
+                    let picked: Vec<NodeId> = v
+                        .into_iter()
+                        .filter(|&n| !arena.is_inclusive_ancestor(n, inc))
+                        .collect();
+                    let copies = picked
+                        .into_iter()
+                        .map(|n| arena.clone_node(n, doc_of_inc, true))
+                        .collect();
+                    replacement = Some(copies);
+                }
+                None => {
+                    let xp = xpointer.clone().unwrap_or_default();
+                    err(
+                        errors,
+                        LEVEL_ERROR,
+                        1612,
+                        format!("XPointer evaluation failed: #{xp}"),
+                        line,
+                        &url,
+                    );
+                }
+            }
+        }
+        let loaded = if local {
+            Err(LoadError::Refused)
+        } else {
+            host.load(&file, url.as_deref())
+        };
+        match loaded {
             Ok(bytes) => {
                 if parse == "text" {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -185,11 +223,15 @@ fn process_inner(
                 let fb = arena.children(inc).find(|&c| is_xi(arena, c, "fallback"));
                 match fb {
                     Some(f) => {
+                        // Copies: the fallback goes away with the include
+                        // element (observed on PHP 8.5: objects of its
+                        // nodes become invalid; test ext/dom/tests/
+                        // gh17847.phpt).
                         let kids: Vec<NodeId> = arena.children(f).collect();
-                        for &k in &kids {
-                            arena.detach(k);
-                        }
-                        kids
+                        let doc = arena.doc_of(f);
+                        kids.into_iter()
+                            .map(|k| arena.clone_node(k, doc, true))
+                            .collect()
                     }
                     None => {
                         err(
@@ -200,6 +242,10 @@ fn process_inner(
                             line,
                             &url,
                         );
+                        // The include element goes anyway (observed on
+                        // PHP 8.5; test ext/dom/tests/gh17847.phpt).
+                        arena.detach(inc);
+                        arena.free_subtree(inc);
                         continue;
                     }
                 }
