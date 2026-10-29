@@ -1258,24 +1258,20 @@ impl PhpArray {
     #[inline(always)]
     pub fn make_mut(&mut self) -> &mut ArrayData {
         let rc = self.0.get_or_insert_with(|| Rc::new(ArrayData::new()));
-        // A unique array with a weak pointer (its GC root entry) would be
-        // moved to a new allocation by `make_mut`: its root entry goes
-        // first (as when the original is freed), which also avoids the
-        // move.
-        if Rc::strong_count(rc) == 1 && Rc::weak_count(rc) > 0 {
-            let f = rc.flags.get();
-            if f & A_GC_BUFFERED != 0 {
-                rc.flags.set(f & !A_GC_BUFFERED);
-                crate::gc::remove_root(rc.gc_idx.get(), Rc::as_ptr(rc) as usize);
-            }
+        if Rc::strong_count(rc) == 1 {
+            // A unique array is written in place, even when the cycle
+            // collector's root buffer holds a weak pointer to it (which
+            // `Rc::make_mut` would answer by moving the data, and so cost
+            // a root removal and a re-buffering on every write of an array
+            // that is also read through temporaries). The root entry stays
+            // valid: it still points at this allocation.
+            // SAFETY: this is the only strong handle and it is borrowed
+            // mutably; weak handles never reach the data without upgrading,
+            // and nothing upgrades them while the returned borrow lives
+            // (the collector runs only at the engine's safe points).
+            return unsafe { &mut *(Rc::as_ptr(rc) as *mut ArrayData) };
         }
-        // Moved anyway (another weak pointer): the flag goes with it.
-        let moved = Rc::strong_count(rc) == 1 && Rc::weak_count(rc) > 0;
-        let d = Rc::make_mut(rc);
-        if moved {
-            d.flags.set(d.flags.get() & !A_GC_BUFFERED);
-        }
-        d
+        Rc::make_mut(rc)
     }
 
     /// Number of handles sharing this array's data (0 for the empty array).

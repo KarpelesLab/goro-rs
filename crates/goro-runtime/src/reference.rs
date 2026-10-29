@@ -78,6 +78,14 @@ impl PhpRef {
         self.0.val.borrow_mut()
     }
 
+    /// A raw pointer to the referenced value, for engine fast paths that
+    /// write in place without holding a borrow. The caller must not keep
+    /// it across anything that may borrow the cell or drop the reference.
+    #[inline]
+    pub fn as_ptr(&self) -> *mut Value {
+        self.0.val.as_ptr()
+    }
+
     /// Number of slots bound to this reference.
     #[inline]
     pub fn refcount(&self) -> usize {
