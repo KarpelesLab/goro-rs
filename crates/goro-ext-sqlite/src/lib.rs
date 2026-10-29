@@ -146,6 +146,12 @@ impl SqlError {
             E::Unsupported(m) => format!("not supported: {m}"),
             other => other.to_string(),
         };
+        // graphitesql's text for writes to a read-only connection.
+        let msg = if msg == "database is read-only" {
+            errstr(SQLITE_READONLY).to_string()
+        } else {
+            msg
+        };
         let code = if msg == "attempt to write a readonly database" {
             SQLITE_READONLY
         } else if msg.starts_with("not authorized") {
@@ -238,6 +244,12 @@ pub struct Rows {
 }
 
 thread_local! {
+    /// Names (lower case) of the user functions registered.
+    static UDF_NAMES: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+    /// The resolution calls still expected per user function for the
+    /// statement running.
+    static DRY_BUDGET: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
     /// Collations registered by name (graphitesql keeps collations in a
     /// process-wide table of `Send` functions; the PHP callbacks live here).
     #[allow(clippy::type_complexity)]
@@ -529,6 +541,7 @@ impl Db {
         let mut sql = std::borrow::Cow::Borrowed(st.sql.as_str());
         let mut tries = 0;
         loop {
+            Self::set_dry_budget(&sql);
             let r = match st.kind {
                 Kind::Query => self.conn.query_params(&sql, &params).map(|q| Rows {
                     columns: q.columns,
@@ -543,19 +556,66 @@ impl Db {
                     .execute_params(&sql, &params)
                     .map(|_| Rows::default()),
             };
+            DRY_BUDGET.with(|b| b.borrow_mut().clear());
             match r {
                 Ok(rows) => return Ok(rows),
                 Err(e) => {
-                    let e = SqlError::from_engine(&e);
+                    let mut e = SqlError::from_engine(&e);
                     match dqs_rewrite(&sql, &e) {
                         Some(s) if tries < 32 => {
                             sql = std::borrow::Cow::Owned(s);
                             tries += 1;
                         }
-                        _ => return Err(e),
+                        _ => {
+                            self.refine_pk(&mut e);
+                            return Err(e);
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// A UNIQUE failure on exactly the table's PRIMARY KEY columns (or
+    /// rowid alias) is SQLITE_CONSTRAINT_PRIMARYKEY (rescode.html), which
+    /// graphitesql's message doesn't tell apart.
+    fn refine_pk(&self, e: &mut SqlError) {
+        if e.ext_code != 2067 {
+            return;
+        }
+        let Some(list) = e.msg.strip_prefix("UNIQUE constraint failed: ") else {
+            return;
+        };
+        let mut table: Option<&str> = None;
+        let mut cols = Vec::new();
+        for part in list.split(", ") {
+            let Some((t, c)) = part.split_once('.') else {
+                return;
+            };
+            if table.is_some_and(|x| x != t) {
+                return;
+            }
+            table = Some(t);
+            cols.push(c.to_ascii_lowercase());
+        }
+        let Some(table) = table else { return };
+        let q = format!("PRAGMA table_info({})", scan::quote_ident(table));
+        let Ok(r) = self.conn.query(&q) else { return };
+        let mut pk: Vec<(i64, String)> = r
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let n = match row.get(5)? {
+                    Value::Integer(n) if *n > 0 => *n,
+                    _ => return None,
+                };
+                Some((n, text(row.get(1)?)?.to_ascii_lowercase()))
+            })
+            .collect();
+        pk.sort();
+        let pk: Vec<String> = pk.into_iter().map(|(_, n)| n).collect();
+        if !pk.is_empty() && pk == cols {
+            e.ext_code = 1555;
         }
     }
 
@@ -605,7 +665,45 @@ impl Db {
         name: &str,
         f: impl Fn(&[Value]) -> graphitesql::Result<Value> + 'static,
     ) {
-        self.conn.register_function(name, f);
+        // graphitesql calls each user function once with NULL arguments
+        // before running a statement, to check that the name resolves; the
+        // calls the statement's text accounts for are answered here
+        // without running the user's function (see `dry_budget`).
+        let key = name.to_ascii_lowercase();
+        UDF_NAMES.with(|u| u.borrow_mut().insert(key.clone()));
+        self.conn.register_function(name, move |args: &[Value]| {
+            if args.iter().all(|a| matches!(a, Value::Null)) {
+                let dry = DRY_BUDGET.with(|b| {
+                    let mut b = b.borrow_mut();
+                    match b.get_mut(&key) {
+                        Some(n) if *n > 0 => {
+                            *n -= 1;
+                            true
+                        }
+                        _ => false,
+                    }
+                });
+                if dry {
+                    return Ok(Value::Null);
+                }
+            }
+            f(args)
+        });
+    }
+
+    /// Sets the dry-resolve allowance of each user function for one
+    /// statement: the number of times its name is called in the text.
+    fn set_dry_budget(sql: &str) {
+        let names = UDF_NAMES.with(|u| u.borrow().clone());
+        let mut budget = HashMap::new();
+        if !names.is_empty() {
+            for name in scan::called_names(sql) {
+                if names.contains(&name) {
+                    *budget.entry(name).or_insert(0usize) += 1;
+                }
+            }
+        }
+        DRY_BUDGET.with(|b| *b.borrow_mut() = budget);
     }
 
     /// A user aggregate.

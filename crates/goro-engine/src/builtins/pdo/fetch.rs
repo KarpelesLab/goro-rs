@@ -405,7 +405,11 @@ fn build(
                     }
                     FETCH_BOTH => {
                         arr.insert(Key::from_bytes(name.as_bytes()), v.clone());
-                        arr.insert(Key::Int(i as i64), v);
+                        // A numeric index doesn't replace a column named
+                        // like it (test bug_79106_collision.phpt).
+                        if arr.get_int(i as i64).is_none() {
+                            arr.insert(Key::Int(i as i64), v);
+                        }
                     }
                     _ => {
                         let k = Key::from_bytes(name.as_bytes());
@@ -656,7 +660,7 @@ pub fn fetch(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     }
     serialize_deprecation(vm, "PDOStatement::fetch", spec.mode)?;
-    if base(spec.mode) == FETCH_CLASS && spec.class.is_none() && spec.mode & FETCH_CLASSTYPE == 0 {
+    if base(mode) == FETCH_CLASS && spec.class.is_none() && spec.mode & FETCH_CLASSTYPE == 0 {
         spec.class = vm.core.std_class.clone();
     }
     fetch_one(vm, &o, "PDOStatement::fetch", &spec)
@@ -789,11 +793,10 @@ pub fn fetch_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 );
             }
         }
-        FETCH_CLASS => {
-            if spec.class.is_none() && spec.mode & FETCH_CLASSTYPE == 0 {
-                spec.class = vm.core.std_class.clone();
-            }
-        }
+        // The default mode without its class or function: the fetch
+        // reports it (test bug_38253.phpt).
+        FETCH_CLASS => {}
+        FETCH_FUNC if b != FETCH_FUNC => {}
         FETCH_COLUMN if b == FETCH_COLUMN => {
             if args.len() > 1 {
                 expects(vm, "at most", 2)?;
@@ -969,19 +972,35 @@ fn iter_step(vm: &mut Vm, st: &ObjRef, pos: usize, op: ExtIterOp, state: &mut Va
 
 fn iter_fetch(vm: &mut Vm, st: &ObjRef) -> R<Value> {
     let fm = with_st(st, |s| s.fetch.clone()).unwrap_or_default();
-    let mut spec: Spec = fm.into();
-    if base(spec.mode) == FETCH_CLASS && spec.class.is_none() && spec.mode & FETCH_CLASSTYPE == 0 {
-        spec.class = vm.core.std_class.clone();
-    }
+    let spec: Spec = fm.into();
     fetch_one(vm, st, "PDOStatement::getIterator", &spec)
+}
+
+thread_local! {
+    /// Statements whose user getIterator() is running.
+    static USER_ITER: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub fn iterator_hook(vm: &mut Vm, o: &ObjRef, _by_ref: bool) -> R<ObjRef> {
     let cls = vm.class_of(o);
-    if let Some(f) = cls.find_method(b"getiterator")
+    let id = o.handle();
+    // A user getIterator() is used by foreach, but iterating the statement
+    // from inside it (IteratorIterator($this)) gets the internal iterator
+    // (test pdo_014.phpt).
+    let inside = USER_ITER.with(|u| u.borrow().contains(&id));
+    if !inside
+        && let Some(f) = cls.find_method(b"getiterator")
         && !f.is_native()
     {
-        return match vm.call_method(o, b"getiterator", Vec::new())? {
+        USER_ITER.with(|u| u.borrow_mut().push(id));
+        let r = vm.call_method(o, b"getiterator", Vec::new());
+        USER_ITER.with(|u| {
+            let mut u = u.borrow_mut();
+            if let Some(p) = u.iter().rposition(|&x| x == id) {
+                u.remove(p);
+            }
+        });
+        return match r? {
             Value::Object(it) => Ok(it),
             _ => vm.throw(
                 "Exception",

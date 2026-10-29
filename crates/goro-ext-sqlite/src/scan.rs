@@ -259,6 +259,28 @@ pub fn scan_params(sql: &str) -> Vec<Param> {
     params
 }
 
+/// The names (lower case) written as function calls, `name(`, outside
+/// strings, quoted identifiers and comments; once per call.
+pub fn called_names(sql: &str) -> Vec<String> {
+    let s = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut prev: Option<(usize, usize)> = None;
+    while let Some((t, st, e)) = next_tok(s, i) {
+        if let (Some((ps, pe)), Tok::Other) = (prev, &t)
+            && s[st] == b'('
+        {
+            out.push(String::from_utf8_lossy(&s[ps..pe]).to_ascii_lowercase());
+        }
+        prev = match t {
+            Tok::Word(_) => Some((st, e)),
+            _ => None,
+        };
+        i = e;
+    }
+    out
+}
+
 /// The leading keyword of a statement (upper case), skipping comments.
 pub fn first_keyword(sql: &str) -> String {
     match next_tok(sql.as_bytes(), 0) {
@@ -281,6 +303,62 @@ pub fn has_keyword(sql: &str, kw: &str) -> bool {
         i = e;
     }
     false
+}
+
+/// SQL bytes as the UTF-8 text graphitesql parses. Bytes that aren't
+/// UTF-8 inside a `'…'` literal are kept exactly, by writing that part as
+/// `CAST(X'…' AS TEXT)` concatenated with the rest of the literal
+/// (lang_expr.html: `||`, CAST); elsewhere they become U+FFFD.
+pub fn sql_from_bytes(b: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(b) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(b.len() + 16);
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\'' {
+            let end = skip_quoted(b, i, b'\'');
+            let body = &b[i + 1..end.saturating_sub(1).max(i + 1)];
+            if std::str::from_utf8(body).is_ok() {
+                out.push_str(&String::from_utf8_lossy(&b[i..end]));
+            } else {
+                // Split into valid runs and hex runs.
+                out.push('(');
+                let mut parts: Vec<String> = Vec::new();
+                let mut rest = body;
+                while !rest.is_empty() {
+                    match std::str::from_utf8(rest) {
+                        Ok(s) => {
+                            parts.push(format!("'{s}'"));
+                            rest = &[];
+                        }
+                        Err(e) => {
+                            let good = e.valid_up_to();
+                            if good > 0 {
+                                let s = std::str::from_utf8(&rest[..good]).unwrap_or("");
+                                parts.push(format!("'{s}'"));
+                            }
+                            let bad = e.error_len().unwrap_or(rest.len() - good);
+                            let hex: String =
+                                rest[good..good + bad].iter().map(|c| format!("{c:02X}")).collect();
+                            parts.push(format!("CAST(X'{hex}' AS TEXT)"));
+                            rest = &rest[good + bad..];
+                        }
+                    }
+                }
+                out.push_str(&parts.join("||"));
+                out.push(')');
+            }
+            i = end;
+        } else {
+            let start = i;
+            while i < b.len() && b[i] != b'\'' {
+                i += 1;
+            }
+            out.push_str(&String::from_utf8_lossy(&b[start..i]));
+        }
+    }
+    out
 }
 
 /// `'…'` quoting with doubled single quotes (SQLite's `%q`).

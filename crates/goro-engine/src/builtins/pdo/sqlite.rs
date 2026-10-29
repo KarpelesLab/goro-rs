@@ -209,7 +209,7 @@ impl Driver for SqliteDriver {
         sql: &[u8],
         _opts: &PhpArray,
     ) -> DResult<Box<dyn DriverStmt>> {
-        let text = String::from_utf8_lossy(sql).into_owned();
+        let text = gs::scan::sql_from_bytes(sql);
         let r = self.conn.borrow().db.prepare(&text);
         match r {
             Ok((st, _tail)) => {
@@ -230,7 +230,7 @@ impl Driver for SqliteDriver {
     }
 
     fn exec(&mut self, vm: &mut Vm, sql: &[u8]) -> DResult<i64> {
-        let text = String::from_utf8_lossy(sql).into_owned();
+        let text = gs::scan::sql_from_bytes(sql);
         // sqlite3_changes(): the rows changed by the last INSERT, UPDATE
         // or DELETE, even when later statements changed none (test
         // pdosqlite_setauthorizer.phpt: a SELECT after an INSERT gives 1).
