@@ -427,6 +427,9 @@ impl Vm {
                         {
                             return Ok(v.deref());
                         }
+                        if !quiet && name.starts_with(b"\0") {
+                            return self.nul_prop_error();
+                        }
                         if !quiet {
                             self.warn(&format!(
                                 "Undefined property: {}::${}",
@@ -1167,6 +1170,9 @@ impl Vm {
 
     fn create_dynamic_prop(&mut self, o: &ObjRef, cls: &Class, name: &PhpStr) -> R<()> {
         let _ = o;
+        if name.starts_with(b"\0") {
+            return self.nul_prop_error();
+        }
         if cls.has_flag(cflags::NO_DYNAMIC) || cls.has_flag(cflags::READONLY) || cls.is_enum() {
             return self.throw(
                 "Error",
@@ -1824,9 +1830,18 @@ impl Vm {
                     self.prop_guards.pop();
                     return r.map(|_| ());
                 }
+                if name.starts_with(b"\0") {
+                    return self.nul_prop_error();
+                }
                 Ok(())
             }
         }
+    }
+
+    /// A dynamic property name starting with NUL (observed on PHP 8.5;
+    /// tests Zend/tests/magic_methods/bug52484*).
+    fn nul_prop_error<T>(&mut self) -> R<T> {
+        self.throw("Error", "Cannot access property starting with \"\\0\"")
     }
 
     // ------------------------------------------------------------ static properties
