@@ -2312,14 +2312,17 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn ref_of(&mut self, e: &'a Expr<'a>) -> CResult<Reg> {
         match &e.kind {
-            ExprKind::Variable(n) if *n != b"this" => {
+            ExprKind::Variable(n) if *n != b"this" && !is_superglobal(n) => {
                 let var = self.cv(n);
                 let d = self.tmp();
                 self.emit(Op::RefVar { dst: d, var });
                 Ok(d)
             }
-            ExprKind::Variable(_) => self.err("Cannot re-assign $this", e.span.line),
-            ExprKind::VariableVariable(_)
+            ExprKind::Variable(n) if *n == b"this" => {
+                self.err("Cannot re-assign $this", e.span.line)
+            }
+            ExprKind::Variable(_)
+            | ExprKind::VariableVariable(_)
             | ExprKind::Index { .. }
             | ExprKind::Prop { .. }
             | ExprKind::StaticProp(_) => {
@@ -2777,8 +2780,13 @@ impl<'a> Compiler<'a> {
         if matches!(target.kind, ExprKind::List { .. } | ExprKind::Array { .. }) {
             return self.err("Cannot assign reference to non referenceable value", line);
         }
-        // `$a = &$b` between plain variables.
-        if let (ExprKind::Variable(a), ExprKind::Variable(b)) = (&target.kind, &value.kind) {
+        // `$a = &$b` between plain variables (superglobals are not local:
+        // `$s = &$_SESSION` binds the global, test ext/session/tests/
+        // bug70013.phpt).
+        if let (ExprKind::Variable(a), ExprKind::Variable(b)) = (&target.kind, &value.kind)
+            && !is_superglobal(a)
+            && !is_superglobal(b)
+        {
             if *a == b"this" {
                 return self.err("Cannot re-assign $this", line);
             }
