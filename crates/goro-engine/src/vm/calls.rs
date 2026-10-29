@@ -1318,6 +1318,15 @@ impl Vm {
             Value::Str(s) => s,
             _ => return self.throw("Error", "Method name must be a string"),
         };
+        // `$closure->__invoke(...)` calls the closure itself, by-reference
+        // parameters included (test Zend/tests/closures/
+        // closure_invoke_case_insensitive).
+        if n.as_bytes().eq_ignore_ascii_case(b"__invoke")
+            && let Some(cd) = self.closure_data(&o)
+        {
+            self.push_callee(cd, pending_flags::INTERNAL_CALLER);
+            return Ok(());
+        }
         let cls = self.class_of(&o);
         let cb = self.resolve_method(&o, &cls, &n, true)?;
         let check_init = cls.has_flag(crate::class::cflags::CHECK_INIT);
@@ -2621,6 +2630,7 @@ impl Vm {
         let call_loc = if via_cuf {
             Some((self.cur_file(), self.cur_line()))
         } else if entry
+            || p.flags & pending_flags::INTERNAL_CALLER != 0
             || self.ex.frames.is_empty()
             || (p.argc >= code.num_required
                 && !p.has_named

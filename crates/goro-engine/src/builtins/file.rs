@@ -1137,6 +1137,13 @@ fn fwrite(vm: &mut Vm, a: &mut Args) -> R<Value> {
         None => data.len(),
     };
     with_stream(vm, a, 0, |vm, s| {
+        // Directory handles (observed on PHP 8.5; test ext/phar/tests/027).
+        if matches!(s.backing, Backing::Dir { .. }) {
+            if s.wrapper == "plainfile" {
+                vm.notice_msg("fwrite(): Stream is not writable")?;
+            }
+            return Ok(Value::Bool(false));
+        }
         if !s.writable {
             vm.notice_msg(&format!(
                 "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
@@ -1283,6 +1290,11 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Backing::File(f) => Value::Int(f.stream_position().map(|p| p as i64).unwrap_or(0)),
             Backing::Memory { pos, .. } => Value::Int(*pos as i64),
             Backing::User { .. } => Value::Int(s.upos),
+            Backing::Dir { pos, .. } => Value::Int(if s.wrapper == "plainfile" {
+                0
+            } else {
+                *pos as i64
+            }),
             Backing::Native(n) => match n.tell() {
                 Some(p) => Value::Int(p as i64),
                 None => Value::Bool(false),
@@ -1293,6 +1305,27 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> bool {
+    // Directory handles: a plain directory only rewinds; a wrapper's
+    // listing (phar://) seeks among its entries (observed on PHP 8.5;
+    // test ext/phar/tests/027).
+    let plain = s.wrapper == "plainfile";
+    if let Backing::Dir { entries, pos } = &mut s.backing {
+        let base = match whence {
+            1 => *pos as i64,
+            2 => entries.len() as i64,
+            _ => 0,
+        };
+        let n = base.saturating_add(off);
+        if n < 0 {
+            return false;
+        }
+        if !plain {
+            *pos = (n as usize).min(entries.len());
+        } else if n == 0 {
+            *pos = 0;
+        }
+        return true;
+    }
     if matches!(s.backing, Backing::User { .. }) {
         return match super::userstream::seek(vm, s, off, whence) {
             Ok(b) => b,

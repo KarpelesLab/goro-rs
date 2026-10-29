@@ -62,6 +62,8 @@ pub struct GenData {
     /// Pending calls open across a yield (`f(yield $x)`), with the values
     /// of their reserved slots.
     pub saved_pending: Vec<(Pending, Vec<Slot>)>,
+    /// Being destroyed with a `finally` to run: yielding is an error.
+    pub force_closed: bool,
     /// Advanced past the first yield (rewind no longer allowed).
     pub advanced: bool,
     /// The generator function, its closure object and class scope; kept
@@ -105,6 +107,25 @@ impl goro_runtime::NativeData for GenData {
         if let Some((_, Some(c), _)) = &self.func_info {
             visit(&Value::Object(c.clone()));
         }
+        // Calls open across a yield hold their arguments (test
+        // Zend/tests/generators/gh9750-001).
+        for (p, slots) in &self.saved_pending {
+            for v in slots.iter().flatten() {
+                visit(v);
+            }
+            for v in p.args.iter().chain(p.extra.iter()) {
+                visit(v);
+            }
+            if let Some(n) = &p.named_extra {
+                visit(&Value::Array(n.clone()));
+            }
+            if let Some(t) = &p.this {
+                visit(&Value::Object(t.clone()));
+            }
+            if let Some(c) = &p.closure {
+                visit(&Value::Object(c.clone()));
+            }
+        }
     }
     fn clear(&mut self) {
         if let Some(fi) = &mut self.func_info {
@@ -115,6 +136,16 @@ impl goro_runtime::NativeData for GenData {
         }
         self.frame = None;
         self.delegate = None;
+        // An object whose constructor call never ran gets no destructor
+        // (test Zend/tests/generators/gh9750-008).
+        for (p, _) in &self.saved_pending {
+            if p.flags & super::pending_flags::NEW != 0
+                && let Some(t) = &p.this
+            {
+                t.mark_destructor_called();
+            }
+        }
+        self.saved_pending.clear();
         self.key = Value::Null;
         self.value = Value::Null;
         self.ret = None;
@@ -197,6 +228,16 @@ impl Vm {
                         } else {
                             o.clone()
                         };
+                        // A by-reference getIterator() generator (test
+                        // Zend/tests/generators/generator_method_by_ref).
+                        if self.is_generator_obj(&it) && self.gen_by_ref(&it) {
+                            self.gen_rewind_traverse(&it)?;
+                            unsafe {
+                                *sa = Some(Value::Object(it));
+                                *sb = Some(enc(M_GEN_FIRST, 0));
+                            }
+                            return Ok(true);
+                        }
                         if !crate::builtins::spl::ai_iterates_by_ref(self, &it) {
                             return self.throw(
                                 "Error",
@@ -759,6 +800,7 @@ impl Vm {
             delegate_fresh: false,
             yield_dst: NONE,
             saved_pending: Vec::new(),
+            force_closed: false,
             advanced: false,
         };
         *o.obj().native.borrow_mut() = Some(Box::new(data));
@@ -1077,6 +1119,16 @@ impl Vm {
 
     /// `yield`: suspends the generator frame.
     pub(crate) fn op_yield(&mut self, dst: Reg, val: Reg, key: Reg) -> R<Option<Value>> {
+        // A `finally` run by the generator's destruction can't yield
+        // (test Zend/tests/generators/errors/yield_in_force_closed_finally_error).
+        if let Some(g) = self.frame().generator.clone()
+            && self.with_gen(&g, |d| d.force_closed).unwrap_or(false)
+        {
+            return self.throw(
+                "Error",
+                "Cannot yield from finally in a force-closed generator",
+            );
+        }
         let by_ref = self.code_ref().flags & fflags::BY_REF != 0;
         let v = if val == NONE {
             Value::Null
@@ -1158,6 +1210,16 @@ impl Vm {
 
     pub(crate) fn op_yield_from(&mut self, dst: Reg, src: Reg) -> R<Option<Value>> {
         let v = self.get(src)?;
+        // Test Zend/tests/generators/yield_from_force_closed.
+        if let Some(g) = self.frame().generator.clone()
+            && self.with_gen(&g, |d| d.force_closed).unwrap_or(false)
+        {
+            drop(v);
+            return self.throw(
+                "Error",
+                "Cannot use \"yield from\" in a force-closed generator",
+            );
+        }
         let g = self
             .frame()
             .generator

@@ -1184,6 +1184,11 @@ impl Vm {
                 PhpStr::from(out)
             }
             Value::Object(o) => {
+                // A closure is named after its function (test Zend/tests/
+                // closures/closure_016).
+                if let Some(cd) = self.closure_data(o) {
+                    return PhpStr::from(cd.func.display_name());
+                }
                 let c = self.class_of(o);
                 PhpStr::from(format!("{}::__invoke", c.name.dname()))
             }

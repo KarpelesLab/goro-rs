@@ -442,8 +442,30 @@ fn closure_hooks() -> NativeHooks {
     NativeHooks {
         clone: Some(closure_clone),
         debug_props: Some(closure_debug),
+        compare: Some(closure_compare),
         ..Default::default()
     }
+}
+
+/// Two closures are equal when they run the same function with the same
+/// `$this`, scope and magic method name (test Zend/tests/closures/
+/// closure_compare).
+fn closure_compare(vm: &mut Vm, a: &Value, b: &Value) -> Option<R<i32>> {
+    let (Value::Object(x), Value::Object(y)) = (a, b) else {
+        return None;
+    };
+    let (cx, cy) = (vm.closure_data(x)?, vm.closure_data(y)?);
+    let same_this = match (&cx.this, &cy.this) {
+        (Some(p), Some(q)) => ObjRef::ptr_eq(p, q),
+        (None, None) => true,
+        _ => false,
+    };
+    let eq = Rc::ptr_eq(&cx.func, &cy.func)
+        && same_this
+        && std::ptr::eq(cx.scope, cy.scope)
+        && std::ptr::eq(cx.static_class, cy.static_class)
+        && cx.magic_name == cy.magic_name;
+    Some(Ok(if eq { 0 } else { 1 }))
 }
 
 fn closure_clone(vm: &mut Vm, from: &ObjRef, to: &ObjRef) {
@@ -798,7 +820,10 @@ fn gen_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .find_class(b"GeneratorExit_", false)?
         .expect("GeneratorExit_");
     let marker = vm.instantiate_raw(&cls)?;
-    vm.with_gen(&g, |d| d.delegate = None);
+    vm.with_gen(&g, |d| {
+        d.delegate = None;
+        d.force_closed = true;
+    });
     match vm.gen_resume(&g, None, Some(marker.clone())) {
         Err(crate::vm::Unwind::Throw(e)) if ObjRef::ptr_eq(&e, &marker) => Ok(Value::Null),
         Err(e) => Err(e),
