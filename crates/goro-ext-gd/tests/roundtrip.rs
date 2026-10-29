@@ -7,7 +7,11 @@ fn sample_truecolor() -> Image {
     let mut im = Image::new_truecolor(37, 21).unwrap();
     for y in 0..21 {
         for x in 0..37 {
-            im.put_raw(x, y, tc(x * 7 % 256, y * 11 % 256, (x + y) % 256, (x % 3) * 40));
+            im.put_raw(
+                x,
+                y,
+                tc(x * 7 % 256, y * 11 % 256, (x + y) % 256, (x % 3) * 40),
+            );
         }
     }
     im.save_alpha = true;
@@ -104,5 +108,8 @@ fn bilevel_formats() {
 fn ellipse_points_truncate_toward_the_centre() {
     // imagearc_basic.png: a 30x30 arc reaches x = 64 at 10 degrees.
     assert_eq!(goro_ext_gd::draw::arc_point(50, 50, 30, 30, 10), (64, 52));
-    assert_eq!(goro_ext_gd::draw::arc_point(250, 250, 500, 250, 120), (125, 358));
+    assert_eq!(
+        goro_ext_gd::draw::arc_point(250, 250, 500, 250, 120),
+        (125, 358)
+    );
 }
