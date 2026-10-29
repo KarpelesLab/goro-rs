@@ -193,7 +193,18 @@ the XML extensions each pass 87-100% of their tests that run.
   (SWC through goro-ext-zlib, AVIF/HEIF properties, SVG), `iptcparse()`
   and `iptcembed()`. Checked against PHP 8.5 output on the ext/exif,
   ext/standard/tests/image and ext/gd test images and crafted files;
-  ext/exif and ext/standard/tests/image: 131 of 131 tests that run pass.
+  ext/exif and ext/standard/tests/image: 132 of 132 tests that run pass.
+- `goro-ext-gd`: ext/gd as bundled libgd 2.1 behaves: palette and
+  truecolor images with GD's 7-bit alpha and layer effects, color
+  allocation/matching, lines (thick, dashed, styled, brushed, tiled,
+  antialiased), rectangles, polygons, arcs and pies as GD rasterizes
+  them, fills, copy/merge/resize/resample, rotate/scale/crop/affine,
+  `imagefilter()`/convolution/gamma, median-cut palette conversion,
+  the five built-in fonts and `.gdf` fonts, TrueType/OpenType text
+  (oxideav-ttf outlines, own coverage rasterizer), and the PNG, GIF,
+  BMP, WBMP, XBM, XPM, TGA, GD and GD2 codecs written here plus JPEG,
+  WebP and AVIF through oxideav. Drawing is pixel-exact against the
+  tests' reference images; ext/gd: 303 of 308 tests that run pass.
 - `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
   xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
   error codes, messages and positions, DTDs, entities, LIBXML_* options and

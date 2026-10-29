@@ -2486,7 +2486,3 @@ fn imageaffinematrixconcat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     Ok(affine_value(&tr::affine_concat(&m1, &m2)))
 }
-
-// keep the image helper module referenced
-#[allow(dead_code)]
-fn _unused(_: gi::Shared) {}
