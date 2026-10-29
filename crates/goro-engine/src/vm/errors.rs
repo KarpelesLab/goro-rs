@@ -727,7 +727,7 @@ impl Vm {
                         .func
                         .scope()
                         .is_some_and(|c| c.lname.as_bytes() == b"fiber");
-                if direct_cuf(natives) || gen_dtor(natives) || fiber_dtor {
+                if direct_cuf(natives) || gen_dtor(natives) || fiber_dtor || nc.hidden {
                     continue;
                 }
                 let mut e = self.native_trace_frame(ex, nc, i, with_args);

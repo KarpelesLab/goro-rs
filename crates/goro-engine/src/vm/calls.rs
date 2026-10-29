@@ -2218,12 +2218,17 @@ impl Vm {
         // The call is on the stack while its arguments are checked: their
         // errors show it in traces (observed on PHP 8.5; tests
         // Zend/tests/exceptions/exception_018 and others).
+        let hidden = std::ptr::eq(self.hide_native, Rc::as_ptr(&func));
+        if hidden {
+            self.hide_native = std::ptr::null();
+        }
         self.ex.native_calls.push(super::NativeCall {
             func: func.clone(),
             args: &args as *const Vec<Value>,
             this: this.clone(),
             depth: self.ex.frames.len() as u32,
             line: self.cur_line(),
+            hidden,
         });
         if let Err(e) = self.prepare_native_args(&func, &sig, &mut args, passed, has_named) {
             self.ex.native_calls.pop();
@@ -2554,7 +2559,31 @@ impl Vm {
                         };
                         matches!(&c[..], b"self" | b"parent" | b"static")
                     };
-                    if relative(&args[i]) {
+                    // ["C", "B::m"] deprecates when B is C or an ancestor
+                    // (test tests/classes/abstract_user_call), not otherwise
+                    // (ext/standard/tests/general_functions/callbacks_001).
+                    let qualified = match args[i].deref() {
+                        Value::Array(a) if a.len() == 2 => {
+                            let base = match a.get_int(0).map(|x| x.deref()) {
+                                Some(Value::Object(o)) => Some(self.class_of(&o)),
+                                Some(Value::Str(c)) => {
+                                    let saved = self.err.deferred.take();
+                                    let r = self.find_class(&c, false).ok().flatten();
+                                    self.err.deferred = saved;
+                                    r
+                                }
+                                _ => None,
+                            };
+                            match (base, a.get_int(1).map(|x| x.deref())) {
+                                (Some(b), Some(Value::Str(m))) => {
+                                    matches!(self.qualified_method(&b, &m), Some(Ok(_)))
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    };
+                    if relative(&args[i]) || qualified {
                         self.callable_deprecation(&args[i])?;
                     }
                     let why = self.callable_error(&args[i]);

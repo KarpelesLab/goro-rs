@@ -213,6 +213,9 @@ pub struct NativeCall {
     /// Frame depth at the call.
     pub depth: u32,
     pub line: u32,
+    /// Called by the engine itself (foreach over an internal iterator):
+    /// no frame in traces.
+    pub hidden: bool,
 }
 
 const CHUNK: usize = 1 << 16;
@@ -578,6 +581,9 @@ pub struct Vm {
     pub const_cache: Vec<Value>,
     /// `__COMPILER_HALT_OFFSET__` per file.
     pub halt_offsets: HashMap<PhpStr, i64>,
+    /// The native method the engine is about to call for an iteration
+    /// (its NativeCall is hidden from traces).
+    pub hide_native: *const crate::func::Func,
     /// Class constants being evaluated, named as the fetch that started
     /// each one wrote them (for the self-referencing constant error).
     pub const_eval_names: Vec<String>,
