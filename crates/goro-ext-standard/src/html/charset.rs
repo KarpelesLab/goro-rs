@@ -70,6 +70,10 @@ impl Charset {
     /// Looks a charset name up (without the NUL truncation and default
     /// handling of [`super::resolve_charset`]).
     pub fn from_name(name: &[u8]) -> Option<Charset> {
+        // The usual argument, before the table scan.
+        if name.eq_ignore_ascii_case(b"utf-8") {
+            return Some(Charset::Utf8);
+        }
         NAMES
             .iter()
             .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))
