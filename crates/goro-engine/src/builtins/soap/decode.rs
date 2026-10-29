@@ -142,6 +142,11 @@ pub fn from_xml(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Valu
 fn decode_node(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Value> {
     let d = dx.d;
     let mut enc = enc;
+    if let Some(Enc::Builtin(b)) = enc
+        && b.conv == Conv::AnyType
+    {
+        return any_type(vm, dx, n);
+    }
     // xsi:type names the encoding when it is known.
     if let Some((ns, name)) = xsi_type(d, n) {
         let found = super::encode::enc_for(dx.sdl.as_deref(), &ns, &name);
@@ -202,6 +207,37 @@ fn typemap_from_xml(vm: &mut Vm, dx: &mut Dx, ns: &str, name: &str, n: NodeId) -
     };
     let xml = dx.d.to_xml(n);
     vm.call_value(&f, vec![Value::Str(PhpStr::from(xml))])
+}
+
+/// anyType: the instance's xsi:type; a WSDL type's value comes back as a
+/// SoapVar keeping the type (observed on PHP 8.5: enc_type 0, enc_stype
+/// and enc_ns set; test interop/Round4/GroupI/r4_groupI_xsd_028w.phpt).
+fn any_type(vm: &mut Vm, dx: &mut Dx, n: NodeId) -> R<Value> {
+    let d = dx.d;
+    if is_nil(d, n) {
+        return Ok(Value::Null);
+    }
+    let Some((ns, name)) = xsi_type(d, n) else {
+        return guess(vm, dx, n);
+    };
+    if dx.typemap.iter().any(|t| t.ns == ns && t.name == name) {
+        return typemap_from_xml(vm, dx, &ns, &name, n);
+    }
+    match super::encode::enc_for(dx.sdl.as_deref(), &ns, &name) {
+        Some(Enc::Builtin(b)) if b.conv == Conv::AnyType => guess(vm, dx, n),
+        Some(Enc::Builtin(b)) => builtin(vm, dx, b.conv, n),
+        Some(Enc::Type(t)) => {
+            let v = wsdl_type(vm, dx, t, n)?;
+            let cls = vm.find_class(b"SoapVar", false)?.expect("SoapVar");
+            let o = vm.instantiate(&cls)?;
+            vm.set_prop_raw(&o, b"enc_type", Value::Int(0));
+            vm.set_prop_raw(&o, b"enc_value", v);
+            vm.set_prop_raw(&o, b"enc_stype", Value::Str(PhpStr::from(name)));
+            vm.set_prop_raw(&o, b"enc_ns", Value::Str(PhpStr::from(ns)));
+            Ok(Value::Object(o))
+        }
+        None => guess(vm, dx, n),
+    }
 }
 
 /// No type information: arrays, structs or strings by the node's shape.
@@ -407,7 +443,7 @@ fn builtin(vm: &mut Vm, dx: &mut Dx, conv: Conv, n: NodeId) -> R<Value> {
             let t = node_text(d, n);
             Ok(out_str(dx, &t))
         }
-        Conv::AnyType => guess(vm, dx, n),
+        Conv::AnyType => any_type(vm, dx, n),
         Conv::AnyXml => {
             let mut s = String::new();
             for c in d.all_kids(n) {

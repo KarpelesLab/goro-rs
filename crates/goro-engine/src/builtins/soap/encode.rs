@@ -500,7 +500,7 @@ fn soapvar_to_xml(vm: &mut Vm, cx: &mut Cx, o: &ObjRef, el: El, literal: bool) -
     {
         enc = sdl.find_type(sns.as_deref().unwrap_or(""), t);
     }
-    if enc.is_none() && code != types::UNKNOWN_TYPE {
+    if enc.is_none() && code != types::UNKNOWN_TYPE && code != 0 {
         enc = types::by_code(code).map(|b| {
             if b.ns == NS_SOAP11_ENC && cx.version == 2 {
                 Enc::Builtin(types::by_name(NS_SOAP12_ENC, b.name).unwrap_or(b))
@@ -514,7 +514,7 @@ fn soapvar_to_xml(vm: &mut Vm, cx: &mut Cx, o: &ObjRef, el: El, literal: bool) -
         replace_raw(cx, el, &s.to_string_lossy());
         return Ok(());
     }
-    if enc.is_none() && code == types::UNKNOWN_TYPE && stype.is_none() {
+    if enc.is_none() && (code == types::UNKNOWN_TYPE || code == 0) && stype.is_none() {
         return to_xml(vm, cx, None, &val, el, literal);
     }
     to_xml(vm, cx, enc, &val, el, literal)?;

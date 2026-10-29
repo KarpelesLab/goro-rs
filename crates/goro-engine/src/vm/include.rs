@@ -675,7 +675,9 @@ impl Vm {
         name: &PhpStr,
         create: bool,
     ) -> Option<*mut Value> {
-        if owner == usize::MAX {
+        // The main script's frame: its variables are the globals (a
+        // function's `global $x` creates them there).
+        if owner == usize::MAX || self.ex.frames[owner].flags & frame_flags::GLOBAL != 0 {
             return self.global_var_ptr(name, create);
         }
         let f = &mut self.ex.frames[owner];

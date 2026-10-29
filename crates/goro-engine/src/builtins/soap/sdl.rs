@@ -477,6 +477,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let Some(root) = self.d(di).root() else {
             return err(format!("Couldn't find <definitions> in '{url}'"));
         };
+        // wsdl:import of a schema document.
+        if !top && self.d(di).is(root, XSD, "schema") {
+            return self.load_schema(di, root);
+        }
         if !self.d(di).is(root, NS_WSDL, "definitions") {
             return err(format!("Couldn't find <definitions> in '{url}'"));
         }

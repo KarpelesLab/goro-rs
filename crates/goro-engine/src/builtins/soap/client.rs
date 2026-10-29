@@ -502,7 +502,7 @@ fn call_inner(
             Value::Str(PhpStr::from(request)),
             Value::Str(PhpStr::from(location)),
             Value::Str(PhpStr::from(action)),
-            Value::Int(version),
+            Value::Int(cx.version),
             Value::Bool(one_way),
         ],
     )?;
@@ -580,8 +580,7 @@ pub fn write_headers(
         let ns = str_prop(vm, o, "namespace").unwrap_or_default();
         let name = str_prop(vm, o, "name").unwrap_or_default();
         let data = vm.get_prop_raw(o, b"data");
-        let q = cx.doc.qname(Some(h), &ns, &name);
-        let el = cx.doc.add_child(h, &q);
+        let el = cx.doc.add_child(h, &name);
         // A header the WSDL declares is encoded as declared.
         let decl = sdl_headers.iter().find(|d| d.name == name && d.ns == ns);
         let (enc, literal) = match (decl, cx.sdl.clone()) {
@@ -597,6 +596,10 @@ pub fn write_headers(
         if !matches!(data, Value::Null) {
             to_xml(vm, cx, enc, &data, el, literal)?;
         }
+        // The prefix after the content (observed on PHP 8.5; tests
+        // interop/Round4/GroupI/r4_groupI_xsd_03*w.phpt).
+        let q = cx.doc.qname(Some(el), &ns, &name);
+        cx.doc.rename(el, &q);
         if bool_prop(vm, o, "mustUnderstand") {
             let a = format!("{prefix}:mustUnderstand");
             cx.doc.set_attr(el, &a, if cx.version == 2 { "true" } else { "1" });
@@ -682,8 +685,11 @@ fn wsdl_request(
     args: &[Value],
     headers: &[ObjRef],
 ) -> R<String> {
-    cx.version = f.version;
-    cx.doc.version = f.version;
+    // The soap_version option wins over the binding's (observed on PHP
+    // 8.5; test interop/Round4/GroupH/r4_groupH_soapfault_002w.phpt).
+    let v = if cx.version == 2 { 2 } else { f.version };
+    cx.version = v;
+    cx.doc.version = v;
     let (env, prefix) = envelope(cx);
     let body = cx.doc.add_child(env, &format!("{prefix}:Body"));
     let literal = f.input.literal;

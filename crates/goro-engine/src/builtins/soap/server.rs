@@ -712,6 +712,10 @@ enum Out {
     Fault(ObjRef, Option<Function>),
     /// A fault built from text (code, message): before the service runs.
     Plain(&'static str, String),
+    /// A protocol fault found before the call: sent, then the script
+    /// ends (observed on PHP 8.5; tests
+    /// interop/Round4/GroupH/r4_groupH_soapfault_00[34]w.phpt).
+    Early(ObjRef),
 }
 
 pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -772,6 +776,13 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let xml = fault_xml(vm, ver, &f, sdl, &st, &headers, func.as_ref())?;
             store_last(&this, xml.as_bytes());
             send_fault_doc(vm, ver, &xml);
+        }
+        Out::Early(f) => {
+            let ver = with(&this, |d| d.version).unwrap_or(ver);
+            let xml = fault_xml(vm, ver, &f, sdl, &st, &[], None)?;
+            store_last(&this, xml.as_bytes());
+            send_fault_doc(vm, ver, &xml);
+            return Err(Unwind::Exit);
         }
         Out::Plain(code, msg) => {
             let f = make_fault(vm, code, &msg)?;
@@ -837,7 +848,7 @@ fn wsdl_output(vm: &mut Vm, this: &ObjRef, version: i64) -> R<Value> {
 
 fn fault_out(vm: &mut Vm, code: &'static str, msg: &str) -> R<Out> {
     let f = make_fault(vm, code, msg)?;
-    Ok(Out::Fault(f, None))
+    Ok(Out::Early(f))
 }
 
 fn is_true(v: &str) -> Option<bool> {
@@ -1331,11 +1342,26 @@ fn response_doc(
             let ns = str_prop(vm, o, "namespace").unwrap_or_default();
             let name = str_prop(vm, o, "name").unwrap_or_default();
             let data = vm.get_prop_raw(o, b"data");
-            let q = cx.doc.qname(Some(h), &ns, &name);
-            let el = cx.doc.add_child(h, &q);
+            let el = cx.doc.add_child(h, &name);
+            // Declared by the operation's output headers?
+            let decl = func
+                .and_then(|f| f.output.as_ref())
+                .and_then(|o| o.headers.iter().find(|d| d.name == name && d.ns == ns));
+            let (enc, literal) = match (decl, sdl) {
+                (Some(d), Some(s)) => (
+                    match &d.part.element {
+                        Some((ens, en)) => s.element(ens, en).map(Enc::Type),
+                        None => d.part.typ.as_ref().and_then(|t| s.resolve(t)),
+                    },
+                    d.literal,
+                ),
+                _ => (None, true),
+            };
             if !matches!(data, Value::Null) {
-                to_xml(vm, &mut cx, None, &data, el, true)?;
+                to_xml(vm, &mut cx, enc, &data, el, literal)?;
             }
+            let q = cx.doc.qname(Some(el), &ns, &name);
+            cx.doc.rename(el, &q);
             if matches!(vm.get_prop_raw(o, b"mustUnderstand"), Value::Bool(true)) {
                 let a = format!("{prefix}:mustUnderstand");
                 cx.doc
