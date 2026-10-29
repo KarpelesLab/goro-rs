@@ -29,6 +29,7 @@ pub mod http;
 pub mod iconv;
 pub mod image;
 pub mod info;
+mod info_html;
 mod info_text;
 pub mod ini;
 mod intl;
