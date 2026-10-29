@@ -507,9 +507,11 @@ impl Parser {
             level += 1;
             i += 1;
         }
-        if level > 0 && self.cur.is_none() {
+        // A continuation without an entry fails the load, after its
+        // fields are checked (and reported) like any line.
+        let orphan = level > 0 && self.cur.is_none();
+        if orphan {
             self.failed = true;
-            return;
         }
         let prev_level = self
             .cur
@@ -836,6 +838,9 @@ impl Parser {
             self.warn(m);
             return;
         }
+        if orphan {
+            return;
+        }
         if level == 0 {
             self.flush();
             let name = (kind == Kind::Name).then(|| line.sval.clone());
@@ -885,7 +890,7 @@ fn is_text_line(l: &Line) -> bool {
         Kind::Search | Kind::Regex => l
             .sval
             .iter()
-            .all(|&c| (0x20..0x7f).contains(&c) || matches!(c, b'\t' | b'\n' | b'\r')),
+            .all(|&c| (0x20..0x7f).contains(&c) || (0x09..=0x0d).contains(&c)),
         // Lines that test nothing keep the entry's class.
         Kind::Default | Kind::Clear | Kind::Name | Kind::Use => true,
         _ => l.reln == b'x' && l.level > 0,

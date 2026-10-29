@@ -26,6 +26,9 @@ fn be16(b: &[u8], at: usize) -> Option<u16> {
 fn le16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
 }
+fn be32(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
 fn le32(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
@@ -144,13 +147,312 @@ fn tar(b: &[u8]) -> Option<Found> {
 
 /// Native checks of the default database, before its magic rules.
 pub fn native(b: &[u8], _ti: &TextInfo, out: &mut Vec<Found>) {
-    let checks: &[fn(&[u8]) -> Option<Found>] = &[jpeg, id3, pdf, zip, tga, gpkg];
+    let checks: &[fn(&[u8]) -> Option<Found>] = &[
+        jpeg, id3, pdf, zip, gpkg, openpgp, ext_fs, bcachefs, dsdiff,
+    ];
     for c in checks {
         if let Some(f) = c(b) {
             out.push(f);
             return;
         }
     }
+}
+
+/// Native checks of the default database for formats without a magic
+/// number, after its magic rules.
+pub fn native_late(b: &[u8], out: &mut Vec<Found>) {
+    if let Some(f) = tga(b) {
+        out.push(f);
+    }
+}
+
+fn hex_uuid(u: &[u8]) -> String {
+    let h: Vec<String> = u.iter().map(|c| format!("{:02x}", c)).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        h[0..4].concat(),
+        h[4..6].concat(),
+        h[6..8].concat(),
+        h[8..10].concat(),
+        h[10..16].concat()
+    )
+}
+
+// ------------------------------------------------------------- OpenPGP
+
+/// OpenPGP transferable keys (RFC 4880 4.2 packet headers, 5.5.2 key
+/// material).
+fn openpgp(b: &[u8]) -> Option<Found> {
+    // (tag, body start, body length) of the packet at `p`.
+    let packet = |p: usize| -> Option<(u8, usize, usize)> {
+        let h = *b.get(p)?;
+        if h & 0x80 == 0 {
+            return None;
+        }
+        if h & 0x40 != 0 {
+            let tag = h & 0x3f;
+            let l0 = *b.get(p + 1)? as usize;
+            if l0 < 192 {
+                Some((tag, p + 2, l0))
+            } else if l0 < 224 {
+                let l1 = *b.get(p + 2)? as usize;
+                Some((tag, p + 3, ((l0 - 192) << 8) + l1 + 192))
+            } else if l0 == 255 {
+                Some((tag, p + 6, be32(b, p + 2)? as usize))
+            } else {
+                None
+            }
+        } else {
+            let tag = (h >> 2) & 0xf;
+            match h & 3 {
+                0 => Some((tag, p + 2, *b.get(p + 1)? as usize)),
+                1 => Some((tag, p + 3, be16(b, p + 1)? as usize)),
+                2 => Some((tag, p + 5, be32(b, p + 1)? as usize)),
+                _ => None,
+            }
+        }
+    };
+    let (tag, st, len) = packet(0)?;
+    let kind = match tag {
+        6 => "Public",
+        5 => "Secret",
+        _ => return None,
+    };
+    let ver = *b.get(st)?;
+    if !(2..=5).contains(&ver) {
+        return None;
+    }
+    let created = be32(b, st + 1)? as i64;
+    let algo_at = if ver < 4 { st + 7 } else { st + 5 };
+    let algo = *b.get(algo_at)?;
+    let bits = be16(b, algo_at + 1);
+    let a = match algo {
+        1 => format!("RSA (Encrypt or Sign, {} bits)", bits?),
+        2 => format!("RSA (Encrypt-Only, {} bits)", bits?),
+        3 => format!("RSA (Sign-Only, {} bits)", bits?),
+        16 => format!("ElGamal (Encrypt-Only, {} bits)", bits?),
+        17 => format!("DSA ({} bits)", bits?),
+        18 => "ECDH".to_string(),
+        19 => "ECDSA".to_string(),
+        22 => "EdDSA".to_string(),
+        _ => return None,
+    };
+    let mut d = format!(
+        "OpenPGP {} Key Version {}, Created {}, {}",
+        kind,
+        ver,
+        crate::eval::fmt_time(created, false),
+        a
+    );
+    let mut p = st + len;
+    for _ in 0..2 {
+        let Some((t, s, l)) = packet(p) else { break };
+        let n = match t {
+            2 => "Signature",
+            7 => "Secret Subkey",
+            12 => "Trust",
+            13 => "User ID",
+            14 => "Public Subkey",
+            17 => "User Attribute",
+            _ => break,
+        };
+        d.push_str("; ");
+        d.push_str(n);
+        p = s + l;
+    }
+    d.push_str("; OpenPGP Certificate");
+    Some(found(d, Some("application/pgp-keys"), Some("asc/gpg/pgp"), None))
+}
+
+// ------------------------------------------------------------ ext2/3/4
+
+/// The ext2/ext3/ext4 superblock at offset 1024 (s_magic 0xEF53; feature
+/// flags as documented in the kernel's ext4 "Disk Layout" documentation).
+fn ext_fs(b: &[u8]) -> Option<Found> {
+    let sb = 1024;
+    if le16(b, sb + 56)? != 0xef53 {
+        return None;
+    }
+    let rev = le32(b, sb + 76)?;
+    let minor = le16(b, sb + 62)?;
+    let compat = le32(b, sb + 92)?;
+    let incompat = le32(b, sb + 96)?;
+    let ro = le32(b, sb + 100)?;
+    let kind = if incompat & 0x0040 != 0 || incompat & 0x0200 != 0 || ro & 0x0008 != 0 || incompat & 0x0080 != 0 {
+        "ext4"
+    } else if compat & 0x0004 != 0 {
+        "ext3"
+    } else {
+        "ext2"
+    };
+    let mut d = format!(
+        "Linux rev {}.{} {} filesystem data, UUID={}",
+        rev,
+        minor,
+        kind,
+        hex_uuid(b.get(sb + 104..sb + 120)?)
+    );
+    let name: Vec<u8> = b
+        .get(sb + 120..sb + 136)?
+        .iter()
+        .copied()
+        .take_while(|&c| c != 0)
+        .collect();
+    if !name.is_empty() {
+        d.push_str(&format!(", volume name \"{}\"", String::from_utf8_lossy(&name)));
+    }
+    if incompat & 0x0004 != 0 {
+        d.push_str(" (needs journal recovery)");
+    }
+    if le16(b, sb + 58)? & 0x0002 != 0 {
+        d.push_str(" (errors)");
+    }
+    if incompat & 0x0001 != 0 {
+        d.push_str(" (compressed)");
+    }
+    if incompat & 0x0040 != 0 {
+        d.push_str(" (extents)");
+    }
+    if incompat & 0x0080 != 0 {
+        d.push_str(" (64bit)");
+    }
+    if ro & 0x0002 != 0 {
+        d.push_str(" (large files)");
+    }
+    if ro & 0x0008 != 0 {
+        d.push_str(" (huge files)");
+    }
+    Some(found(d, None, None, None))
+}
+
+// ------------------------------------------------------------- bcachefs
+
+/// bcachefs superblock at 4 KiB: its magic UUID c68573f6-4e1a-45ca-8265-
+/// f57f48ba6d81, versions, user UUID, label, device index and count, and
+/// the first member's UUID from the members field after the 512-byte
+/// layout.
+fn bcachefs(b: &[u8]) -> Option<Found> {
+    const MAGIC: [u8; 16] = [
+        0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca, 0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d,
+        0x81,
+    ];
+    let sb = 4096;
+    if b.get(sb + 24..sb + 40)? != MAGIC {
+        return None;
+    }
+    let ver = le16(b, sb + 16)?;
+    let vmin = le16(b, sb + 18)?;
+    let label: Vec<u8> = b
+        .get(sb + 72..sb + 104)?
+        .iter()
+        .copied()
+        .take_while(|&c| c != 0)
+        .collect();
+    let dev = *b.get(sb + 122)?;
+    let nr = *b.get(sb + 123)?;
+    let mut d = format!(
+        "bcachefs, UUID={}, label \"{}\", version {}, min version {}, device {}",
+        hex_uuid(b.get(sb + 56..sb + 72)?),
+        String::from_utf8_lossy(&label),
+        ver,
+        vmin,
+        dev
+    );
+    // Fields follow the fixed part and the layout (sb + 0x2f0).
+    let mut p = sb + 0x2f0;
+    for _ in 0..16 {
+        let (Some(u64s), Some(ty)) = (le32(b, p), le32(b, p + 4)) else {
+            break;
+        };
+        if u64s == 0 {
+            break;
+        }
+        if ty == 1 {
+            if let Some(u) = b.get(p + 8 + 16 * 0..p + 8 + 16) {
+                d.push_str(&format!("/UUID={}", hex_uuid(u)));
+            }
+            break;
+        }
+        p += 8 * u64s as usize;
+    }
+    d.push_str(&format!(", {} devices", nr));
+    Some(found(d, None, None, None))
+}
+
+// --------------------------------------------------------------- DSDIFF
+
+/// DSDIFF (Philips "DSDIFF File Format Specification" 1.5): FRM8 form of
+/// type "DSD ", the PROP/SND chunk's FS, CHNL and CMPR chunks, and an
+/// ID3 chunk.
+fn dsdiff(b: &[u8]) -> Option<Found> {
+    if !b.starts_with(b"FRM8") || b.get(12..16)? != b"DSD " {
+        return None;
+    }
+    let mut d = String::from("DSDIFF audio bitstream data, 1 bit");
+    let chunk = |p: usize| -> Option<(&[u8], usize, usize)> {
+        let id = b.get(p..p + 4)?;
+        let sz = u64::from_be_bytes(b.get(p + 4..p + 12)?.try_into().ok()?) as usize;
+        Some((id, p + 12, sz))
+    };
+    let mut p = 16;
+    let mut id3: Option<usize> = None;
+    let mut guard = 0;
+    while let Some((id, st, sz)) = chunk(p) {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        if id == b"PROP" && b.get(st..st + 4) == Some(b"SND ") {
+            let mut q = st + 4;
+            let end = st + sz;
+            let (mut rate, mut chans, mut comp) = (None, None, None);
+            while q < end {
+                let Some((cid, cst, csz)) = chunk(q) else { break };
+                match cid {
+                    b"FS  " => rate = be32(b, cst),
+                    b"CHNL" => chans = be16(b, cst),
+                    b"CMPR" => comp = b.get(cst..cst + 4),
+                    _ => {}
+                }
+                q = cst + csz + (csz & 1);
+            }
+            match chans {
+                Some(1) => d.push_str(", mono"),
+                Some(2) => d.push_str(", stereo"),
+                Some(n) => d.push_str(&format!(", {} channels", n)),
+                None => {}
+            }
+            if let Some(r) = rate {
+                let name = match r {
+                    2822400 => Some("DSD 64"),
+                    5644800 => Some("DSD 128"),
+                    11289600 => Some("DSD 256"),
+                    22579200 => Some("DSD 512"),
+                    _ => None,
+                };
+                match name {
+                    Some(n) => d.push_str(&format!(", \"{}\" {} Hz", n, r)),
+                    None => d.push_str(&format!(", {} Hz", r)),
+                }
+            }
+            match comp {
+                Some(b"DSD ") => d.push_str(", no compression"),
+                Some(b"DST ") => d.push_str(", DST compression"),
+                _ => {}
+            }
+        }
+        if id == b"ID3 " {
+            id3 = Some(p);
+        }
+        p = st + sz + (sz & 1);
+    }
+    if let Some(i) = id3 {
+        // The two bytes after the chunk ID (observed on PHP 8.5).
+        if let (Some(&maj), Some(&min)) = (b.get(i + 4), b.get(i + 5)) {
+            d.push_str(&format!(", ID3 version 2.{}.{}", maj, min));
+        }
+    }
+    Some(found(d, Some("audio/x-dff"), None, None))
 }
 
 /// Native text checks of the default database (after its text rules).

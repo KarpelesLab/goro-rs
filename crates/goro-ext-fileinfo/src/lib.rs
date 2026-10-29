@@ -146,6 +146,9 @@ fn classify(db: &Db, buf: &[u8], flags: i64, file_mode: bool) -> Result<Outcome,
         let mut c = Ctx::new(&db.magic, buf, file_mode);
         c.run(false, all, &mut found).map_err(|Stop::Error(m)| m)?;
     }
+    if db.builtin && (all || found.is_empty()) {
+        formats::native_late(buf, &mut found);
+    }
     if all || found.is_empty() {
         formats::post_tests(buf, &mut found);
     }
@@ -160,8 +163,20 @@ fn classify(db: &Db, buf: &[u8], flags: i64, file_mode: bool) -> Result<Outcome,
             formats::native_text(&tb, &ti, &mut tf);
         }
         for mut f in tf {
+            // "awk script text" + "ASCII text" reads "awk script, ASCII
+            // text"; "... text executable" puts "executable" after the
+            // encoding (observed on PHP 8.5).
+            let mut td = text_desc.clone();
+            if let Some(d) = f.desc.strip_suffix(b" text executable") {
+                f.desc.truncate(d.len());
+                if !td.contains(" text executable") {
+                    td = td.replacen(" text", " text executable", 1);
+                }
+            } else if let Some(d) = f.desc.strip_suffix(b" text") {
+                f.desc.truncate(d.len());
+            }
             f.desc.extend_from_slice(b", ");
-            f.desc.extend_from_slice(text_desc.as_bytes());
+            f.desc.extend_from_slice(td.as_bytes());
             text_matched = true;
             found.push(f);
         }

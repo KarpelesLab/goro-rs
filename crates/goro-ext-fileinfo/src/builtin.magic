@@ -145,7 +145,7 @@
 0	string	DSD\040
 >28	string	fmt\040	DSF audio bitstream data
 !:mime	audio/x-dsf
->>48	ulelong	x	\b, %d bit
+>>60	ulelong	x	\b, %d bit
 >>52	ulelong	1	\b, mono
 >>52	ulelong	2	\b, stereo
 >>52	ulelong	>2	\b, %d channels
@@ -153,11 +153,11 @@
 >>56	ulelong	5644800	\b, "DSD 128"
 >>56	ulelong	11289600	\b, "DSD 256"
 >>56	ulelong	x	%d Hz
->>40	ulelong	0	\b, no compression
+>>44	ulelong	0	\b, no compression
 >>20	ulequad	>0
 >>>(20.q)	string	ID3
 >>>>&0	ubyte	x	\b, ID3 version 2.%d
->>>>&1	ubyte	x	\b.%d.0
+>>>>&1	ubyte	x	\b.%d
 
 # Matroska / WebM (EBML RFC 8794 header, DocType element 0x4282)
 0	belong	0x1a45dfa3
@@ -280,26 +280,99 @@
 0	string	=!<arch>\n	current ar archive
 !:mime	application/x-archive
 !:ext	a/lib/ar
-# ARJ (ARJ technical information: main header)
-0	leshort	0xea60	ARJ archive data
+# ARJ (ARJ TECHNOTE: main header, file type 2; DOS date in the creation
+# time stamp)
+0	leshort	0xea60
+>10	byte	2	ARJ archive data
 !:mime	application/x-arj
 !:ext	arj
->5	byte	x	\b, v%d,
->8	byte&0x10	0x10	slash-switched,
->8	byte&0x01	0x01	original name:
->34	string	x	original name: %s,
->7	byte	0	os: MS-DOS
->7	byte	1	os: PRIMOS
->7	byte	2	os: Unix
->7	byte	3	os: Amiga
->7	byte	4	os: Macintosh
->7	byte	5	os: OS/2
->7	byte	6	os: Apple ][ GS
->7	byte	7	os: Atari ST
->7	byte	8	os: NeXT
->7	byte	9	os: VAX/VMS
->7	byte	10	os: WIN95
->7	byte	11	os: WIN32
+>>5	byte	x	\b, v%d,
+>>6	byte	>1	minimum %d to extract,
+>>8	byte&0x01	0x01	password-protected (v0),
+>>8	byte&0x10	0x10	slash-switched,
+>>9	byte	>0	security version %d,
+>>14	uleshort&0x1f	x	created %d
+>>14	uleshort&0x01e0	0x0020	jan
+>>14	uleshort&0x01e0	0x0040	feb
+>>14	uleshort&0x01e0	0x0060	mar
+>>14	uleshort&0x01e0	0x0080	apr
+>>14	uleshort&0x01e0	0x00a0	may
+>>14	uleshort&0x01e0	0x00c0	jun
+>>14	uleshort&0x01e0	0x00e0	jul
+>>14	uleshort&0x01e0	0x0100	aug
+>>14	uleshort&0x01e0	0x0120	sep
+>>14	uleshort&0x01e0	0x0140	oct
+>>14	uleshort&0x01e0	0x0160	nov
+>>14	uleshort&0x01e0	0x0180	dec
+>>15	ubyte/2	x	1980+%d,
+>>(4.b+4)	string	x	original name: %s,
+>>7	byte	0	os: MS-DOS
+>>7	byte	1	os: PRIMOS
+>>7	byte	2	os: Unix
+>>7	byte	3	os: Amiga
+>>7	byte	4	os: Macintosh
+>>7	byte	5	os: OS/2
+>>7	byte	6	os: Apple ][ GS
+>>7	byte	7	os: Atari ST
+>>7	byte	8	os: NeXT
+>>7	byte	9	os: VAX/VMS
+>>7	byte	10	os: WIN95
+>>7	byte	11	os: WIN32
+
+#------------------------------------------------------------ firmware
+# Android vdex (ART: "vdex" magic, verifier deps and dex section version
+# strings, dex file count and verifier deps size)
+0	name	vdex-fields
+>4	string	x	verifier deps version: %s,
+>8	string	x	dex section version: %s,
+>12	ulelong	x	number of dex files: %d,
+>16	ulelong	x	verifier deps size: %d
+0	string	vdex	Android vdex file,
+>0	use	vdex-fields
+0	string	wdex	Android vdex file, being processed by dex2oat,
+>0	use	vdex-fields
+# UF2 (Microsoft UF2 specification: 32-byte block header)
+0	string	UF2\n
+>4	ulelong	0x9e5d5157	UF2 firmware image
+>>8	ulelong&0x2000	0x2000
+>>>28	ulelong	0x1c5f21b0	\b, family ESP32
+>>>28	ulelong	0xbfdd4eee	\b, family ESP32-S2
+>>>28	ulelong	0xc47e5767	\b, family ESP32-S3
+>>>28	ulelong	0xd42ba06c	\b, family ESP32-C3
+>>>28	ulelong	0xe48bff56	\b, family Raspberry Pi RP2040
+>>>28	ulelong	0x68ed2b88	\b, family Microchip (Atmel) SAMD21
+>>>28	ulelong	0x55114460	\b, family Microchip (Atmel) SAMD51
+>>>28	ulelong	0xada52840	\b, family Nordic NRF52840
+>>>28	default	x
+>>>>28	ulelong	x	\b, family 0x%x
+>>8	ulelong&0x2000	0
+>>>28	ulelong	x	\b, file size 0x%x
+>>12	ulelong	x	\b, base address %08x
+>>24	ulelong	x	\b, %u total blocks
+# IBM PCjr cartridge images (header text written by PCjr cartridge tools)
+0	string	PCjr\ Cartridge\ image\ file	PCjr Cartridge image
+# HDD Raw Copy Tool images (Pascal strings: tool name, version, model,
+# serial)
+0	string	\x11HDD\ Raw\ Copy\ Tool
+>0	pstring	x	%s
+>0x100	pstring	x	%s
+>0x200	pstring	x	- HD model: %s
+>0x400	pstring	x	serial: %s
+# Garmin FIT (FIT SDK: 14-byte file header, ".FIT"; file_id message;
+# times count from 1989-12-31 00:00 UTC)
+8	string	.FIT	FIT Map data
+>0x23	ubelong	x	\b, unit id %u
+>0x27	ulelong	x	\b, serial %u
+>0x2b	uledate+631065600	x	\b, %s
+>0x2f	uleshort	1	\b, manufacturer 1 (garmin)
+>0x2f	uleshort	!1	\b, manufacturer %u
+>0x31	uleshort	x	\b, product %u
+>0x35	ubyte	1	\b, type 1 (Device)
+>0x35	ubyte	2	\b, type 2 (Settings)
+>0x35	ubyte	3	\b, type 3 (Sport/Sport Settings)
+>0x35	ubyte	4	\b, type 4 (Activity)
+>0x35	ubyte	5	\b, type 5 (Workout)
+>0x35	ubyte	6	\b, type 6 (Course)
 
 #------------------------------------------------------------ documents
 # PostScript (PostScript Language Document Structuring Conventions)
