@@ -263,6 +263,21 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ),
         );
     }
+    let out = escape_cmd(s);
+    if out.len() > SHELL_ARG_MAX {
+        return vm.throw(
+            "ValueError",
+            &format!(
+                "Escaped command exceeds the allowed length of {} bytes",
+                SHELL_ARG_MAX
+            ),
+        );
+    }
+    Ok(sv(out))
+}
+
+/// escapeshellcmd() of `s`.
+pub(crate) fn escape_cmd(s: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len() + 8);
     // Quotes are kept when they pair up (observed on PHP 8.5): the
     // position of the closing quote of an open pair.
@@ -305,16 +320,7 @@ fn escapeshellcmd(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => out.push(c),
         }
     }
-    if out.len() > SHELL_ARG_MAX {
-        return vm.throw(
-            "ValueError",
-            &format!(
-                "Escaped command exceeds the allowed length of {} bytes",
-                SHELL_ARG_MAX
-            ),
-        );
-    }
-    Ok(sv(out))
+    out
 }
 
 // ---------------------------------------------------------------- assertions

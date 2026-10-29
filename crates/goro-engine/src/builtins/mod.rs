@@ -26,6 +26,7 @@ pub mod ini;
 mod intl;
 pub mod json;
 pub mod libxml;
+pub mod mail;
 pub mod math;
 pub mod mbstring;
 pub mod misc;
@@ -84,6 +85,7 @@ pub fn modules() -> Vec<&'static Module> {
         &password::MODULE,
         &misc::MODULE,
         &image::MODULE,
+        &mail::MODULE,
         &exec::MODULE,
         &highlight::MODULE,
         &ini::MODULE,

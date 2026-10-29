@@ -222,6 +222,16 @@ pub fn substitute(value: &str, pwd: &Path, tmp: &Path) -> String {
     let mut s = value
         .replace("{PWD}", &pwd.to_string_lossy())
         .replace("{TMP}", &tmp.to_string_lossy());
+    // `{MAIL:FILE}`: a sendmail_path storing the message in FILE (relative
+    // to the working directory, where ext/standard/tests/mail/*.phpt read
+    // it back)
+    while let Some(start) = s.find("{MAIL:") {
+        let Some(len) = s[start..].find('}') else {
+            break;
+        };
+        let quoted = s[start + 6..start + len].replace('\'', "'\\''");
+        s.replace_range(start..start + len + 1, &format!("cat > '{quoted}'"));
+    }
     while let Some(start) = s.find("{ENV:") {
         let Some(len) = s[start..].find('}') else {
             break;
