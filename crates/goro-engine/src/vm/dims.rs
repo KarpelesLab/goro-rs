@@ -504,6 +504,10 @@ impl Vm {
                     }
                 }
                 Some(k) => {
+                    if matches!(a.get(k.as_ref()), Some(Value::Ref(r)) if r.is_typed()) {
+                        self.drop_tmp(key);
+                        return self.assign_dim_slow_value(var, Some(k), v, res);
+                    }
                     let old = a.assign(k, v);
                     drop(old);
                 }
@@ -746,6 +750,15 @@ impl Vm {
         }
         // The value.
         let (value, value_lazy) = match path.action {
+            // A variable is read after the keys (an undefined key variable
+            // warns first: test Zend/tests/bug79599).
+            PathAction::Assign(v) | PathAction::AssignOp(_, v)
+                if v & (CONST | TMP) == 0
+                    && !path.elems.is_empty()
+                    && matches!(path.base, PathBase::Var(b) if b != v) =>
+            {
+                (None, v)
+            }
             PathAction::Assign(v) | PathAction::AssignOp(_, v) => (Some(self.get(v)?), NONE),
             PathAction::BindRef(v) => (Some(self.get_raw(v)), NONE),
             _ => (None, NONE),
@@ -1236,6 +1249,18 @@ impl Vm {
                         }
                     }
                     Some(k) => {
+                        // An element bound to a typed property: its type
+                        // applies, and the assignment gives the coerced
+                        // value (test Zend/tests/assign_typed_ref_result).
+                        if let Some(Value::Ref(r)) = a.get(k.as_ref())
+                            && r.is_typed()
+                        {
+                            let r = r.clone();
+                            let v = self.typed_ref_value(&r, v.into_deref())?;
+                            let old = r.set(v.clone());
+                            drop(old);
+                            return Ok(v);
+                        }
                         let old = a.assign(k, v.clone());
                         drop(old);
                     }
