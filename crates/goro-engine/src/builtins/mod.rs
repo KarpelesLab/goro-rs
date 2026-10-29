@@ -56,6 +56,7 @@ pub mod reflection;
 pub mod serialize;
 pub mod session;
 pub mod simplexml;
+pub mod soap;
 pub mod socketext;
 pub mod sockets;
 pub mod sodium;
@@ -152,6 +153,7 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlwriter::MODULE,
         &xmlreader::MODULE,
         &simplexml::MODULE,
+        &soap::MODULE,
         &openssl::MODULE,
         &opcache::MODULE,
         &session::MODULE,
