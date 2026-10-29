@@ -1144,6 +1144,21 @@ impl Vm {
                     "protected"
                 };
                 let from = self.scope_desc(scope);
+                // From an instance of the class, __call takes the invisible
+                // method first (test Zend/tests/magic_methods/bug53826).
+                if let Some(t) = &this
+                    && self.class_of(t).is_subclass_of(cls)
+                    && let Some(c) = cls.magic.borrow().call.clone()
+                {
+                    return Ok(Callee {
+                        scope: c.scope.get(),
+                        func: c,
+                        this: Some(t.clone()),
+                        static_class: Rc::as_ptr(cls),
+                        closure: None,
+                        magic_name: Some(PhpStr::new(name)),
+                    });
+                }
                 // __callStatic may take an invisible method.
                 if let Some(cs) = cls.magic.borrow().call_static.clone() {
                     return Ok(Callee {
@@ -1154,6 +1169,17 @@ impl Vm {
                         closure: None,
                         magic_name: Some(PhpStr::new(name)),
                     });
+                }
+                // `parent::__construct()` (test tests/classes/ctor_visibility).
+                if lname.as_bytes() == b"__construct" {
+                    let owner = m
+                        .scope()
+                        .map(|c| c.name.dname())
+                        .unwrap_or_else(|| cls.name.dname());
+                    return self.throw(
+                        "Error",
+                        &format!("Cannot call {} {}::__construct()", vis, owner),
+                    );
                 }
                 return self.throw(
                     "Error",

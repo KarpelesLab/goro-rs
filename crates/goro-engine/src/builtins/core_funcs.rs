@@ -673,7 +673,14 @@ fn register_shutdown_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn get_defined_functions(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+fn get_defined_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    // Test tests/basic/bug31875.
+    if a.has(0) {
+        vm.fdeprecated(
+            a,
+            "The $exclude_disabled parameter has no effect since PHP 8.0",
+        )?;
+    }
     let mut internal: Vec<PhpStr> = vm
         .functions
         .iter()

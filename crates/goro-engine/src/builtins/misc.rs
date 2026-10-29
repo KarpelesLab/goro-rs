@@ -436,6 +436,15 @@ pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) 
             0,
         );
     }
+    // Test tests/basic/ini_directive_deprecated_report_memleaks.
+    if ini.iter().any(|(n, _)| n.as_slice() == b"report_memleaks") {
+        let _ = vm.raise_at(
+            crate::vm::errors::E_DEPRECATED,
+            "PHP Startup: Directive 'report_memleaks' is deprecated",
+            goro_runtime::PhpStr::from("Unknown"),
+            0,
+        );
+    }
     // test ext/standard/tests/file/auto_detect_line_endings_1.phpt
     if ini
         .iter()
