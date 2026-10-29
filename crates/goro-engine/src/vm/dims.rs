@@ -1086,14 +1086,16 @@ impl Vm {
         let cur = deref_ptr(place.ptr());
         match unsafe { &*cur } {
             Value::Array(_) | Value::Null | Value::Bool(false) => {}
-            Value::Str(s) => {
-                if for_unset {
+            // A nested write or unset through a string offset, even of an
+            // empty string (observed on PHP 8.5; tests Zend/tests/bug53432,
+            // bug70089).
+            Value::Str(_) => {
+                // unset() through a variable's string (test Zend/tests/unset/
+                // bug24773).
+                if for_unset && !matches!(place, Place::Temp(_)) {
                     return self.throw("Error", "Cannot unset string offsets");
                 }
-                if !s.is_empty() {
-                    return self.throw("Error", "Cannot use string offset as an array");
-                }
-                unsafe { *cur = Value::Array(PhpArray::new()) };
+                return self.throw("Error", "Cannot use string offset as an array");
             }
             Value::Object(o) => {
                 let o = o.clone();
@@ -1346,7 +1348,14 @@ impl Vm {
             PathAction::MakeRef | PathAction::BindRef(_) => {
                 return self.throw("Error", "Cannot create references to/from string offsets");
             }
-            PathAction::AssignOp(..) | PathAction::IncDec(_) => {
+            // `$s[]--`, `$s[] .= x` (tests Zend/tests/bug69905, bug70182).
+            PathAction::AssignOp(..) | PathAction::IncDec(_) if key.is_none() => {
+                return self.throw("Error", "[] operator not supported for strings");
+            }
+            PathAction::IncDec(_) => {
+                return self.throw("Error", "Cannot increment/decrement string offsets");
+            }
+            PathAction::AssignOp(..) => {
                 return self.throw(
                     "Error",
                     "Cannot use assign-op operators with string offsets",
