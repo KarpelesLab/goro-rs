@@ -180,7 +180,7 @@ impl Vm {
             return false;
         }
         let c = self.code_ref().caches[cache as usize].get();
-        if c.key == 0 || c.b & IC_PLAIN == 0 {
+        if c.key == 0 {
             return false;
         }
         let op: Option<*const ObjRef> = if obj == THIS {
@@ -198,7 +198,8 @@ impl Vm {
         // SAFETY: the frame or slot holding the handle is not touched
         // until the value is copied out.
         let Some(o) = op else { return false };
-        if unsafe { (*o).class_addr() } != c.key {
+        let c = c.way(unsafe { (*o).class_addr() });
+        if c.key == 0 || c.b & IC_PLAIN == 0 {
             return false;
         }
         let v = unsafe { (*o).obj().slots.borrow()[c.a].clone() };
@@ -267,8 +268,10 @@ impl Vm {
         };
         // Inline cache: plain public property of a known class.
         if is_const(name) {
-            let c = self.code_ref().caches[cache as usize].get();
-            if c.key != 0 && c.key == self.class_ptr_of(&o) as usize && c.b & IC_PLAIN != 0 {
+            let c = self.code_ref().caches[cache as usize]
+                .get()
+                .way(self.class_ptr_of(&o) as usize);
+            if c.key != 0 && c.b & IC_PLAIN != 0 {
                 let v = o.obj().slots.borrow()[c.a].clone();
                 if !self.is_uninit(&v) {
                     self.put(dst, v.into_deref());
@@ -372,11 +375,12 @@ impl Vm {
                     && p.get.is_none()
                     && p.flags & mflags::VIRTUAL == 0
                 {
-                    self.code_ref().caches[c as usize].set(Cache {
-                        key: Rc::as_ptr(&cls) as usize,
-                        a: p.slot as usize,
-                        b: IC_PLAIN,
-                    });
+                    Cache::store_class(
+                        &self.code_ref().caches[c as usize],
+                        Rc::as_ptr(&cls) as usize,
+                        p.slot as usize,
+                        IC_PLAIN,
+                    );
                 }
                 Ok(v.into_deref())
             }
@@ -833,12 +837,10 @@ impl Vm {
             }
         };
         if is_const(name) {
-            let c = self.code_ref().caches[cache as usize].get();
-            if c.key != 0
-                && c.key == self.class_ptr_of(&o) as usize
-                && c.b & IC_PLAIN != 0
-                && !o.is_lazy()
-            {
+            let c = self.code_ref().caches[cache as usize]
+                .get()
+                .way(self.class_ptr_of(&o) as usize);
+            if c.key != 0 && c.b & IC_PLAIN != 0 && !o.is_lazy() {
                 let v = self.get_hot(val)?;
                 let mut slots = o.obj().slots.borrow_mut();
                 let slot = &mut slots[c.a];
@@ -892,11 +894,12 @@ impl Vm {
                     None => IC_PLAIN,
                     Some((m, _)) => IC_PLAIN | IC_TYPED | (m << 8),
                 };
-                self.code_ref().caches[cache as usize].set(Cache {
-                    key: Rc::as_ptr(&cls) as usize,
-                    a: p.slot as usize,
+                Cache::store_class(
+                    &self.code_ref().caches[cache as usize],
+                    Rc::as_ptr(&cls) as usize,
+                    p.slot as usize,
                     b,
-                });
+                );
             }
         }
     }
@@ -1088,11 +1091,12 @@ impl Vm {
                         None => IC_PLAIN,
                         Some((m, _)) => IC_PLAIN | IC_TYPED | (m << 8),
                     };
-                    self.code_ref().caches[c as usize].set(Cache {
-                        key: Rc::as_ptr(&cls) as usize,
-                        a: p.slot as usize,
+                    Cache::store_class(
+                        &self.code_ref().caches[c as usize],
+                        Rc::as_ptr(&cls) as usize,
+                        p.slot as usize,
                         b,
-                    });
+                    );
                 }
                 Ok(())
             }
@@ -2586,6 +2590,7 @@ impl Vm {
                 key: 1,
                 a: Rc::as_ptr(&cls) as usize,
                 b: 0,
+                ..Cache::default()
             });
             return self.new_object_call(dst, &cls, nargs);
         }

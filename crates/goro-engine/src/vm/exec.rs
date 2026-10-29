@@ -15,6 +15,14 @@ pub(crate) fn holds_no_resources(s: &Slot) -> bool {
     )
 }
 
+#[inline(always)]
+fn needs_drop_value(v: &Value) -> bool {
+    !matches!(
+        v,
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+    )
+}
+
 /// Arithmetic, bitwise and comparison operators on ints and floats without
 /// side effects (no warnings, no errors): the result, or `None` for the
 /// general path. PHP manual (Arithmetic Operators): int results that
@@ -27,18 +35,24 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
         (Int(a), Int(b)) => {
             let (a, b) = (*a, *b);
             Some(match op {
-                Bin::Add => a
-                    .checked_add(b)
-                    .map(Int)
-                    .unwrap_or(Float(a as f64 + b as f64)),
-                Bin::Sub => a
-                    .checked_sub(b)
-                    .map(Int)
-                    .unwrap_or(Float(a as f64 - b as f64)),
-                Bin::Mul => a
-                    .checked_mul(b)
-                    .map(Int)
-                    .unwrap_or(Float(a as f64 * b as f64)),
+                // (a match, not `unwrap_or`: the unused default would go
+                // through the drop glue)
+                Bin::Add => match a.checked_add(b) {
+                    Some(r) => Int(r),
+                    None => Float(a as f64 + b as f64),
+                },
+                // (a match, not `unwrap_or`: the unused default would go
+                // through the drop glue)
+                Bin::Sub => match a.checked_sub(b) {
+                    Some(r) => Int(r),
+                    None => Float(a as f64 - b as f64),
+                },
+                // (a match, not `unwrap_or`: the unused default would go
+                // through the drop glue)
+                Bin::Mul => match a.checked_mul(b) {
+                    Some(r) => Int(r),
+                    None => Float(a as f64 * b as f64),
+                },
                 Bin::Div => {
                     if b == 0 || (a == i64::MIN && b == -1) {
                         return None;
@@ -95,6 +109,19 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// [`fast_arith`] for the comparison operators: the bool result.
+#[inline(always)]
+pub(crate) fn fast_cmp(op: Bin, x: &Value, y: &Value) -> Option<bool> {
+    let r = fast_arith(op, x, y);
+    let b = match &r {
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    };
+    // fast_arith gives scalars only: nothing to drop (and no drop glue).
+    std::mem::forget(r);
+    b
 }
 
 /// `x === null` on defined values (PHP manual, Comparison Operators: same
@@ -346,6 +373,54 @@ impl Vm {
         true
     }
 
+    /// Stores an int, float or bool result over a scalar, or into a
+    /// temporary holding nothing to drop; gives the value back (nothing
+    /// done) otherwise. Nothing is released.
+    #[inline(always)]
+    pub(crate) fn try_put_scalar(&mut self, dst: Reg, v: Value) -> Result<(), Value> {
+        debug_assert!(!needs_drop_value(&v));
+        if dst == NONE {
+            std::mem::forget(v);
+            return Ok(());
+        }
+        let p = self.slot_ptr(dst);
+        // Same-type stores update the payload only; other stores write a
+        // freshly built value (field by field: copying a whole `Value`
+        // through memory stalls store forwarding in tight loops).
+        unsafe {
+            match (&mut *p, &v) {
+                (Some(Value::Int(x)), Value::Int(i)) => *x = *i,
+                (Some(Value::Float(x)), Value::Float(f)) => *x = *f,
+                (Some(Value::Bool(x)), Value::Bool(b)) => *x = *b,
+                (s, _) => {
+                    let ok = match s {
+                        // A variable holding a scalar is not a reference.
+                        Some(Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null) => {
+                            true
+                        }
+                        None => dst & TMP != 0,
+                        _ => false,
+                    };
+                    if !ok {
+                        return Err(v);
+                    }
+                    match &v {
+                        Value::Int(i) => std::ptr::write(p, Some(Value::Int(*i))),
+                        Value::Float(f) => std::ptr::write(p, Some(Value::Float(*f))),
+                        Value::Bool(b) => std::ptr::write(p, Some(Value::Bool(*b))),
+                        _ => {
+                            std::ptr::write(p, Some(v));
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        // The scalar was copied: no drop glue for it.
+        std::mem::forget(v);
+        Ok(())
+    }
+
     #[inline(always)]
     pub(crate) fn put_bool(&mut self, dst: Reg, b: bool) {
         if !self.try_put_bool(dst, b) {
@@ -429,8 +504,22 @@ impl Vm {
             match *op {
                 Op::Nop | Op::Ticks => {}
                 Op::Assign { dst, src } => {
-                    let v = self.get_hot(src)?;
-                    self.assign_var(dst, v)?;
+                    // A scalar over a scalar: in place, nothing released.
+                    let scalar = match self.peek(src) {
+                        Some(Value::Int(i)) => Some(Value::Int(*i)),
+                        Some(Value::Float(f)) => Some(Value::Float(*f)),
+                        Some(Value::Bool(b)) => Some(Value::Bool(*b)),
+                        _ => None,
+                    };
+                    if let Some(v) = scalar {
+                        match self.try_put_scalar(dst, v) {
+                            Ok(()) => continue,
+                            Err(v) => self.assign_var(dst, v)?,
+                        }
+                    } else {
+                        let v = self.get_hot(src)?;
+                        self.assign_var(dst, v)?;
+                    }
                 }
                 Op::AssignRes { dst, src, res } => {
                     let v = self.get(src)?;
@@ -467,115 +556,79 @@ impl Vm {
                     drop(old);
                 }
                 Op::Add { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        match x.checked_add(y) {
-                            Some(s) => {
-                                if self.try_put_int(dst, s) {
-                                    continue;
-                                }
-                                self.put(dst, Value::Int(s));
-                            }
-                            None => {
-                                let f = x as f64 + y as f64;
-                                self.put(dst, Value::Float(f));
-                            }
-                        }
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                    // One look at each operand; int and float operands own
+                    // nothing, so a consumed temporary may keep its stale
+                    // scalar.
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
                         && let Some(r) = fast_arith(Bin::Add, x, y)
                     {
-                        self.drop_tmp(a);
-                        self.drop_tmp(b);
-                        self.put_hot(dst, r);
+                        match self.try_put_scalar(dst, r) {
+                            Ok(()) => continue,
+                            Err(r) => self.put(dst, r),
+                        }
                     } else {
                         self.binop_slow(Bin::Add, dst, a, b)?;
                     }
                 }
                 Op::Sub { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        match x.checked_sub(y) {
-                            Some(s) => {
-                                if self.try_put_int(dst, s) {
-                                    continue;
-                                }
-                                self.put(dst, Value::Int(s));
-                            }
-                            None => {
-                                let f = x as f64 - y as f64;
-                                self.put(dst, Value::Float(f));
-                            }
-                        }
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                    // One look at each operand; int and float operands own
+                    // nothing, so a consumed temporary may keep its stale
+                    // scalar.
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
                         && let Some(r) = fast_arith(Bin::Sub, x, y)
                     {
-                        self.drop_tmp(a);
-                        self.drop_tmp(b);
-                        self.put_hot(dst, r);
+                        match self.try_put_scalar(dst, r) {
+                            Ok(()) => continue,
+                            Err(r) => self.put(dst, r),
+                        }
                     } else {
                         self.binop_slow(Bin::Sub, dst, a, b)?;
                     }
                 }
                 Op::Mul { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        match x.checked_mul(y) {
-                            Some(s) => {
-                                if self.try_put_int(dst, s) {
-                                    continue;
-                                }
-                                self.put(dst, Value::Int(s));
-                            }
-                            None => {
-                                let f = x as f64 * y as f64;
-                                self.put(dst, Value::Float(f));
-                            }
-                        }
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                    // One look at each operand; int and float operands own
+                    // nothing, so a consumed temporary may keep its stale
+                    // scalar.
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
                         && let Some(r) = fast_arith(Bin::Mul, x, y)
                     {
-                        self.drop_tmp(a);
-                        self.drop_tmp(b);
-                        self.put_hot(dst, r);
+                        match self.try_put_scalar(dst, r) {
+                            Ok(()) => continue,
+                            Err(r) => self.put(dst, r),
+                        }
                     } else {
                         self.binop_slow(Bin::Mul, dst, a, b)?;
                     }
                 }
                 Op::Concat { dst, a, b } => self.op_concat(dst, a, b)?,
                 Op::Lt { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        let r = x < y;
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
+                    {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
                         self.put(dst, Value::Bool(r));
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Lt, x, y)
-                    {
-                        self.drop_tmp(a);
-                        self.drop_tmp(b);
-                        self.put_bool(dst, r);
                     } else {
                         self.binop_slow(Bin::Lt, dst, a, b)?;
                     }
                 }
                 Op::Le { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        let r = x <= y;
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_cmp(Bin::Le, x, y)
+                    {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
                         self.put(dst, Value::Bool(r));
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(Value::Bool(r)) = fast_arith(Bin::Le, x, y)
-                    {
-                        self.drop_tmp(a);
-                        self.drop_tmp(b);
-                        self.put_bool(dst, r);
                     } else {
                         self.binop_slow(Bin::Le, dst, a, b)?;
                     }
                 }
                 Op::Eq { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        let r = x == y;
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_cmp(Bin::Eq, x, y)
+                    {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -585,8 +638,9 @@ impl Vm {
                     }
                 }
                 Op::Identical { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
-                        let r = x == y;
+                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_cmp(Bin::Identical, x, y)
+                    {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -599,9 +653,10 @@ impl Vm {
                     if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
                         && let Some(r) = fast_arith(op, x, y)
                     {
-                        self.drop_tmp(a);
-                        self.drop_tmp(b);
-                        self.put_hot(dst, r);
+                        match self.try_put_scalar(dst, r) {
+                            Ok(()) => continue,
+                            Err(r) => self.put(dst, r),
+                        }
                     } else {
                         self.binop_slow(op, dst, a, b)?
                     }
@@ -614,7 +669,20 @@ impl Vm {
                 }
                 Op::Rope { dst, list } => self.op_rope(dst, list)?,
                 Op::AssignOpVar { op, var, src, res } => {
-                    self.op_assign_op_var(op, var, src, res)?
+                    // `$x op= n` on a number variable: in place, nothing
+                    // released.
+                    if res == NONE
+                        && let (Some(x @ (Value::Int(_) | Value::Float(_))), Some(y)) =
+                            (unsafe { &*self.slot_ptr(var) }.as_ref(), self.peek(src))
+                        && let Some(r) = fast_arith(op, x, y)
+                    {
+                        match self.try_put_scalar(var, r) {
+                            Ok(()) => continue,
+                            Err(r) => self.put(var, r),
+                        }
+                    } else {
+                        self.op_assign_op_var(op, var, src, res)?
+                    }
                 }
                 Op::IncDecVar { op, var, res } => {
                     // `$i++;` on an int variable: in place, nothing released.
@@ -640,9 +708,9 @@ impl Vm {
                 }
                 Op::JmpZ { c, t } => {
                     if let Some(Value::Bool(b)) = self.peek(c) {
-                        // A bool temporary holds nothing to release.
+                        // A bool temporary holds nothing to release: it may
+                        // keep its stale value.
                         let b = *b;
-                        self.drop_tmp(c);
                         if !b {
                             self.ex.ip = t as usize;
                         }
@@ -660,9 +728,9 @@ impl Vm {
                         return Err(self.memory_exhausted());
                     }
                     if let Some(Value::Bool(b)) = self.peek(c) {
-                        // A bool temporary holds nothing to release.
+                        // A bool temporary holds nothing to release: it may
+                        // keep its stale value.
                         let b = *b;
-                        self.drop_tmp(c);
                         if b {
                             self.ex.ip = t as usize;
                         }
@@ -681,6 +749,13 @@ impl Vm {
                     }
                     let r = if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         if x < y {
+                            self.ex.ip = t as usize;
+                        }
+                        continue;
+                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
+                    {
+                        if r {
                             self.ex.ip = t as usize;
                         }
                         continue;
@@ -1430,6 +1505,36 @@ impl Vm {
             self.put(dst, Value::Str(s));
             return Ok(());
         }
+        // A string and an int (`"key_" . $i`): the digits need no
+        // conversion machinery.
+        let mut buf = [0u8; 20];
+        let joined = match (self.peek(a), self.peek(b)) {
+            (Some(Value::Str(x)), Some(Value::Int(i))) => {
+                if a & (CONST | TMP) == TMP && dst == a {
+                    let d = goro_runtime::convert::int_digits(*i, &mut buf);
+                    let p = self.slot_ptr(a);
+                    if let Some(Value::Str(s)) = unsafe { &mut *p } {
+                        s.push_bytes(d);
+                    }
+                    return Ok(());
+                }
+                Some(PhpStr::concat(
+                    x,
+                    goro_runtime::convert::int_digits(*i, &mut buf),
+                ))
+            }
+            (Some(Value::Int(i)), Some(Value::Str(y))) => Some(PhpStr::concat(
+                goro_runtime::convert::int_digits(*i, &mut buf),
+                y,
+            )),
+            _ => None,
+        };
+        if let Some(s) = joined {
+            self.drop_tmp(a);
+            self.drop_tmp(b);
+            self.put(dst, Value::Str(s));
+            return Ok(());
+        }
         let x = self.get(a)?;
         let y = self.get(b)?;
         let mut out = Vec::new();
@@ -1441,6 +1546,38 @@ impl Vm {
 
     fn op_rope(&mut self, dst: Reg, list: u32) -> R<()> {
         let n = self.code_ref().lists[list as usize].len();
+        // Strings and ints only (the usual interpolation): one exact-size
+        // string, no intermediate buffer.
+        let mut total = 0usize;
+        let mut simple = true;
+        for i in 0..n {
+            let r = self.code_ref().lists[list as usize][i];
+            match self.peek(r) {
+                Some(Value::Str(s)) => total += s.len(),
+                Some(Value::Int(_)) => total += 20,
+                _ => {
+                    simple = false;
+                    break;
+                }
+            }
+        }
+        if simple {
+            let mut out = PhpStr::with_capacity(total);
+            let mut buf = [0u8; 20];
+            for i in 0..n {
+                let r = self.code_ref().lists[list as usize][i];
+                match self.peek(r) {
+                    Some(Value::Str(s)) => out.push_bytes(s),
+                    Some(Value::Int(v)) => {
+                        out.push_bytes(goro_runtime::convert::int_digits(*v, &mut buf))
+                    }
+                    _ => unreachable!(),
+                }
+                self.drop_tmp(r);
+            }
+            self.put(dst, Value::Str(out));
+            return Ok(());
+        }
         let mut out: Vec<u8> = Vec::new();
         for i in 0..n {
             let r = self.code_ref().lists[list as usize][i];

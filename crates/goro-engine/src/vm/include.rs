@@ -1222,6 +1222,7 @@ impl Vm {
                     key: 1,
                     a: idx,
                     b: 0,
+                    ..Cache::default()
                 });
                 self.put(dst, v);
                 Ok(())
