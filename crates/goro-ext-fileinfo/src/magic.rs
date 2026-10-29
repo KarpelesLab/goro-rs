@@ -106,6 +106,9 @@ pub struct Offset {
     /// `&`: relative to the end of the last up-level match.
     pub rel: bool,
     pub base: i64,
+    /// Written with a minus sign: from the end of the file (`-0` is its
+    /// end).
+    pub from_end: bool,
     pub ind: Option<Box<Indirect>>,
 }
 
@@ -868,9 +871,9 @@ impl Parser {
                 name,
             ));
         } else if let Some((e, _)) = self.cur.as_mut() {
-            if !is_text_line(&line) {
-                e.text = false;
-            }
+            // The class is the first line's (observed on PHP 8.5: the X
+            // bitmap rules of the magic database tests ship are text rules
+            // with binary string continuations).
             e.lines.push(line);
         }
     }
@@ -997,6 +1000,7 @@ fn parse_offset(s: &[u8]) -> Option<(Offset, usize)> {
     let mut off = Offset {
         rel: false,
         base: 0,
+        from_end: false,
         ind: None,
     };
     if s.get(i) == Some(&b'&') {
@@ -1089,6 +1093,7 @@ fn parse_offset(s: &[u8]) -> Option<(Offset, usize)> {
     }
     let (v, n) = parse_num(&s[i..])?;
     off.base = v;
+    off.from_end = s.get(i) == Some(&b'-');
     Some((off, i + n))
 }
 

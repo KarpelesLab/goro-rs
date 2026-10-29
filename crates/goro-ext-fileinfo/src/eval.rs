@@ -57,6 +57,8 @@ pub struct Ctx<'a> {
     pub file_mode: bool,
     pub indirect: u32,
     pub names: u32,
+    /// Inside `use ^name`: little and big endian are swapped.
+    pub flip: bool,
 }
 
 /// A value read for a test, kept for printing.
@@ -119,6 +121,9 @@ fn id3(v: u64) -> u64 {
     ((v >> 24) & 0x7f) << 21 | ((v >> 16) & 0x7f) << 14 | ((v >> 8) & 0x7f) << 7 | (v & 0x7f)
 }
 
+/// Nesting limit of `use` (TIFF directories chain one call per entry).
+const MAX_USE: u32 = 256;
+
 pub enum Stop {
     /// "Failed identify data": the message after the errno.
     Error(String),
@@ -134,6 +139,7 @@ impl<'a> Ctx<'a> {
             file_mode,
             indirect: 0,
             names: 0,
+            flip: false,
         }
     }
 
@@ -156,28 +162,49 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// The byte order of a read, swapped inside `use ^name` (magic(5):
+    /// "leshort is treated as beshort and vice versa").
+    fn en(&self, e: Endian) -> Endian {
+        match (self.flip, e) {
+            (true, Endian::Little) => Endian::Big,
+            (true, Endian::Big) => Endian::Little,
+            _ => e,
+        }
+    }
+
     fn abs_off(&self, base: i64, rel: Option<usize>, o: i64) -> Option<usize> {
+        self.abs_off_end(base, rel, o, false)
+    }
+
+    fn abs_off_end(&self, base: i64, rel: Option<usize>, o: i64, from_end: bool) -> Option<usize> {
         if let Some(r) = rel {
-            let v = r as i64 + o;
+            let v = (r as i64).wrapping_add(o);
             return (v >= 0).then_some(v as usize);
         }
-        if o < 0 {
+        if o < 0 || from_end {
             if !self.file_mode {
                 return None;
             }
-            let v = self.buf.len() as i64 + o;
+            let v = (self.buf.len() as i64).wrapping_add(o);
             return (v >= 0).then_some(v as usize);
         }
-        let v = base + o;
+        let v = base.wrapping_add(o);
         (v >= 0).then_some(v as usize)
     }
 
     fn resolve(&self, l: &Line, base: usize, parent_end: usize) -> Option<usize> {
         let off = &l.off;
         let Some(ind) = &off.ind else {
-            return self.abs_off(base as i64, off.rel.then_some(parent_end), off.base);
+            return self.abs_off_end(
+                base as i64,
+                off.rel.then_some(parent_end),
+                off.base,
+                off.from_end,
+            );
         };
-        let at = self.abs_off(0, ind.rel.then_some(parent_end), ind.base)?;
+        // The value is read relative to a named rule's base; it is an
+        // absolute offset.
+        let at = self.abs_off(base as i64, ind.rel.then_some(parent_end), ind.base)?;
         let mut v = if ind.special == b'o' {
             let s = self.buf.get(at..)?;
             let n = s.iter().take_while(|c| (b'0'..=b'7').contains(c)).count();
@@ -187,7 +214,7 @@ impl<'a> Ctx<'a> {
             }
             x
         } else {
-            let raw = read_uint(self.buf, at, ind.size, ind.endian)?;
+            let raw = read_uint(self.buf, at, ind.size, self.en(ind.endian))?;
             let raw = if ind.special == b'i' { id3(raw) } else { raw };
             if ind.signed {
                 sext(raw, ind.size) as u64
@@ -197,8 +224,8 @@ impl<'a> Ctx<'a> {
         };
         if ind.op != 0 {
             let n = if ind.operand_ind {
-                let p = self.abs_off(0, None, ind.operand)?;
-                let r = read_uint(self.buf, p, ind.size, ind.endian)?;
+                let p = self.abs_off(base as i64, None, ind.operand)?;
+                let r = read_uint(self.buf, p, ind.size, self.en(ind.endian))?;
                 if ind.signed {
                     sext(r, ind.size) as u64
                 } else {
@@ -258,12 +285,18 @@ impl<'a> Ctx<'a> {
                     self.resolve(l, base, parent_end).map(|o| (o, Val::None))
                 }
                 Kind::Use => {
-                    let Some(o) = self.resolve(l, base, parent_end) else {
+                    let Some(mut o) = self.resolve(l, base, parent_end) else {
                         if lv == 0 {
                             return Ok(false);
                         }
                         continue;
                     };
+                    // An indirect `use` offset is from the current rule's
+                    // base, so rules can walk chained records (the JPEG
+                    // segment walk of the magic database tests ship).
+                    if l.off.ind.is_some() && !l.off.rel {
+                        o = o.saturating_add(base);
+                    }
                     let Some(ne) = self.db.names.get(&l.sval) else {
                         return Err(Stop::Error(format!(
                             "cannot find entry `{}'",
@@ -271,32 +304,46 @@ impl<'a> Ctx<'a> {
                         )));
                     };
                     self.names += 1;
-                    if self.names > 50 {
-                        return Err(Stop::Error("name use count (30) exceeded".into()));
+                    if self.names > MAX_USE {
+                        return Err(Stop::Error(format!(
+                            "name use count ({}) exceeded",
+                            MAX_USE
+                        )));
                     }
                     f.print(&l.desc);
                     f.meta(l);
-                    let r = self.run_lines(&ne.lines, o, f, true)?;
+                    let saved = self.flip;
+                    if l.flip {
+                        self.flip = !self.flip;
+                    }
+                    let r = self.run_lines(&ne.lines, o, f, true);
+                    self.flip = saved;
+                    let matched = r?;
                     self.names -= 1;
+                    // Children of a `use` run only when the named rule
+                    // matched something (magic(5)).
+                    if !matched {
+                        if lv == 0 {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
                     ends[lv] = o;
                     has[lv] = true;
                     has[lv + 1] = false;
                     cont = lv + 1;
                     any = true;
-                    let _ = r;
                     continue;
                 }
                 Kind::Indirect => {
-                    let Some(o) = self.resolve(l, base, parent_end) else {
+                    // Offsets of `indirect` are from the start of the
+                    // buffer, or of the named rule's base with `/r`.
+                    let ib = if l.sflags & SF_REL != 0 { base } else { 0 };
+                    let Some(o) = self.resolve(l, ib, parent_end) else {
                         if lv == 0 {
                             return Ok(false);
                         }
                         continue;
-                    };
-                    let o = if l.sflags & SF_REL != 0 {
-                        o + parent_end
-                    } else {
-                        o
                     };
                     self.indirect += 1;
                     if self.indirect > 50 {
@@ -312,11 +359,14 @@ impl<'a> Ctx<'a> {
                             file_mode: false,
                             indirect: self.indirect,
                             names: self.names,
+                            flip: false,
                         };
                         let mut v = Vec::new();
                         c.run(false, false, &mut v)?;
                         if let Some(x) = v.into_iter().next() {
-                            f.print(&x.desc);
+                            // Appended as is ("Exif Standard: [TIFF image
+                            // data, ...]", observed on PHP 8.5).
+                            f.desc.extend_from_slice(&x.desc);
                             if f.mime.is_none() {
                                 f.mime = x.mime;
                             }
@@ -355,7 +405,7 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        Ok(any || named)
+        Ok(any)
     }
 
     /// Tests one line at absolute offset `o`; on a match returns the end
@@ -372,7 +422,7 @@ impl<'a> Ctx<'a> {
                 let raw = if l.kind == Kind::Offset {
                     o as u64
                 } else {
-                    let r = read_uint(b, o, size, l.endian)?;
+                    let r = read_uint(b, o, size, self.en(l.endian))?;
                     if l.kind == Kind::Id3 { id3(r) } else { r }
                 };
                 let v = if l.op != 0 {
@@ -397,7 +447,7 @@ impl<'a> Ctx<'a> {
                 Some((end, val))
             }
             Kind::Float(size) => {
-                let r = read_uint(b, o, size, l.endian)?;
+                let r = read_uint(b, o, size, self.en(l.endian))?;
                 let v = if size == 4 {
                     f32::from_bits(r as u32) as f64
                 } else {
@@ -484,7 +534,7 @@ impl<'a> Ctx<'a> {
                     _ => false,
                 };
                 let mut v = s.to_vec();
-                if let Some(p) = v.iter().position(|&c| c == 0) {
+                if let Some(p) = v.iter().position(|&c| c == 0 || c == b'\n' || c == b'\r') {
                     v.truncate(p);
                 }
                 ok.then_some((st + s.len(), Val::Bytes(v)))
@@ -900,7 +950,8 @@ fn format_desc(desc: &[u8], val: &Val) -> Vec<u8> {
     i += 1;
     let (body, numeric_neg): (Vec<u8>, bool) = match (conv, val) {
         (b'd' | b'i', Val::Int(v, sz, signed)) => {
-            if *signed {
+            // C printf: a 4- or 8-byte value prints signed with %d.
+            if *signed || *sz >= 4 {
                 let n = sext(*v, *sz);
                 (n.unsigned_abs().to_string().into_bytes(), n < 0)
             } else {
