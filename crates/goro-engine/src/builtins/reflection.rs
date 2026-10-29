@@ -1081,7 +1081,11 @@ fn code_of(f: &Func) -> Option<&Rc<FuncCode>> {
 
 fn fa_in_namespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (f, _, _) = need_func!(vm, a);
-    Ok(Value::Bool(f.name.contains(&b'\\')))
+    // A closure's name (`{closure:A\B::m():3}`) is in no namespace (test
+    // Zend/tests/closures/closure_067).
+    Ok(Value::Bool(
+        !f.name.starts_with(b"{closure") && f.name.contains(&b'\\'),
+    ))
 }
 fn fa_is_closure(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, c, _) = need_func!(vm, a);
@@ -1136,7 +1140,16 @@ fn fa_closure_this(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 fn fa_closure_scope(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, c, _) = need_func!(vm, a);
-    let p = c.and_then(|c| closure_cd(&c, |d| d.scope));
+    // A closure bound to an object without a scope has the dummy scope
+    // Closure (test Zend/tests/closures/closure_042).
+    let p = c.and_then(|c| {
+        closure_cd(&c, |d| d.scope).map(|s| {
+            match (s.is_null(), closure_cd(&c, |d| d.this.is_some())) {
+                (true, Some(true)) => vm.core.closure.as_ref().map_or(s, Rc::as_ptr),
+                _ => s,
+            }
+        })
+    });
     match p {
         Some(p) if !p.is_null() => {
             let cls = vm.rc_class(p);
