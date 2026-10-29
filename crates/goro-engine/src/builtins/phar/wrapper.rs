@@ -37,18 +37,19 @@ fn data_by_name(vm: &mut Vm, abs: &[u8]) -> bool {
 pub(crate) fn read_entry(vm: &mut Vm, s: &Shared, inner: &[u8]) -> Result<Vec<u8>, String> {
     let mut l = s.borrow_mut();
     if let Some(ext) = mounted(&l.mounts, inner) {
+        if super::os_path(&ext).is_dir() {
+            return Err(format!("phar error: path \"{}\" is a directory", lossy(inner)));
+        }
         return std::fs::read(super::os_path(&ext))
             .map_err(|_| format!("phar error: Cannot open mounted file \"{}\"", lossy(&ext)));
     }
     let fname = l.a.fname.clone();
     let _ = vm;
+    // opening a directory (tests fopen_edgecases2, readfile_edgecases)
+    let is_dir_msg = || format!("phar error: path \"{}\" is a directory", lossy(inner));
     let Some(e) = l.a.get_mut(inner) else {
         if l.a.is_dir(inner) {
-            return Err(format!(
-                "phar error: Cannot retrieve contents, \"{}\" in phar \"{}\" is a directory",
-                lossy(inner),
-                lossy(&fname)
-            ));
+            return Err(is_dir_msg());
         }
         return Err(format!(
             "phar error: \"{}\" is not a file in phar \"{}\"",
@@ -57,11 +58,7 @@ pub(crate) fn read_entry(vm: &mut Vm, s: &Shared, inner: &[u8]) -> Result<Vec<u8
         ));
     };
     if e.is_dir {
-        return Err(format!(
-            "phar error: Cannot retrieve contents, \"{}\" in phar \"{}\" is a directory",
-            lossy(inner),
-            lossy(&fname)
-        ));
+        return Err(is_dir_msg());
     }
     e.contents(&fname)
         .map(|d| d.to_vec())

@@ -156,6 +156,13 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
                         lossy(fname)
                     ));
                 }
+                if body.iter().any(|c| matches!(c, b'/' | b'\\' | b':' | b';')) {
+                    return Err(format!(
+                        "phar error: invalid alias \"{}\" in tar-based phar \"{}\"",
+                        lossy(&body),
+                        lossy(fname)
+                    ));
+                }
                 a.alias = Some(body);
                 continue;
             }

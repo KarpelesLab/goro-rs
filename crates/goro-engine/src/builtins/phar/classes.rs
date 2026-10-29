@@ -591,8 +591,11 @@ fn offset_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
             ),
         );
     }
-    if !magic_check(vm, &n)? {
-        return Ok(Value::Null);
+    if goro_ext_phar::is_meta_name(&n) {
+        return vm.throw(
+            "BadMethodCallException",
+            "Cannot set any files or directories in magic \".phar\" directory",
+        );
     }
     let data = match a.val(1) {
         Value::Resource(_) => {

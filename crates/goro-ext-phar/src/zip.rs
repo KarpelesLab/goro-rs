@@ -242,7 +242,12 @@ pub fn parse(fname: &[u8], data: &[u8], opts: &ParseOptions) -> Result<Archive, 
                     .to_vec();
                 match &name[..] {
                     b".phar/stub.php" => a.stub = body,
-                    b".phar/alias.txt" => a.alias = Some(body),
+                    b".phar/alias.txt" => {
+                        if body.iter().any(|c| matches!(c, b'/' | b'\\' | b':' | b';')) {
+                            return Err(err(fname, &format!("invalid alias \"{}\"", lossy(&body))));
+                        }
+                        a.alias = Some(body)
+                    }
                     _ => sig_bin = Some((off, body)),
                 }
                 continue;
