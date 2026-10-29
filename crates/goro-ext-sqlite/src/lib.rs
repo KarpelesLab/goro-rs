@@ -530,6 +530,10 @@ impl Db {
     /// Runs a prepared statement with its parameter values (by SQLite
     /// number; missing ones are NULL).
     pub fn run(&mut self, st: &Stmt, values: &[Value]) -> Result<Rows, SqlError> {
+        // graphitesql 0.1.7's VDBE path scans the whole table for rowid and
+        // index lookups (~3 ms per point query on 20k rows); its tree
+        // walker seeks (~6 µs). EXPLAIN keeps the VDBE listing.
+        self.conn.set_use_vdbe(st.explain == 1);
         let mut params = graphitesql::exec::eval::Params::default();
         for (i, p) in st.params.iter().enumerate() {
             let v = values.get(i).cloned().unwrap_or(Value::Null);
@@ -566,6 +570,20 @@ impl Db {
             DRY_BUDGET.with(|b| b.borrow_mut().clear());
             match r {
                 Ok(mut rows) => {
+                    // Column origins (decltype, table) are provided by this
+                    // layer, as SQLITE_ENABLE_COLUMN_METADATA builds do
+                    // (test ext/pdo_sqlite/tests/bug_42589.phpt checks it).
+                    if st.kind == Kind::Query
+                        && scan::first_keyword(&sql) == "PRAGMA"
+                        && sql.to_ascii_lowercase().contains("compile_options")
+                        && !rows.rows.iter().any(|r| {
+                            r.first().and_then(text).as_deref() == Some("ENABLE_COLUMN_METADATA")
+                        })
+                    {
+                        rows.rows.push(vec![Value::Text(graphitesql::Text::from_bytes(
+                            b"ENABLE_COLUMN_METADATA".to_vec(),
+                        ))]);
+                    }
                     for c in rows.columns.iter_mut() {
                         for (lit, ident) in &dqs {
                             if c.contains(lit.as_str()) {
