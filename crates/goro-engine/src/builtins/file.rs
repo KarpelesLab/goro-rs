@@ -452,9 +452,17 @@ impl Stream {
             let mut raw = vec![0u8; 8192];
             let n = self.read_raw(vm, &mut raw)?;
             raw.truncate(n);
-            let closing = n == 0;
+            // a short read of a file or memory stream is its end: the
+            // filters see the last data with $closing set (test
+            // streams/bug79984.phpt)
+            let closing = n == 0
+                || (n < 8192
+                    && (matches!(self.backing, Backing::Memory { .. })
+                        || matches!(self.backing, Backing::File(_)) && !self.is_pipe()));
             let mut chain = std::mem::take(&mut self.read_filters);
+            let prev = FILTER_EOF.with(|c| c.replace(Some(closing)));
             let r = super::streams::run_chain(vm, &mut chain, &raw, closing);
+            FILTER_EOF.with(|c| c.set(prev));
             // A filter may have been removed meanwhile; keep the chain.
             if self.read_filters.is_empty() {
                 self.read_filters = chain;
@@ -647,6 +655,10 @@ pub fn new_stream_res(s: Stream) -> ResRef {
 }
 
 thread_local! {
+    /// While read filters run: whether the stream reached its end (what
+    /// feof() on it reports from inside the filter; test
+    /// streams/bug79984.phpt).
+    static FILTER_EOF: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// The streams opened, to close them at the end of the request.
     static OPEN_STREAMS: std::cell::RefCell<Vec<goro_runtime::object::WeakRes>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -765,7 +777,9 @@ pub fn with_stream<T>(
     // SAFETY: the resource stays alive (held by `v`) for the call.
     let cell: *const std::cell::RefCell<Stream> = cell;
     drop(data);
-    let mut s = unsafe { (*cell).borrow_mut() };
+    let Ok(mut s) = (unsafe { (*cell).try_borrow_mut() }) else {
+        return vm.fthrow(a, "Error", "Cannot use a stream while it is being filtered");
+    };
     // Output is written before blocking on standard input (PHP's CLI
     // output is unbuffered; a parent may wait for it).
     if matches!(s.backing, Backing::Stdin) {
@@ -1380,6 +1394,18 @@ fn fgetc(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn feof(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    if let Value::Resource(r) = a.val(0)
+        && let Some(eof) = FILTER_EOF.with(|c| c.get())
+    {
+        let data = r.res().data.borrow();
+        let busy = data
+            .as_ref()
+            .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+            .is_some_and(|c| c.try_borrow_mut().is_err());
+        if busy {
+            return Ok(Value::Bool(eof));
+        }
+    }
     with_stream(vm, a, 0, |_vm, s| {
         if matches!(s.backing, Backing::User { .. }) {
             return Ok(Value::Bool(s.eof && s.pending.is_empty()));
