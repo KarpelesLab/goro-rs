@@ -587,7 +587,7 @@ fn settle_id(vm: &mut Vm, m: Mod) -> R<bool> {
     let cur = st(vm).id.clone().filter(|i| !i.is_empty());
     let mut need_new = match &cur {
         None => true,
-        Some(i) => !valid_id(i) && m == Mod::Files,
+        Some(_) => false,
     };
     if !need_new
         && ini_bool(vm, "session.use_strict_mode")
@@ -907,6 +907,88 @@ pub(crate) fn php_session_start(vm: &mut Vm, read_and_close: bool) -> R<bool> {
         r?;
     }
     Ok(true)
+}
+
+// ---------------------------------------------------------------- upload progress
+
+/// The field that names an upload's progress record, with
+/// session.upload_progress.enabled (PHP manual: Session Upload Progress).
+pub(crate) fn upload_progress_name(vm: &Vm) -> Option<Vec<u8>> {
+    if !ini_bool(vm, "session.upload_progress.enabled") {
+        return None;
+    }
+    let n = ini_str(vm, "session.upload_progress.name");
+    (!n.is_empty()).then(|| n.to_vec())
+}
+
+/// Stores the progress of the request's upload, as it stands once the body
+/// is read, in $_SESSION[prefix . field value] of the request's session
+/// (PHP manual: Session Upload Progress; tests ext/session/tests/rfc1867*):
+/// the session is opened, written and closed before the script runs. With
+/// session.upload_progress.cleanup the record is gone by then.
+pub(crate) fn record_upload_progress(
+    vm: &mut Vm,
+    log: &crate::cli_server::upload::UploadLog,
+    content_length: i64,
+) {
+    let Some(field) = log.progress.as_ref().filter(|f| !f.is_empty()) else {
+        return;
+    };
+    if ini_bool(vm, "session.upload_progress.cleanup") || st(vm).active {
+        return;
+    }
+    let Some(m) = module_of(vm) else {
+        return;
+    };
+    if !serial::known(&ini_str(vm, "session.serialize_handler")) {
+        return;
+    }
+    let Some(id) = request_id(vm) else {
+        return;
+    };
+    let now = crate::vm::sapi::now();
+    let sv = |b: &[u8]| Value::Str(PhpStr::from(b.to_vec()));
+    let mut files = PhpArray::new();
+    for f in &log.files {
+        let mut e = PhpArray::new();
+        e.insert(Key::from("field_name"), sv(&f.field));
+        e.insert(Key::from("name"), sv(&f.name));
+        e.insert(Key::from("tmp_name"), sv(&f.tmp));
+        e.insert(Key::from("error"), Value::Int(f.error));
+        e.insert(Key::from("done"), Value::Bool(true));
+        e.insert(Key::from("start_time"), Value::Int(now));
+        e.insert(Key::from("bytes_processed"), Value::Int(f.size));
+        let _ = files.push(Value::Array(e));
+    }
+    let mut rec = PhpArray::new();
+    rec.insert(Key::from("start_time"), Value::Int(now));
+    rec.insert(Key::from("content_length"), Value::Int(content_length));
+    rec.insert(Key::from("bytes_processed"), Value::Int(content_length));
+    rec.insert(Key::from("done"), Value::Bool(true));
+    rec.insert(Key::from("files"), Value::Array(files));
+    let mut key = ini_str(vm, "session.upload_progress.prefix").to_vec();
+    key.extend_from_slice(field);
+    let phase = st(vm).phase;
+    {
+        let s = st(vm);
+        s.phase = Phase::RequestStartup;
+        s.module = m;
+        s.active = true;
+        s.id = Some(id);
+    }
+    if let Ok(true) = initialize(vm) {
+        let mut arr = vars_array(vm).unwrap_or_default();
+        arr.insert(Key::from_bytes(&key), Value::Array(rec));
+        set_vars(vm, arr);
+        let _ = flush(vm);
+    }
+    // the script's session_start() looks for the ID again
+    let s = st(vm);
+    s.phase = phase;
+    s.active = false;
+    s.id = None;
+    s.send_cookie = false;
+    s.from_cookie = false;
 }
 
 fn session_start(vm: &mut Vm, a: &mut Args) -> R<Value> {

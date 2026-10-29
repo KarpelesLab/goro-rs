@@ -25,6 +25,25 @@ use goro_runtime::{Key, PhpArray, PhpStr, Value};
 use crate::Vm;
 use crate::builtins::string::register_variable;
 
+/// What the request's body brought for session.upload_progress (PHP
+/// manual: Session Upload Progress): the value of the first field named
+/// session.upload_progress.name, and the files that follow it.
+#[derive(Default)]
+pub struct UploadLog {
+    /// The progress field's name while the request body is parsed.
+    pub armed: Option<Vec<u8>>,
+    pub progress: Option<Vec<u8>>,
+    pub files: Vec<LoggedFile>,
+}
+
+pub struct LoggedFile {
+    pub field: Vec<u8>,
+    pub name: Vec<u8>,
+    pub tmp: Vec<u8>,
+    pub error: i64,
+    pub size: i64,
+}
+
 /// The limits a body is parsed with (php.ini, or request_parse_body()
 /// options).
 #[derive(Clone, Copy, Debug)]
@@ -312,6 +331,10 @@ pub fn parse(
                 if name == b"MAX_FILE_SIZE" {
                     form_max = Some(goro_runtime::convert::str_to_int(content));
                 }
+                let log = vm.ext::<UploadLog>();
+                if log.progress.is_none() && log.armed.as_deref() == Some(&name[..]) {
+                    log.progress = Some(content.to_vec());
+                }
                 register_variable(post, &name, Value::Str(PhpStr::from(content.to_vec())));
             }
             Some(_) if !uploads_on => {}
@@ -358,6 +381,16 @@ pub fn parse(
                 };
                 if error != 0 {
                     size = 0;
+                }
+                let log = vm.ext::<UploadLog>();
+                if log.progress.is_some() {
+                    log.files.push(LoggedFile {
+                        field: name.clone().unwrap_or_default(),
+                        name: base_name.clone(),
+                        tmp: tmp.clone(),
+                        error,
+                        size,
+                    });
                 }
                 let fields: [(&[u8], Value); 6] = [
                     (b"name", Value::Str(PhpStr::from(base_name))),

@@ -156,6 +156,7 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
     };
     let mut post = PhpArray::new();
     let mut files = PhpArray::new();
+    let mut upload_log = None;
     if r.method == b"POST" && ini_on(vm, b"enable_post_data_reading") {
         let ct = r.content_type.unwrap_or(b"").to_vec();
         let base = ct
@@ -184,13 +185,21 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
             // Problems are request startup warnings; what was parsed
             // stays (tests tests/basic/rfc1867_*.phpt).
             let limits = crate::cli_server::upload::Limits::from_ini(vm);
-            let r = crate::cli_server::upload::boundary(&ct)
+            let progress = crate::builtins::session::upload_progress_name(vm);
+            vm.ext::<crate::cli_server::upload::UploadLog>().armed = progress;
+            let res = crate::cli_server::upload::boundary(&ct)
                 .map_err(String::from)
                 .and_then(|b| {
                     crate::cli_server::upload::parse(vm, r.body, &b, limits, &mut post, &mut files)
                 });
-            if let Err(m) = r {
-                startup_warning(vm, &m);
+            if let Err(m) = &res {
+                startup_warning(vm, m);
+            }
+            let log = std::mem::take(vm.ext::<crate::cli_server::upload::UploadLog>());
+            // a body that could not be read records nothing (test
+            // ext/session/tests/bug79221.phpt)
+            if log.progress.is_some() && res.is_ok() {
+                upload_log = Some((log, len));
             }
         }
     }
@@ -235,4 +244,7 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
     g.insert(Key::from("_SERVER"), Value::Array(server));
     g.insert(Key::from("_REQUEST"), Value::Array(request));
     g.insert(Key::from("_ENV"), Value::Array(env));
+    if let Some((log, len)) = upload_log {
+        crate::builtins::session::record_upload_progress(vm, &log, len);
+    }
 }
