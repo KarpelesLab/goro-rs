@@ -1027,7 +1027,8 @@ fn popen(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     drop(child_end);
-    let r = fd_stream(parent_end, if read { b"r" } else { b"w" });
+    // popen() streams are binary (test stream_get_meta_data_process_basic.phpt)
+    let r = fd_stream(parent_end, if read { b"rb" } else { b"wb" });
     vm.ext::<PopenState>().pids.insert(r.id(), pid);
     Ok(Value::Resource(r))
 }

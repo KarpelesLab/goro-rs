@@ -89,6 +89,10 @@ pub static MODULE: Module = Module {
         ("function stream_get_wrappers(): array", stream_get_wrappers),
         ("function stream_is_local($stream): bool", ret_true),
         (
+            "function stream_resolve_include_path(string $filename): string|false",
+            stream_resolve_include_path,
+        ),
+        (
             "function stream_supports_lock($stream): bool",
             stream_supports_lock,
         ),
@@ -822,6 +826,26 @@ fn io_err_msg(e: &std::io::Error) -> String {
     }
 }
 
+/// A URL whose protocol has no wrapper is opened as a local path, with a
+/// warning (test ext/standard/tests/streams/bug76857.phpt).
+fn unknown_wrapper_warn(vm: &mut Vm, a: &Args, path: &[u8]) -> R<()> {
+    let Some(sch) = super::userstream::scheme(path) else {
+        return Ok(());
+    };
+    if matches!(&sch[..], b"php" | b"file" | b"data" | b"glob")
+        || super::streams::wrapper_for(vm, path).is_some()
+        || super::userstream::wrapper_for(vm, path).is_some()
+    {
+        return Ok(());
+    }
+    let p = path.windows(3).position(|w| w == b"://").unwrap_or(0);
+    vm.warn(&format!(
+        "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
+        a.fname(),
+        String::from_utf8_lossy(&path[..p])
+    ))
+}
+
 /// Opens `filename` with PHP's fopen modes.
 pub fn open_stream(
     vm: &mut Vm,
@@ -861,6 +885,9 @@ pub fn open_stream(
     }
     if filename.len() >= 5 && filename[..5].eq_ignore_ascii_case(b"data:") {
         return open_data_url(vm, a, filename, mode, quiet);
+    }
+    if !quiet {
+        unknown_wrapper_warn(vm, a, filename)?;
     }
     if let Some(rest) = filename.strip_prefix(b"php://") {
         if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case(b"filter/") {
@@ -960,7 +987,7 @@ pub fn open_stream(
                     st,
                 );
                 s.readable = true;
-                s.writable = true;
+                s.writable = !mode.iter().all(|c| matches!(c, b'r' | b'b' | b't'));
                 s
             }
             _ => {
@@ -1234,10 +1261,12 @@ fn fwrite(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     with_stream(vm, a, 0, |vm, s| {
         if !s.writable {
-            vm.notice_msg(&format!(
-                "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
-                len
-            ))?;
+            if !matches!(s.backing, Backing::Memory { .. }) {
+                vm.notice_msg(&format!(
+                    "fwrite(): Write of {} bytes failed with errno=9 Bad file descriptor",
+                    len
+                ))?;
+            }
             return Ok(Value::Bool(false));
         }
         match s.write_all(vm, &data[..len]) {
@@ -1745,6 +1774,17 @@ fn flock(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
+fn stream_resolve_include_path(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let f = a.str(0);
+    if f.is_empty() {
+        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
+    }
+    Ok(match vm.resolve_include(&f) {
+        Some(p) => Value::Str(PhpStr::new(p.as_os_str().as_bytes())),
+        None => Value::Bool(false),
+    })
+}
+
 fn stream_supports_lock(vm: &mut Vm, a: &mut Args) -> R<Value> {
     with_stream(vm, a, 0, |vm, s| {
         if matches!(s.backing, Backing::User { .. }) {
@@ -1788,6 +1828,13 @@ fn fpassthru(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn stream_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let len = a.opt_int(1);
     let off = a.int_or(2, -1);
+    if len.is_some_and(|l| l < -1) {
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($length) must be greater than or equal to -1",
+        );
+    }
     with_stream(vm, a, 0, |vm, s| {
         if off >= 0 {
             do_seek(vm, s, off, 0);
@@ -1886,13 +1933,13 @@ pub(crate) fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Value::Bool(
                 !pipe
                     && match &mut s.backing {
-                        Backing::File(_) | Backing::Memory { .. } => true,
+                        Backing::File(_) | Backing::Memory { .. } | Backing::Dir { .. } => true,
                         Backing::Native(n) => n.tell().is_some(),
                         _ => false,
                     },
             ),
         );
-        if !nowrap {
+        if !nowrap && !matches!(s.backing, Backing::Dir { .. }) {
             m.insert(Key::from("uri"), Value::Str(s.uri.clone()));
         }
         if let Backing::Native(n) = &s.backing {
@@ -2076,6 +2123,10 @@ fn file_put_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let Some(mut s) = open_stream(vm, a, &f, mode, false)? else {
         return Ok(Value::Bool(false));
     };
+    if !s.writable {
+        vm.fnotice(a, "Stream is not writable")?;
+        return Ok(Value::Bool(false));
+    }
     let r = s.write_all(vm, &bytes);
     // native streams (compress.zlib://) finish their output on close
     super::streams::close_stream(vm, &mut s)?;
@@ -2420,7 +2471,7 @@ fn meta(vm: &Vm, a: &Args) -> Option<std::fs::Metadata> {
     if f.is_empty() || f.contains(&0) {
         return None;
     }
-    std::fs::metadata(vm.fs_path(&f)).ok()
+    std::fs::metadata(vm.stream_path(f.strip_prefix(b"file://").unwrap_or(&f))).ok()
 }
 
 fn is_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2458,6 +2509,7 @@ fn file_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !basedir_check(vm, a, 0)? {
         return Ok(Value::Bool(false));
     }
+    unknown_wrapper_warn(vm, a, &a.str(0))?;
     if let Some(st) = user_stat(vm, a, 2)? {
         return Ok(Value::Bool(st.is_some()));
     }
@@ -3377,6 +3429,16 @@ fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if let Ok(c) = std::fs::canonicalize(&dir) {
         dir = c;
     }
+    let tmp = PathBuf::from("/tmp");
+    // a directory we can't write to falls back to the temporary one (test
+    // tempnam_variation4-0.phpt)
+    if dir != tmp {
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap_or_default();
+        if unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
+            vm.notice_msg("tempnam(): file created in the system's temporary directory")?;
+            dir = tmp;
+        }
+    }
     for n in 0..1000u32 {
         // 19 random letters and digits follow (observed on PHP 8.5)
         let name = {
@@ -4209,6 +4271,9 @@ fn open_data_url(vm: &mut Vm, a: &Args, url: &[u8], mode: &[u8], quiet: bool) ->
         };
         if media.is_empty() {
             return fail(vm, "illegal media type");
+        }
+        if &prm[..eq] == b"mediatype" {
+            continue;
         }
         dm.insert(
             Key::from_bytes(&prm[..eq]),

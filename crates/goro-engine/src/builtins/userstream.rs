@@ -172,7 +172,7 @@ fn restore(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 /// The scheme of a URL (`scheme://...`), lowercased.
-fn scheme(path: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn scheme(path: &[u8]) -> Option<Vec<u8>> {
     let p = path.windows(3).position(|w| w == b"://")?;
     let s = &path[..p];
     valid_protocol(s).then(|| s.to_ascii_lowercase())
