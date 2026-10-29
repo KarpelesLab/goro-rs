@@ -619,6 +619,7 @@ impl Db {
 
     /// A user collation. graphitesql's collations are process-wide; the
     /// function is kept per thread under its (case-insensitive) name.
+    #[allow(clippy::type_complexity)]
     pub fn create_collation(
         &mut self,
         name: &str,
@@ -636,7 +637,7 @@ impl Db {
     }
 
     /// `sqlite3_set_authorizer()`; `None` removes it.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::redundant_closure)]
     pub fn set_authorizer(
         &self,
         cb: Option<
@@ -676,6 +677,7 @@ impl Db {
         }
         let Some(from) = &sel.from else { return out };
         // (alias or name, table name, columns (name, type)).
+        #[allow(clippy::type_complexity)]
         let mut tables: Vec<(String, String, Vec<(String, String)>)> = Vec::new();
         for t in std::iter::once(&from.first).chain(from.joins.iter().map(|j| &j.table)) {
             if t.subquery.is_some() || t.tvf_args.is_some() {

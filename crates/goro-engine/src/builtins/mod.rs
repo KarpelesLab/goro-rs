@@ -52,6 +52,7 @@ pub mod sockets;
 pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
+pub mod sqlite3;
 pub mod sqlite_common;
 pub mod stdmisc;
 pub mod streams;
@@ -133,6 +134,7 @@ pub fn modules() -> Vec<&'static Module> {
         &curl::MODULE,
         &pdo::MODULE,
         &pdo::SQLITE_MODULE,
+        &sqlite3::MODULE,
         &image::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
