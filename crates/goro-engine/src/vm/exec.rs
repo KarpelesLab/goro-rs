@@ -1466,6 +1466,32 @@ impl Vm {
             self.put(dst, Value::Str(s));
             return Ok(());
         }
+        // A string and an int (`"key_" . $i`): the digits need no
+        // conversion machinery.
+        let mut buf = [0u8; 20];
+        let joined = match (self.peek(a), self.peek(b)) {
+            (Some(Value::Str(x)), Some(Value::Int(i))) => {
+                if a & (CONST | TMP) == TMP && dst == a {
+                    let d = goro_runtime::convert::int_digits(*i, &mut buf);
+                    let p = self.slot_ptr(a);
+                    if let Some(Value::Str(s)) = unsafe { &mut *p } {
+                        s.push_bytes(d);
+                    }
+                    return Ok(());
+                }
+                Some(PhpStr::concat(x, goro_runtime::convert::int_digits(*i, &mut buf)))
+            }
+            (Some(Value::Int(i)), Some(Value::Str(y))) => {
+                Some(PhpStr::concat(goro_runtime::convert::int_digits(*i, &mut buf), y))
+            }
+            _ => None,
+        };
+        if let Some(s) = joined {
+            self.drop_tmp(a);
+            self.drop_tmp(b);
+            self.put(dst, Value::Str(s));
+            return Ok(());
+        }
         let x = self.get(a)?;
         let y = self.get(b)?;
         let mut out = Vec::new();
@@ -1477,6 +1503,38 @@ impl Vm {
 
     fn op_rope(&mut self, dst: Reg, list: u32) -> R<()> {
         let n = self.code_ref().lists[list as usize].len();
+        // Strings and ints only (the usual interpolation): one exact-size
+        // string, no intermediate buffer.
+        let mut total = 0usize;
+        let mut simple = true;
+        for i in 0..n {
+            let r = self.code_ref().lists[list as usize][i];
+            match self.peek(r) {
+                Some(Value::Str(s)) => total += s.len(),
+                Some(Value::Int(_)) => total += 20,
+                _ => {
+                    simple = false;
+                    break;
+                }
+            }
+        }
+        if simple {
+            let mut out = PhpStr::with_capacity(total);
+            let mut buf = [0u8; 20];
+            for i in 0..n {
+                let r = self.code_ref().lists[list as usize][i];
+                match self.peek(r) {
+                    Some(Value::Str(s)) => out.push_bytes(s),
+                    Some(Value::Int(v)) => {
+                        out.push_bytes(goro_runtime::convert::int_digits(*v, &mut buf))
+                    }
+                    _ => unreachable!(),
+                }
+                self.drop_tmp(r);
+            }
+            self.put(dst, Value::Str(out));
+            return Ok(());
+        }
         let mut out: Vec<u8> = Vec::new();
         for i in 0..n {
             let r = self.code_ref().lists[list as usize][i];
