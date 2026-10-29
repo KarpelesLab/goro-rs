@@ -48,6 +48,7 @@ pub mod reflection;
 pub mod serialize;
 pub mod simplexml;
 pub mod sockets;
+pub mod sqlite3;
 pub mod sqlite_common;
 pub mod sodium;
 pub mod spl;
@@ -130,6 +131,7 @@ pub fn modules() -> Vec<&'static Module> {
         &gd::MODULE,
         &exif::MODULE,
         &curl::MODULE,
+        &sqlite3::MODULE,
         &image::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
