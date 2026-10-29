@@ -244,3 +244,46 @@ fn fallback_desc(ti: &TextInfo, text_desc: &str) -> String {
         _ => "data".into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(buf: &[u8], flags: i64) -> String {
+        String::from_utf8(identify(&builtin(), buf, flags, false).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn text_classes() {
+        assert_eq!(d(b"", NONE), "empty");
+        assert_eq!(d(b"a", NONE), "very short file (no magic)");
+        assert_eq!(
+            d(b"a\r\nb\n", NONE),
+            "ASCII text, with CRLF, LF line terminators"
+        );
+        assert_eq!(d(b"caf\xc3\xa9\n", MIME), "text/plain; charset=utf-8");
+        assert_eq!(d(b"caf\xe9\n", NONE), "ISO-8859 text");
+        assert_eq!(
+            d(b"abc\x01\n", MIME),
+            "application/octet-stream; charset=binary"
+        );
+        assert_eq!(d(b"{\"a\":1}", MIME_TYPE), "application/json");
+        assert_eq!(d(b"<?php\n", MIME), "text/x-php; charset=us-ascii");
+    }
+
+    #[test]
+    fn custom_magic() {
+        // `default` matches when no sibling at its level did (magic(5)).
+        let src: &[u8] = b"0 string AB AB\n>2 byte 1 one\n>2 default x other\n";
+        let (db, w) = load(&[src]);
+        assert!(w.is_empty());
+        let db = db.unwrap();
+        let r = |b: &[u8]| String::from_utf8(identify(&db, b, NONE, false).unwrap()).unwrap();
+        assert_eq!(r(b"AB\x01\x00"), "AB one");
+        assert_eq!(r(b"AB\x02\x00"), "AB other");
+        let bad: &[u8] = b"0 foo x Hello\n";
+        let (db, w) = load(&[bad]);
+        assert!(db.is_none());
+        assert_eq!(w, vec!["type `foo x Hello' invalid".to_string()]);
+    }
+}
