@@ -1306,6 +1306,7 @@ impl HtmlWriter<'_> {
                 self.text_escape(&t);
             }
             NodeData::CData(t) => self.out.push_str(t),
+            NodeData::Comment(_) if arena.is_null_comment(n) => {}
             NodeData::Comment(t) => {
                 self.out.push_str("<!--");
                 self.out.push_str(t);

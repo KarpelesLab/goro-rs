@@ -1630,16 +1630,20 @@ fn convert_nodes(
     Ok((out, holds))
 }
 
-/// True if node `n` may enter document `doc` from a legacy method (same
-/// document, or made without one).
+/// True if node `n` may enter document `doc` from a legacy ParentNode or
+/// ChildNode method: the same document, or both made without one (observed
+/// on PHP 8.5: a constructed node can't be appended to a document's
+/// element this way; test gh16338.phpt).
 fn same_doc(n: NodeId, doc: NodeId) -> bool {
     xmlstore::with(|s| {
         let nd = s.arena.doc_of(n);
-        nd == doc
-            || s.docs
-                .get(&nd)
-                .and_then(|d| d.peek::<super::DocSettings>())
-                .is_some_and(|d| d.hidden)
+        let hidden = |d: NodeId| {
+            s.docs
+                .get(&d)
+                .and_then(|x| x.peek::<super::DocSettings>())
+                .is_some_and(|x| x.hidden)
+        };
+        nd == doc || (hidden(nd) && hidden(doc))
     })
 }
 
@@ -1673,6 +1677,18 @@ fn insert_nodes_at(
         return Ok(());
     }
     let doc = with_arena(|ar| ar.doc_of(parent));
+    // A parent that can't have children fails before the document check
+    // (observed on PHP 8.5; test gh16594.phpt).
+    if !modern
+        && with_arena(|ar| {
+            !matches!(
+                ar.data(parent),
+                NodeData::Element(_) | NodeData::Document(_) | NodeData::Fragment
+            )
+        })
+    {
+        return throw_dom(vm, DomError::HierarchyRequest);
+    }
     let (node, _fh) = if nodes.len() == 1 {
         if !modern && !same_doc(nodes[0], doc) {
             return throw_dom(vm, DomError::WrongDocument);

@@ -1917,7 +1917,12 @@ fn text_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn comment_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let t = s8(&a.str(0));
-    construct_node(vm, a, NodeData::Comment(t))
+    let none = !a.has(0);
+    let r = construct_node(vm, a, NodeData::Comment(t))?;
+    if none && let Some(n) = node_of(a.this_obj()) {
+        with_arena(|ar| ar.mark_null_content(n));
+    }
+    Ok(r)
 }
 
 fn cdata_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
