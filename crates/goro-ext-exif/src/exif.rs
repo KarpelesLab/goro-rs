@@ -13,7 +13,7 @@ use crate::Diag;
 use crate::imageinfo::{
     self, IMAGETYPE_HEIF, IMAGETYPE_JPEG, IMAGETYPE_TIFF_II, IMAGETYPE_TIFF_MM,
 };
-use crate::makernote::{self, Maker};
+use crate::makernote;
 use crate::tags::{self, Table};
 
 /// A PHP value of the result.
@@ -145,7 +145,6 @@ const TAG_USERCOMMENT: u16 = 0x9286;
 const TAG_XP_TITLE: u16 = 0x9C9B;
 const TAG_XP_SUBJECT: u16 = 0x9C9F;
 const TAG_EXIF_IMAGEWIDTH: u16 = 0xA002;
-const TAG_EXIF_IMAGELENGTH: u16 = 0xA003;
 const TAG_INTEROP_IFD: u16 = 0xA005;
 const TAG_FOCALPLANE_X_RES: u16 = 0xA20E;
 const TAG_FOCALPLANE_RES_UNIT: u16 = 0xA210;
@@ -200,8 +199,8 @@ struct Info<'a> {
     aperture_fnumber: f64,
     aperture_value: f64,
     max_aperture: f64,
-    exposure_time: f64,
-    shutter_speed: f64,
+    exposure_time: Option<f64>,
+    shutter_speed: Option<f64>,
     distance: f64,
     exif_image_width: u32,
     focal_plane_x_res: f64,
@@ -257,8 +256,8 @@ impl<'a> Info<'a> {
             aperture_fnumber: 0.0,
             aperture_value: 0.0,
             max_aperture: 0.0,
-            exposure_time: 0.0,
-            shutter_speed: 0.0,
+            exposure_time: None,
+            shutter_speed: None,
             distance: 0.0,
             exif_image_width: 0,
             focal_plane_x_res: 0.0,
@@ -396,20 +395,15 @@ impl<'a> Info<'a> {
             8 => self.get16(v) as i16 as f64,
             4 => self.get32(v) as f64,
             9 => self.get32(v) as i32 as f64,
-            5 => {
+            // Rationals, signed ones too, are read unsigned into a single
+            // precision float (observed on PHP 8.5: 0xFFFFFFFF/1 gives
+            // "4294967296.00m").
+            5 | 10 => {
                 let d = self.get32(&v[4..]);
                 if d == 0 {
                     0.0
                 } else {
-                    self.get32(v) as f64 / d as f64
-                }
-            }
-            10 => {
-                let d = self.get32(&v[4..]) as i32;
-                if d == 0 {
-                    0.0
-                } else {
-                    self.get32(v) as i32 as f64 / d as f64
+                    (self.get32(v) as f64 / d as f64) as f32 as f64
                 }
             }
             11 => f32::from_le_bytes([v[0], v[1], v[2], v[3]]) as f64,
@@ -428,7 +422,7 @@ impl<'a> Info<'a> {
             4 | 9 => self.get32(v),
             5 | 10 => {
                 let d = self.get32(&v[4..]);
-                if d == 0 { 0 } else { self.get32(v) / d }
+                self.get32(v).checked_div(d).unwrap_or(0)
             }
             11 | 12 => {
                 // Out of range floats count as 0 (test float_cast_overflow.phpt).
@@ -447,14 +441,7 @@ impl<'a> Info<'a> {
     /// count from; `limit` bounds them (the file size, observed on PHP
     /// 8.5: "Illegal pointer offset(... > x<FileSize>)").
     #[allow(clippy::too_many_arguments)]
-    fn process_tag(
-        &mut self,
-        e: usize,
-        base: usize,
-        section: usize,
-        table: Table,
-        maker: Option<&makernote::Layout>,
-    ) -> Res<()> {
+    fn process_tag(&mut self, e: usize, base: usize, section: usize, table: Table) -> Res<()> {
         let Some(ent) = self.bytes(e, 12) else {
             return Err(HARD);
         };
@@ -495,7 +482,7 @@ impl<'a> Info<'a> {
                     return Ok(());
                 }
                 self.found |= (1 << sec) | (1 << S_ANY_TAG);
-                let _ = self.process_ifd(base + off as usize, base, sec, tab, None);
+                let _ = self.process_ifd(base + off as usize, base, sec, tab);
                 return Ok(());
             }
         }
@@ -512,10 +499,6 @@ impl<'a> Info<'a> {
         let value: &'a [u8] = if byte_count > 4 {
             let off = self.get32(&ent[8..]);
             let sum = off.wrapping_add(byte_count as u32);
-            let rel_base = match maker {
-                Some(l) if l.offsets_relative => l.start,
-                _ => base,
-            };
             if (sum as u64) < off as u64 || sum > self.file_size {
                 self.warn(format!(
                     "Process tag(x{tag:04X}={}): Illegal pointer offset(x{off:04X} + x{byte_count:04X} = x{sum:04X} > x{:04X})",
@@ -524,7 +507,7 @@ impl<'a> Info<'a> {
                 ));
                 return Err(SOFT);
             }
-            match self.bytes(rel_base + off as usize, byte_count) {
+            match self.bytes(base + off as usize, byte_count) {
                 Some(v) => v,
                 None => {
                     self.warn("Unexpected end of file reached");
@@ -619,13 +602,14 @@ impl<'a> Info<'a> {
                 TAG_COPYRIGHT => self.copyright_tag(value),
                 TAG_USERCOMMENT => {
                     let uc = self.user_comment_value(value);
-                    self.user_comment = Some(uc);
+                    let empty_jis = uc.1 == Some("JIS") && uc.0.as_deref() == Some(b"\0");
+                    self.user_comment = if empty_jis { None } else { Some(uc) };
                 }
                 TAG_FNUMBER => self.aperture_fnumber = self.number(fmt, value),
                 TAG_APERTURE => self.aperture_value = self.number(fmt, value),
                 TAG_MAXAPERTURE => self.max_aperture = self.number(fmt, value),
-                TAG_EXPOSURETIME => self.exposure_time = self.number(fmt, value),
-                TAG_SHUTTERSPEED => self.shutter_speed = self.number(fmt, value),
+                TAG_EXPOSURETIME => self.exposure_time = Some(self.number(fmt, value)),
+                TAG_SHUTTERSPEED => self.shutter_speed = Some(self.number(fmt, value)),
                 TAG_SUBJECT_DISTANCE => self.distance = self.number(fmt, value),
                 TAG_EXIF_IMAGEWIDTH => self.exif_image_width = self.uint(fmt, value),
                 TAG_FOCALPLANE_X_RES | TAG_FOCALPLANE_X_RES_OLD => {
@@ -703,14 +687,13 @@ impl<'a> Info<'a> {
                 self.found |= 1 << sec;
                 self.found |= 1 << S_ANY_TAG;
                 if self
-                    .process_ifd(base + off as usize, base, sec, tab, None)
+                    .process_ifd(base + off as usize, base, sec, tab)
                     .is_err()
                     && !self.tiff_mode
                 {
                     return Err(SOFT);
                 }
-            } else if tag == TAG_MAKER_NOTE && self.maker_note(e, value, base, byte_count).is_err()
-            {
+            } else if tag == TAG_MAKER_NOTE && self.maker_note(value, base, byte_count).is_err() {
                 return Err(SOFT);
             }
         }
@@ -734,10 +717,15 @@ impl<'a> Info<'a> {
     /// The Copyright tag: photographer and editor separated by NUL
     /// (Exif 2.3 section 4.6.5, Copyright).
     fn copyright_tag(&mut self, v: &[u8]) {
+        // Observed on PHP 8.5: nothing when the photographer part is empty,
+        // both parts when anything follows its NUL.
         let first = cstr(v);
+        if first.is_empty() {
+            return;
+        }
         let rest = v.get(first.len() + 1..).unwrap_or(b"");
         let editor = cstr(rest);
-        if !editor.is_empty() {
+        if !rest.is_empty() {
             let mut c = first.clone();
             c.extend_from_slice(b", ");
             c.extend_from_slice(&editor);
@@ -778,14 +766,22 @@ impl<'a> Info<'a> {
                 } else {
                     &self.ini.decode_jis_intel
                 };
-                let out = self
+                let mut out = self
                     .cs
                     .convert(text, &self.ini.encode_jis, from)
                     .unwrap_or_else(|| text.to_vec());
-                return (non_empty(out), Some("JIS"));
+                // The converted text keeps a terminating NUL (observed on
+                // PHP 8.5; an empty one gives no UserComment at all).
+                out.push(0);
+                return (Some(out), Some("JIS"));
             }
             if code == b"\0\0\0\0\0\0\0\0" {
-                return (non_empty(cstr(text)), Some("UNDEFINED"));
+                // Trailing spaces are dropped (observed on PHP 8.5).
+                let mut t = cstr(text);
+                while t.last() == Some(&b' ') {
+                    t.pop();
+                }
+                return (non_empty(t), Some("UNDEFINED"));
             }
         }
         (non_empty(cstr(v)), None)
@@ -809,20 +805,13 @@ impl<'a> Info<'a> {
     }
 
     /// An IFD at absolute offset `dir`; offsets in it count from `base`.
-    fn process_ifd(
-        &mut self,
-        dir: usize,
-        base: usize,
-        section: usize,
-        table: Table,
-        maker: Option<&makernote::Layout>,
-    ) -> Res<()> {
+    fn process_ifd(&mut self, dir: usize, base: usize, section: usize, table: Table) -> Res<()> {
         if self.nesting > MAX_NESTING {
             self.warn("corrupt EXIF header: maximum IFD tag nesting level reached");
             return Err(SOFT);
         }
         self.nesting += 1;
-        let r = self.process_ifd_inner(dir, base, section, table, maker);
+        let r = self.process_ifd_inner(dir, base, section, table);
         self.nesting -= 1;
         r
     }
@@ -833,7 +822,6 @@ impl<'a> Info<'a> {
         base: usize,
         section: usize,
         table: Table,
-        maker: Option<&makernote::Layout>,
     ) -> Res<()> {
         let Some(nb) = self.bytes(dir, 2) else {
             if self.tiff_mode {
@@ -878,7 +866,7 @@ impl<'a> Info<'a> {
             }
         }
         for i in 0..n {
-            self.process_tag(dir + 2 + i * 12, base, section, table, maker)?;
+            self.process_tag(dir + 2 + i * 12, base, section, table)?;
         }
         if section == S_THUMBNAIL || section == S_MAKERNOTE {
             return Ok(());
@@ -905,7 +893,7 @@ impl<'a> Info<'a> {
                 ));
                 return Ok(());
             }
-            let _ = self.process_ifd(base + next as usize, base, S_THUMBNAIL, Table::Ifd, None);
+            let _ = self.process_ifd(base + next as usize, base, S_THUMBNAIL, Table::Ifd);
             if self.read_thumbnail {
                 self.thumbnail_check_tiff();
             }
@@ -915,7 +903,7 @@ impl<'a> Info<'a> {
             self.warn("Illegal IFD offset");
             return Err(HARD);
         }
-        self.process_ifd(base + next as usize, base, S_THUMBNAIL, Table::Ifd, None)?;
+        self.process_ifd(base + next as usize, base, S_THUMBNAIL, Table::Ifd)?;
         if self.thumb.filetype != 0 && self.thumb.size_set && self.thumb.offset_set {
             let end = self.thumb.offset as u64 + self.thumb.size as u64;
             if self.thumb.size == 0 || end > (self.file.len() - base) as u64 {
@@ -952,7 +940,7 @@ impl<'a> Info<'a> {
 
     /// The maker note at entry `e`: an IFD in one of the layouts the
     /// makers use (see [`makernote`]).
-    fn maker_note(&mut self, _e: usize, value: &'a [u8], base: usize, len: usize) -> Res<()> {
+    fn maker_note(&mut self, value: &'a [u8], base: usize, len: usize) -> Res<()> {
         let make = self.make.clone().unwrap_or_default();
         let Some(desc) = makernote::find(&make) else {
             return Ok(());
@@ -972,25 +960,7 @@ impl<'a> Info<'a> {
             ));
             return Ok(());
         }
-        let saved = self.motorola;
-        match desc.order {
-            makernote::Order::Intel => self.motorola = false,
-            makernote::Order::Motorola => self.motorola = true,
-            makernote::Order::Same => {}
-        }
-        let layout = makernote::Layout {
-            start,
-            offsets_relative: desc.relative,
-        };
-        let mbase = if desc.relative { start } else { base };
-        let r = self.process_ifd(
-            start + off,
-            mbase,
-            S_MAKERNOTE,
-            Table::Maker(desc.maker),
-            Some(&layout),
-        );
-        self.motorola = saved;
+        let r = self.process_ifd(start + off, base, S_MAKERNOTE, Table::Maker(desc.maker));
         r
     }
 
@@ -1027,7 +997,7 @@ impl<'a> Info<'a> {
             return Ok(());
         }
         self.found |= 1 << S_IFD0;
-        match self.process_ifd(t + first as usize, t, S_IFD0, Table::Ifd, None) {
+        match self.process_ifd(t + first as usize, t, S_IFD0, Table::Ifd) {
             Err(f) if f.hard => Err(f),
             _ => Ok(()),
         }
@@ -1095,23 +1065,21 @@ impl<'a> Info<'a> {
             match marker {
                 0xDA | 0xD9 => return Ok(()),
                 0xFE => self.comment(data),
-                0xE1 => {
-                    if data.len() >= 6 && &data[..6] == b"Exif\0\0" {
-                        if self
-                            .process_tiff_in_jpeg(data_at + 6, data.len() - 6)
-                            .is_err()
-                        {
-                            self.warn("File structure corrupted");
-                            return Err(HARD);
-                        }
+                0xE1 if data.starts_with(b"Exif\0\0") => {
+                    if self
+                        .process_tiff_in_jpeg(data_at + 6, data.len() - 6)
+                        .is_err()
+                    {
+                        self.warn("File structure corrupted");
+                        return Err(HARD);
                     }
                 }
-                0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
-                    if data.len() >= 6 {
-                        self.height = u16::from_be_bytes([data[1], data[2]]) as u32;
-                        self.width = u16::from_be_bytes([data[3], data[4]]) as u32;
-                        self.is_color = data[5] == 3;
-                    }
+                // SOFn (ITU T.81 table B.1): precision, lines, samples per
+                // line, components.
+                0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) && data.len() >= 6 => {
+                    self.height = u16::from_be_bytes([data[1], data[2]]) as u32;
+                    self.width = u16::from_be_bytes([data[3], data[4]]) as u32;
+                    self.is_color = data[5] == 3;
                 }
                 _ => {}
             }
@@ -1157,7 +1125,7 @@ impl<'a> Info<'a> {
             }
             let first = self.get32(&f[4..]);
             self.found |= 1 << S_IFD0;
-            if let Err(f) = self.process_ifd(first as usize, 0, S_IFD0, Table::Ifd, None)
+            if let Err(f) = self.process_ifd(first as usize, 0, S_IFD0, Table::Ifd)
                 && f.hard
             {
                 // Past the error limit the file is given up (observed on PHP
@@ -1227,16 +1195,36 @@ impl<'a> Info<'a> {
         if self.have_order {
             put("ByteOrderMotorola", Node::Int(self.motorola as i64));
         }
-        if self.focal_plane_x_res != 0.0 && self.exif_image_width != 0 {
+        if self.focal_plane_x_res != 0.0
+            && self.exif_image_width != 0
+            && self.focal_plane_unit != 0.0
+        {
             self.ccd_width =
                 self.exif_image_width as f64 * self.focal_plane_unit / self.focal_plane_x_res;
             put("CCDWidth", Node::s(format!("{}mm", self.ccd_width as i64)));
+        }
+        // APEX values (Exif 2.3 annex C): Tv = -log2(exposure time),
+        // Av = 2 log2(F number). The computed exposure time is shown when
+        // only ShutterSpeedValue is given (observed on PHP 8.5).
+        if let (None, Some(tv)) = (self.exposure_time, self.shutter_speed) {
+            let et = (-tv * std::f64::consts::LN_2).exp();
+            if et > 0.0 {
+                let s = if et <= 0.5 {
+                    format!("{:.3} s (1/{})", et, (0.5 + 1.0 / et) as i64)
+                } else {
+                    format!("{:.3} s", et)
+                };
+                put("ExposureTime", Node::s(s));
+            }
         }
         let mut aperture = self.aperture_fnumber;
         if aperture == 0.0 && self.aperture_value != 0.0 {
             aperture = (self.aperture_value * std::f64::consts::LN_2 * 0.5).exp();
         }
-        if aperture != 0.0 || self.aperture_fnumber_seen() {
+        if aperture == 0.0 && self.max_aperture != 0.0 {
+            aperture = (self.max_aperture * std::f64::consts::LN_2 * 0.5).exp();
+        }
+        if aperture != 0.0 {
             put("ApertureFNumber", Node::s(format!("f/{:.1}", aperture)));
         }
         if self.distance != 0.0 {
@@ -1280,15 +1268,6 @@ impl<'a> Info<'a> {
             put("Thumbnail.Width", Node::Int(self.thumb.width as i64));
         }
         c
-    }
-
-    fn aperture_fnumber_seen(&self) -> bool {
-        self.found & (1 << S_EXIF) != 0 && self.fnumber_tag_present()
-    }
-
-    fn fnumber_tag_present(&self) -> bool {
-        self.sections[S_EXIF].iter().any(|(k, _)| k == b"FNumber")
-            || self.sections[S_IFD0].iter().any(|(k, _)| k == b"FNumber")
     }
 
     /// The size of the thumbnail image itself (its JPEG SOF), when the
@@ -1359,14 +1338,10 @@ fn heif_exif_location(f: &[u8]) -> Option<(usize, usize)> {
         if &t != b"iinf" || e < s + 6 {
             continue;
         }
-        let ver = f[s];
-        let (n, mut p) = if ver == 0 {
-            (be16(f, s + 4) as usize, s + 6)
-        } else {
-            (be32(f, s + 4) as usize, s + 8)
-        };
+        // ISO/IEC 14496-12 ItemInfoBox: a 16-bit (version 0) or 32-bit
+        // entry count, then the ItemInfoEntry boxes.
+        let p = if f[s] == 0 { s + 6 } else { s + 8 };
         let entries = imageinfo::boxes(f, p, e);
-        let _ = n;
         for &(it, is, ie) in &entries {
             if &it != b"infe" || ie < is + 4 {
                 continue;
@@ -1384,8 +1359,6 @@ fn heif_exif_location(f: &[u8]) -> Option<(usize, usize)> {
                 }
             }
         }
-        p = e;
-        let _ = p;
     }
     let id = exif_id?;
     for &(t, s, e) in &meta {
@@ -1552,9 +1525,8 @@ pub fn read_data(
                 continue;
             }
             let c = std::mem::take(&mut info.comments);
-            if opts.as_arrays || true {
-                out.push((name.as_bytes().to_vec(), Node::List(c)));
-            }
+            // COMMENT is a list in both modes (test exif000.phpt).
+            out.push((name.as_bytes().to_vec(), Node::List(c)));
             continue;
         } else {
             std::mem::take(&mut info.sections[i])
@@ -1598,6 +1570,3 @@ pub fn thumbnail(d: &[u8], ini: &Ini, cs: &dyn Charset) -> (Option<Thumbnail>, V
     });
     (r, info.diags)
 }
-
-#[allow(dead_code)]
-fn _unused(_: Maker) {}

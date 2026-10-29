@@ -1,15 +1,17 @@
 //! Maker notes: the vendor IFDs inside the Exif MakerNote tag.
 //!
-//! The layouts (an optional identifier, where the IFD starts, which base
-//! value offsets count from, the byte order) are those the vendors use
-//! and are publicly documented by Exif tool authors; which makers PHP
-//! reads and the tag names it prints were observed on PHP 8.5 with the
-//! ext/exif test images.
+//! The layouts (an optional identifier, then an IFD in the file's byte
+//! order whose value offsets count from the TIFF header) are those the
+//! vendors use and are publicly documented by Exif tool authors. Which
+//! makers PHP reads, how it matches the Make tag (exactly, trailing spaces
+//! aside) and the tag names it prints were observed on PHP 8.5 with crafted
+//! files and the ext/exif test images.
 
 /// A maker whose notes are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Maker {
     Canon,
+    Casio,
     Fujifilm,
     Nikon,
     Olympus,
@@ -17,37 +19,20 @@ pub enum Maker {
     Panasonic,
     Sony,
     Minolta,
-}
-
-/// Byte order of the maker note IFD.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Order {
-    Same,
-    Intel,
-    Motorola,
+    Dji,
 }
 
 /// How to read one maker's note.
 #[derive(Debug, Clone, Copy)]
 pub struct Desc {
     pub maker: Maker,
-    /// Prefix of the Make tag.
+    /// The Make tag.
     pub make: &'static [u8],
-    /// Identifier at the start of the note.
+    /// Identifier at the start of the note (another layout of the same
+    /// maker is seen as a MAKERNOTE section without tags).
     pub id: &'static [u8],
     /// Where the IFD starts in the note.
     pub ifd_offset: usize,
-    /// Value offsets count from the note's start (else from the TIFF
-    /// header).
-    pub relative: bool,
-    pub order: Order,
-}
-
-/// Where the maker note being read sits.
-#[derive(Debug, Clone, Copy)]
-pub struct Layout {
-    pub start: usize,
-    pub offsets_relative: bool,
 }
 
 const DESCS: &[Desc] = &[
@@ -56,76 +41,77 @@ const DESCS: &[Desc] = &[
         make: b"Canon",
         id: b"",
         ifd_offset: 0,
-        relative: false,
-        order: Order::Same,
+    },
+    Desc {
+        maker: Maker::Casio,
+        make: b"CASIO",
+        id: b"",
+        ifd_offset: 0,
     },
     Desc {
         maker: Maker::Fujifilm,
         make: b"FUJIFILM",
-        id: b"FUJIFILM\x0C\x00\x00\x00",
+        id: b"FUJIFILM",
         ifd_offset: 12,
-        relative: true,
-        order: Order::Intel,
     },
     Desc {
         maker: Maker::Nikon,
         make: b"NIKON",
         id: b"Nikon\x00\x01\x00",
         ifd_offset: 8,
-        relative: false,
-        order: Order::Same,
     },
     Desc {
         maker: Maker::Olympus,
         make: b"OLYMPUS OPTICAL CO.,LTD",
         id: b"OLYMP\x00\x01\x00",
         ifd_offset: 8,
-        relative: false,
-        order: Order::Same,
     },
     Desc {
         maker: Maker::Samsung,
         make: b"SAMSUNG",
         id: b"",
         ifd_offset: 0,
-        relative: false,
-        order: Order::Same,
     },
     Desc {
         maker: Maker::Panasonic,
         make: b"Panasonic",
         id: b"Panasonic\x00\x00\x00",
         ifd_offset: 12,
-        relative: false,
-        order: Order::Same,
     },
     Desc {
         maker: Maker::Sony,
         make: b"SONY",
         id: b"SONY DSC \x00\x00\x00",
         ifd_offset: 12,
-        relative: false,
-        order: Order::Same,
     },
     Desc {
         maker: Maker::Minolta,
         make: b"Minolta, KONICA MINOLTA",
         id: b"",
         ifd_offset: 0,
-        relative: false,
-        order: Order::Same,
+    },
+    Desc {
+        maker: Maker::Dji,
+        make: b"DJI",
+        id: b"",
+        ifd_offset: 0,
     },
 ];
 
-/// The layout for a note with this Make and data.
+/// The layout for a note with this Make.
 pub fn find(make: &[u8]) -> Option<&'static Desc> {
-    DESCS.iter().find(|d| make.starts_with(d.make))
+    let mut n = make.len();
+    while n > 0 && make[n - 1] == b' ' {
+        n -= 1;
+    }
+    DESCS.iter().find(|d| d.make == &make[..n])
 }
 
 /// Tag names (observed on PHP 8.5).
 pub fn table(m: Maker) -> &'static [(u16, &'static str)] {
     match m {
         Maker::Canon => CANON,
+        Maker::Casio => CASIO,
         Maker::Fujifilm => FUJIFILM,
         Maker::Nikon => NIKON,
         Maker::Olympus => OLYMPUS,
@@ -133,10 +119,15 @@ pub fn table(m: Maker) -> &'static [(u16, &'static str)] {
         Maker::Panasonic => PANASONIC,
         Maker::Sony => SONY,
         Maker::Minolta => MINOLTA,
+        Maker::Dji => DJI,
     }
 }
 
-/// Canon (test bug62523_1.phpt images).
+// The tables: names observed on PHP 8.5 for every tag id 0x0000-0x07FF,
+// 0x0E00-0x10FF, 0x2000-0x22FF, 0x3000-0x30FF, 0x4000-0x40FF, 0x8000-0x80FF,
+// 0x9400-0x94FF, 0xA000-0xA0FF and 0xB000-0xB0FF, plus the ids that share
+// a name with another (seen on the ext/exif test images: the later value
+// takes the earlier key's place).
 static CANON: &[(u16, &str)] = &[
     (0x0001, "ModeArray"),
     (0x0004, "ImageInfo"),
@@ -147,17 +138,86 @@ static CANON: &[(u16, &str)] = &[
     (0x000C, "Camera"),
     (0x000F, "CustomFunctions"),
 ];
-static FUJIFILM: &[(u16, &str)] = &[];
-static NIKON: &[(u16, &str)] = &[];
-/// Olympus (test bug54002.phpt images).
+static CASIO: &[(u16, &str)] = &[
+    (0x0001, "RecordingMode"),
+    (0x0002, "Quality"),
+    (0x0003, "FocusingMode"),
+    (0x0004, "FlashMode"),
+    (0x0005, "FlashIntensity"),
+    (0x0006, "ObjectDistance"),
+    (0x0007, "WhiteBalance"),
+    (0x000A, "DigitalZoom"),
+    (0x000B, "Sharpness"),
+    (0x000C, "Contrast"),
+    (0x000D, "Saturation"),
+    (0x0014, "CCDSensitivity"),
+];
+static FUJIFILM: &[(u16, &str)] = &[
+    (0x0000, "Version"),
+    (0x1000, "Quality"),
+    (0x1001, "Sharpness"),
+    (0x1002, "WhiteBalance"),
+    (0x1003, "Color"),
+    (0x1004, "Tone"),
+    (0x1010, "FlashMode"),
+    (0x1011, "FlashStrength"),
+    (0x1020, "Macro"),
+    (0x1021, "FocusMode"),
+    (0x1030, "SlowSync"),
+    (0x1031, "PictureMode"),
+];
+static NIKON: &[(u16, &str)] = &[
+    (0x0003, "Quality"),
+    (0x0004, "ColorMode"),
+    (0x0005, "ImageAdjustment"),
+    (0x0006, "CCDSensitivity"),
+    (0x0007, "WhiteBalance"),
+    (0x0008, "Focus"),
+    (0x000A, "DigitalZoom"),
+    (0x000B, "Converter"),
+];
 static OLYMPUS: &[(u16, &str)] = &[
+    (0x0200, "SpecialMode"),
     (0x0201, "JPEGQuality"),
     (0x0202, "Macro"),
     (0x0204, "DigitalZoom"),
+    (0x0207, "SoftwareRelease"),
+    (0x0208, "PictureInfo"),
+    (0x0209, "CameraId"),
+    (0x0F00, "DataDump"),
 ];
-/// Samsung (test bug72735.phpt images).
-static SAMSUNG: &[(u16, &str)] = &[(0x0001, "Version")];
-/// Panasonic (tests bug72735.phpt, bug75785.phpt). Two ids share some names: the later value takes the earlier key's place.
+static SAMSUNG: &[(u16, &str)] = &[
+    (0x0001, "Version"),
+    (0x0021, "PictureWizard"),
+    (0x0030, "LocalLocationName"),
+    (0x0031, "LocationName"),
+    (0x0035, "Preview"),
+    (0x0043, "CameraTemperature"),
+    (0xA001, "FirmwareName"),
+    (0xA003, "LensType"),
+    (0xA004, "LensFirmware"),
+    (0xA010, "SensorAreas"),
+    (0xA011, "ColorSpace"),
+    (0xA012, "SmartRange"),
+    (0xA013, "ExposureBiasValue"),
+    (0xA014, "ISO"),
+    (0xA018, "ExposureTime"),
+    (0xA019, "FNumber"),
+    (0xA01A, "FocalLengthIn35mmFormat"),
+    (0xA020, "EncryptionKey"),
+    (0xA021, "WB_RGGBLevelsUncorrected"),
+    (0xA022, "WB_RGGBLevelsAuto"),
+    (0xA023, "WB_RGGBLevelsIlluminator1"),
+    (0xA024, "WB_RGGBLevelsIlluminator2"),
+    (0xA028, "WB_RGGBLevelsBlack"),
+    (0xA030, "ColorMatrix"),
+    (0xA031, "ColorMatrixSRGB"),
+    (0xA032, "ColorMatrixAdobeRGB"),
+    (0xA040, "ToneCurve1"),
+    (0xA041, "ToneCurve2"),
+    (0xA042, "ToneCurve3"),
+    (0xA043, "ToneCurve4"),
+];
 static PANASONIC: &[(u16, &str)] = &[
     (0x0001, "Quality"),
     (0x0002, "FirmwareVersion"),
@@ -196,11 +256,24 @@ static PANASONIC: &[(u16, &str)] = &[
     (0x003F, "FacesDetected"),
     (0x0040, "Saturation"),
     (0x0041, "Sharpness"),
+    (0x0042, "FilmMode"),
+    (0x0044, "ColorTempKelvin"),
+    (0x0045, "BracketSettings"),
+    (0x0046, "WBAdjustAB"),
+    (0x0047, "WBAdjustGM"),
+    (0x0048, "FlashCurtain"),
     (0x0049, "LongShutterNoiseReduction"),
+    (0x004B, "ImageWidth"),
+    (0x004C, "ImageHeight"),
     (0x004D, "AFPointPosition"),
     (0x004E, "FaceDetInfo"),
+    (0x0051, "LensType"),
+    (0x0052, "LensSerialNumber"),
+    (0x0053, "AccessoryType"),
+    (0x0054, "AccessorySerialNumber"),
     (0x0059, "Transform1"),
     (0x005D, "IntelligentExposure"),
+    (0x0060, "LensFirmwareVersion"),
     (0x0061, "FaceRecInfo"),
     (0x0062, "FlashWarning"),
     (0x0065, "Title"),
@@ -212,17 +285,27 @@ static PANASONIC: &[(u16, &str)] = &[
     (0x006F, "Landmark"),
     (0x0070, "IntelligentResolution"),
     (0x0077, "BurstSheed"),
+    (0x0079, "IntelligentDRange"),
     (0x007C, "ClearRetouch"),
     (0x0080, "City2"),
     (0x0086, "ManometerPressure"),
+    (0x0089, "PhotoStyle"),
+    (0x008A, "ShadingCompensation"),
     (0x008C, "AccelerometerZ"),
     (0x008D, "AccelerometerX"),
     (0x008E, "AccelerometerY"),
+    (0x008F, "CameraOrientation"),
+    (0x0090, "RollAngle"),
+    (0x0091, "PitchAngle"),
     (0x0093, "SweepPanoramaDirection"),
     (0x0094, "PanoramaFieldOfView"),
     (0x0096, "TimerRecording"),
     (0x009D, "InternalNDFilter"),
+    (0x009E, "HDR"),
+    (0x009F, "ShutterType"),
     (0x00A3, "ClearRetouchValue"),
+    (0x00AB, "TouchAE"),
+    (0x0E00, "PrintIM"),
     (0x8000, "MakerNoteVersion"),
     (0x8001, "SceneMode"),
     (0x8004, "WBRedLevel"),
@@ -234,13 +317,20 @@ static PANASONIC: &[(u16, &str)] = &[
     (0x8010, "BabyAge2"),
     (0x8012, "Transform2"),
 ];
-/// Sony (test sony.phpt). Two ids share some names.
 static SONY: &[(u16, &str)] = &[
     (0x0102, "Quality"),
     (0x0104, "FlashExposureComp"),
+    (0x0105, "Teleconverter"),
     (0x0112, "WhiteBalanceFineTune"),
+    (0x0114, "CameraSettings"),
     (0x0115, "WhiteBalance"),
+    (0x0116, "ExtraInfo"),
+    (0x0E00, "PrintIM"),
+    (0x1000, "MultiBurstMode"),
+    (0x1001, "MultiBurstImageWidth"),
+    (0x1002, "MultiBurstImageHeight"),
     (0x1003, "Panorama"),
+    (0x2001, "PreviewImage"),
     (0x2002, "Rating"),
     (0x2004, "Contrast"),
     (0x2005, "Saturation"),
@@ -259,6 +349,8 @@ static SONY: &[(u16, &str)] = &[
     (0xB024, "ZoneMatching"),
     (0xB025, "DynamicRangeOptimizer"),
     (0xB026, "ImageStabilization"),
+    (0xB027, "LensID"),
+    (0xB028, "MinoltaMakerNote"),
     (0xB029, "ColorMode"),
     (0xB02B, "FullImageSize"),
     (0xB02C, "PreviewImageSize"),
@@ -278,4 +370,44 @@ static SONY: &[(u16, &str)] = &[
     (0xB052, "IntelligentAuto"),
     (0xB054, "WhiteBalance2"),
 ];
-static MINOLTA: &[(u16, &str)] = &[];
+static MINOLTA: &[(u16, &str)] = &[
+    (0x0000, "Version"),
+    (0x0001, "CameraSettingsStdOld"),
+    (0x0003, "CameraSettingsStdNew"),
+    (0x0004, "CameraSettings7D"),
+    (0x0018, "ImageStabilizationData"),
+    (0x0020, "WBInfoA100"),
+    (0x0040, "CompressedImageSize"),
+    (0x0081, "Thumbnail"),
+    (0x0088, "ThumbnailOffset"),
+    (0x0089, "ThumbnailLength"),
+    (0x0100, "SceneMode"),
+    (0x0101, "ColorMode"),
+    (0x0102, "Quality"),
+    (0x0104, "FlashExposureComp"),
+    (0x0105, "Teleconverter"),
+    (0x0107, "ImageStabilization"),
+    (0x0109, "RawAndJpgRecording"),
+    (0x010A, "ZoneMatching"),
+    (0x010B, "ColorTemperature"),
+    (0x010C, "LensID"),
+    (0x0111, "ColorCompensationFilter"),
+    (0x0112, "WhiteBalanceFineTune"),
+    (0x0113, "ImageStabilizationA100"),
+    (0x0114, "CameraSettings5D"),
+    (0x0115, "WhiteBalance"),
+    (0x0E00, "PrintIM"),
+    (0x0F00, "CameraSettingsZ1"),
+];
+static DJI: &[(u16, &str)] = &[
+    (0x0001, "Make"),
+    (0x0003, "SpeedX"),
+    (0x0004, "SpeedY"),
+    (0x0005, "SpeedZ"),
+    (0x0006, "Pitch"),
+    (0x0007, "Yaw"),
+    (0x0008, "Roll"),
+    (0x0009, "CameraPitch"),
+    (0x000A, "CameraYaw"),
+    (0x000B, "CameraRoll"),
+];

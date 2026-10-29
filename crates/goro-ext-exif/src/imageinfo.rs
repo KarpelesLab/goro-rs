@@ -451,6 +451,11 @@ fn tiff(d: &[u8], t: i64) -> Option<ImageSize> {
 /// A JPEG 2000 codestream at `start` (ISO/IEC 15444-1 annex A: SOC then
 /// the SIZ marker segment).
 fn jpc(d: &[u8], start: usize, t: i64, diags: &mut Vec<Diag>) -> Option<ImageSize> {
+    // Inside a JP2 file a codestream too short for its SOC is no
+    // codestream (observed on PHP 8.5).
+    if t == IMAGETYPE_JP2 && Rd::new(d, start).read(2).is_none() {
+        return None;
+    }
     let mut r = Rd::new(d, start + 2);
     match r.read(2) {
         Some([0xFF, 0x51]) => {}
@@ -479,18 +484,19 @@ fn jpc(d: &[u8], start: usize, t: i64, diags: &mut Vec<Diag>) -> Option<ImageSiz
 /// JP2: the first `jp2c` box at the top level holds the codestream.
 fn jp2(d: &[u8], diags: &mut Vec<Diag>) -> Option<ImageSize> {
     let mut pos = 0usize;
-    loop {
-        let Some(h) = Rd::new(d, pos).read(8) else {
-            break;
-        };
+    while let Some(h) = Rd::new(d, pos).read(8) {
         let len = be32(h, 0) as usize;
         if &h[4..8] == b"jp2c" {
-            return jpc(d, pos + 8, IMAGETYPE_JP2, diags);
+            let r = jpc(d, pos + 8, IMAGETYPE_JP2, diags);
+            if r.is_some() {
+                return r;
+            }
+            break;
         }
         if len < 8 {
             break;
         }
-        pos += len;
+        pos = pos.saturating_add(len);
     }
     diags.push(Diag::Warning(
         "JP2 file has no codestreams at root level".into(),
@@ -801,7 +807,7 @@ fn heif_size(d: &[u8], t: i64) -> Option<ImageSize> {
     }
     let primary = primary?;
     let list = &assoc.iter().find(|a| a.0 == primary)?.1;
-    let (mut size, mut pix) = (None, None);
+    let (mut size, mut pix, mut av1c) = (None, None, None);
     for &i in list {
         let Some(&(pt, ps, pe)) = props.get((i as usize).wrapping_sub(1)) else {
             continue;
@@ -818,10 +824,22 @@ fn heif_size(d: &[u8], t: i64) -> Option<ImageSize> {
                 return None;
             }
             pix = Some((bits[0] as u32, n as u32));
+        } else if &pt == b"av1C" && pe >= ps + 3 && av1c.is_none() {
+            // AV1 codec configuration (AV1 in ISOBMFF section 2.3):
+            // high_bitdepth, twelve_bit and monochrome flags.
+            let f = d[ps + 2];
+            let bits = if f & 0x40 != 0 {
+                if f & 0x20 != 0 { 12 } else { 10 }
+            } else {
+                8
+            };
+            av1c = Some((bits, if f & 0x10 != 0 { 1 } else { 3 }));
         }
     }
     let (w, h) = size?;
-    let (bits, mut ch) = pix?;
+    // Without pixi, an AVIF's av1C (observed on PHP 8.5, test
+    // ext/gd/tests/imagecreatefromstring_compatible_brand.avif).
+    let (bits, mut ch) = pix.or(if t == IMAGETYPE_AVIF { av1c } else { None })?;
     let alpha = props.iter().any(|&(pt, ps, pe)| {
         &pt == b"auxC" && pe > ps + 4 && {
             let urn = &d[ps + 4..pe];
@@ -1151,6 +1169,15 @@ mod tests {
         let mut d = Vec::new();
         assert_eq!(image_type(b"ab", &mut d), IMAGETYPE_UNKNOWN);
         assert_eq!(d, vec![Diag::ReadError]);
+    }
+
+    #[test]
+    fn huge_box_size() {
+        // A 64-bit box size near u64::MAX (test ext/exif heic_box_overflow).
+        let mut d = b"\0\0\0\x0cftypheic\0\0\0\x01xyzw".to_vec();
+        d.extend_from_slice(&[0xff; 7]);
+        d.extend_from_slice(&[0xf4, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(boxes(&d, 0, d.len()).len(), 1);
     }
 
     #[test]

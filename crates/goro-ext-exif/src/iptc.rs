@@ -96,7 +96,6 @@ pub fn embed(iptc: &[u8], jpeg: &[u8]) -> Option<Vec<u8>> {
         if m == 0xD9 || m == 0xDA || (0xD0..=0xD7).contains(&m) || m == 0x01 {
             if !done {
                 out.extend_from_slice(&app13(iptc));
-                done = true;
             }
             out.extend_from_slice(&jpeg[seg_start..]);
             return Some(out);
