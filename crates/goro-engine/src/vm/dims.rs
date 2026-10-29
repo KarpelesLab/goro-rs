@@ -1015,6 +1015,13 @@ impl Vm {
                     return self.write_elem(place, key, action, value);
                 }
                 // Intermediate: fetch the element for writing.
+                // A property of a string offset (test Zend/tests/
+                // string_offset_as_object).
+                if matches!(elems[i + 1], PathElem::Prop(..))
+                    && matches!(unsafe { &*deref_ptr(place.ptr()) }, Value::Str(s) if !s.is_empty())
+                {
+                    return self.throw("Error", "Cannot use string offset as an object");
+                }
                 let rmw = matches!(action, PathAction::AssignOp(..) | PathAction::IncDec(_));
                 let mut next =
                     match self.dim_fetch_w(place, key, matches!(action, PathAction::Unset), rmw)? {

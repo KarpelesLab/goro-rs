@@ -1115,8 +1115,13 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let m = lower(&a.str(1));
     Ok(Value::Bool(match c {
         Some(c) => {
-            c.find_method_str(&m).is_some()
-                || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
+            // A parent's private static method is not the child's (tests
+            // Zend/tests/method_exists_002, inheritance/bug50810).
+            c.find_method_str(&m).is_some_and(|f| {
+                use crate::class::mflags::{PRIVATE, STATIC};
+                f.flags & (PRIVATE | STATIC) != (PRIVATE | STATIC)
+                    || std::ptr::eq(f.scope.get(), &*c)
+            }) || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
         }
         None => false,
     }))
