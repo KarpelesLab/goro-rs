@@ -146,6 +146,15 @@ the XML extensions each pass 87-100% of their tests that run.
 - ext/bz2 (engine module on compcol's bzip2, byte-identical to libbzip2):
   `bz*` functions, `compress.bzip2://` and the `bzip2.*` filters
   (21 of 22 tests; the other needs a 4 GB string).
+- `goro-ext-fileinfo`: ext/fileinfo (`finfo`, `finfo_*`,
+  `mime_content_type`) on a magic(5) rule engine written from the
+  manual page (indirect/relative offsets, `name`/`use` with byte-order
+  swap, `default`/`clear`, search/regex, `!:mime`/`!:ext`/`!:apple`,
+  strength ordering), text and encoding classification, the built-in
+  JSON/CSV/CDF/tar/SIMH checks and goro's own default rules from format
+  specifications; it reads the magic files tests ship as PHP 8.5 does:
+  all 61 ext/fileinfo tests that run pass (including the 50 upstream
+  samples).
 - `goro-ext-zip`: the ZIP format (PKWARE APPNOTE) for ext/zip: reading
   with libzip's consistency checks and error codes, writing with ZIP64,
   store/deflate/bzip2/xz/zstd, traditional PKWARE and WinZip AES
