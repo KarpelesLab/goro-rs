@@ -580,9 +580,10 @@ impl Db {
                             r.first().and_then(text).as_deref() == Some("ENABLE_COLUMN_METADATA")
                         })
                     {
-                        rows.rows.push(vec![Value::Text(graphitesql::Text::from_bytes(
-                            b"ENABLE_COLUMN_METADATA".to_vec(),
-                        ))]);
+                        rows.rows
+                            .push(vec![Value::Text(graphitesql::Text::from_bytes(
+                                b"ENABLE_COLUMN_METADATA".to_vec(),
+                            ))]);
                     }
                     for c in rows.columns.iter_mut() {
                         for (lit, ident) in &dqs {

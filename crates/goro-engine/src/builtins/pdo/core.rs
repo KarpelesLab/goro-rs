@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use goro_runtime::{Key, ObjRef, PhpArray, PhpStr, Value};
+use goro_runtime::{ObjRef, PhpArray, PhpStr, Value};
 
 use super::driver::{Driver, DrvError, Failure, error_message};
 use super::sqlite::SqliteDriver;
@@ -17,26 +17,39 @@ pub const ERRMODE_SILENT: i64 = 0;
 pub const ERRMODE_WARNING: i64 = 1;
 pub const ERRMODE_EXCEPTION: i64 = 2;
 
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_AUTOCOMMIT: i64 = 0;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_PREFETCH: i64 = 1;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_TIMEOUT: i64 = 2;
 pub const ATTR_ERRMODE: i64 = 3;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_SERVER_VERSION: i64 = 4;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_CLIENT_VERSION: i64 = 5;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_SERVER_INFO: i64 = 6;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_CONNECTION_STATUS: i64 = 7;
 pub const ATTR_CASE: i64 = 8;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_CURSOR_NAME: i64 = 9;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_CURSOR: i64 = 10;
 pub const ATTR_ORACLE_NULLS: i64 = 11;
 pub const ATTR_PERSISTENT: i64 = 12;
 pub const ATTR_STATEMENT_CLASS: i64 = 13;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_FETCH_TABLE_NAMES: i64 = 14;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_FETCH_CATALOG_NAMES: i64 = 15;
 pub const ATTR_DRIVER_NAME: i64 = 16;
 pub const ATTR_STRINGIFY_FETCHES: i64 = 17;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_MAX_COLUMN_LEN: i64 = 18;
 pub const ATTR_DEFAULT_FETCH_MODE: i64 = 19;
+#[allow(dead_code)] // the whole PDO::ATTR_* set, for drivers
 pub const ATTR_EMULATE_PREPARES: i64 = 20;
 pub const ATTR_DEFAULT_STR_PARAM: i64 = 21;
 
@@ -895,22 +908,7 @@ fn set_attr(vm: &mut Vm, o: &ObjRef, fname: &str, attr: i64, v: &Value) -> R<boo
             with_dbh(o, |d| d.default_str_param = m);
             Ok(true)
         }
-        ATTR_AUTOCOMMIT
-        | ATTR_EMULATE_PREPARES
-        | ATTR_TIMEOUT
-        | ATTR_PREFETCH
-        | ATTR_FETCH_TABLE_NAMES
-        | ATTR_FETCH_CATALOG_NAMES
-        | ATTR_MAX_COLUMN_LEN
-        | ATTR_CURSOR_NAME
-        | ATTR_CURSOR
-        | ATTR_PERSISTENT
-        | ATTR_DRIVER_NAME
-        | ATTR_SERVER_VERSION
-        | ATTR_CLIENT_VERSION
-        | ATTR_SERVER_INFO
-        | ATTR_CONNECTION_STATUS
-        | _ => {
+        _ => {
             let d = driver_of(vm, o)?;
             let r = d.borrow_mut().set_attribute(vm, attr, v)?;
             match r {

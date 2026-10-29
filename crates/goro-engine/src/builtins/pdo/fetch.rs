@@ -281,7 +281,7 @@ fn next_row(vm: &mut Vm, st: &ObjRef, fname: &str) -> R<Option<Vec<Value>>> {
             (Value::Null, 2) => Value::Str(PhpStr::empty()),
             _ => v,
         };
-        let _ = out.push(v);
+        out.push(v);
     }
     // Bound columns (bindColumn) take every fetched row.
     let cols: Vec<Bound> = with_st(st, |s| s.cols.clone()).unwrap_or_default();
@@ -695,11 +695,11 @@ pub fn fetch_object(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let _fetching = FetchGuard::new(&o);
     let cname = a.opt_str(0).unwrap_or_else(|| PhpStr::from("stdClass"));
     let Some(cls) = vm.find_class(cname.as_bytes(), true)? else {
-        return vm.fthrow(
-            a,
-            "TypeError",
-            "Argument #1 ($class) must be a valid class name, ",
+        let m = format!(
+            "Argument #1 ($class) must be a valid class name, {} given",
+            cname.to_string_lossy()
         );
+        return vm.fthrow(a, "TypeError", &m);
     };
     let args = match a.get(1).map(|v| v.deref()) {
         Some(Value::Array(x)) => Some(x),
@@ -913,15 +913,13 @@ pub fn fetch_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             continue;
         }
-        let key;
-        let val;
-        if bm == FETCH_COLUMN {
-            key = to_key(vm, row.first().unwrap_or(&Value::Null))?;
+        let (key, val) = if bm == FETCH_COLUMN {
+            let key = to_key(vm, row.first().unwrap_or(&Value::Null))?;
             let c = spec.column.max(0) as usize;
             if c >= row.len() {
                 return vm.value_error("Invalid column index");
             }
-            val = row.swap_remove(c);
+            (key, row.swap_remove(c))
         } else {
             // CLASSTYPE takes the first column; the group key the next.
             let mut ct = None;
@@ -932,20 +930,20 @@ pub fn fetch_all(vm: &mut Vm, a: &mut Args) -> R<Value> {
             if row.is_empty() {
                 break;
             }
-            key = to_key(vm, &row.remove(0))?;
+            let key = to_key(vm, &row.remove(0))?;
             names.remove(0);
             if let Some(c) = ct {
                 row.insert(0, c);
                 names.insert(0, PhpStr::empty());
             }
-            val = match build(vm, &o, fname, &spec, row, names)? {
-                Some(v) => v,
+            match build(vm, &o, fname, &spec, row, names)? {
+                Some(v) => (key, v),
                 None => {
                     fetch_failed(vm, &o, fname)?;
                     return Ok(Value::Array(PhpArray::new()));
                 }
-            };
-        }
+            }
+        };
         if unique {
             out.insert(key, val);
         } else {

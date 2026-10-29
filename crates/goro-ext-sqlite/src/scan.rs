@@ -339,8 +339,10 @@ pub fn sql_from_bytes(b: &[u8]) -> String {
                                 parts.push(format!("'{s}'"));
                             }
                             let bad = e.error_len().unwrap_or(rest.len() - good);
-                            let hex: String =
-                                rest[good..good + bad].iter().map(|c| format!("{c:02X}")).collect();
+                            let hex: String = rest[good..good + bad]
+                                .iter()
+                                .map(|c| format!("{c:02X}"))
+                                .collect();
                             parts.push(format!("CAST(X'{hex}' AS TEXT)"));
                             rest = &rest[good + bad..];
                         }

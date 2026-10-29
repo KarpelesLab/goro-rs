@@ -14,11 +14,9 @@ use crate::class::NativeHooks;
 use crate::func::Args;
 use crate::vm::{R, Vm};
 
-pub const PARAM_NULL: i64 = 0;
 pub const PARAM_INT: i64 = 1;
 pub const PARAM_STR: i64 = 2;
 pub const PARAM_LOB: i64 = 3;
-pub const PARAM_STMT: i64 = 4;
 pub const PARAM_BOOL: i64 = 5;
 pub const PARAM_INPUT_OUTPUT: i64 = 0x8000_0000;
 

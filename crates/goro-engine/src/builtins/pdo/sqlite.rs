@@ -166,10 +166,9 @@ impl SqliteDriver {
                     c.busy.retain(|w| w.strong_count() > 0);
                     if c.busy.iter().any(|w| w.upgrade().is_some_and(|b| b.get())) {
                         drop(c);
-                        return Err(self.fail(SqlError::new(
-                            gs::SQLITE_LOCKED,
-                            "database table is locked",
-                        )));
+                        return Err(
+                            self.fail(SqlError::new(gs::SQLITE_LOCKED, "database table is locked"))
+                        );
                     }
                 }
                 let r = guarded(vm, || conn.borrow_mut().db.run(&st, &[]))?;
