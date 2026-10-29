@@ -639,6 +639,20 @@ pub(crate) fn is_stream_res(r: &ResRef) -> bool {
         .is_some_and(|d| d.downcast_ref::<std::cell::RefCell<Stream>>().is_some())
 }
 
+/// Marks a stream resource as running a user callback.
+pub(crate) fn busy_push(id: i64) {
+    CLOSING.with(|c| c.borrow_mut().push(id));
+}
+
+pub(crate) fn busy_pop(id: i64) {
+    CLOSING.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(p) = c.iter().rposition(|&x| x == id) {
+            c.remove(p);
+        }
+    });
+}
+
 pub fn new_stream_res(s: Stream) -> ResRef {
     let r = ResRef::new(
         PhpStr::intern(b"stream"),
@@ -655,6 +669,9 @@ pub fn new_stream_res(s: Stream) -> ResRef {
 }
 
 thread_local! {
+    /// User streams running callbacks fclose() can't interrupt (their own
+    /// fclose(), stream_select()'s stream_cast()).
+    static CLOSING: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
     /// While read filters run: whether the stream reached its end (what
     /// feof() on it reports from inside the filter; test
     /// streams/bug79984.phpt).
@@ -1187,8 +1204,21 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
             })
     };
     if let Some(o) = user {
-        super::userstream::call(vm, &o, b"stream_flush", Vec::new())?;
-        super::userstream::call(vm, &o, b"stream_close", Vec::new())?;
+        // a stream closed again from its own callbacks is refused (test
+        // streams/gh14506.phpt)
+        let id = r.id();
+        if CLOSING.with(|c| c.borrow().contains(&id)) {
+            vm.fwarn(
+                a,
+                "cannot close the provided stream, as it must not be manually closed",
+            )?;
+            return Ok(Value::Bool(false));
+        }
+        CLOSING.with(|c| c.borrow_mut().push(id));
+        let r1 = super::userstream::call(vm, &o, b"stream_flush", Vec::new());
+        let r2 = r1.and_then(|_| super::userstream::call(vm, &o, b"stream_close", Vec::new()));
+        CLOSING.with(|c| c.borrow_mut().retain(|&x| x != id));
+        r2?;
     }
     let cell = {
         let data = r.res().data.borrow();
