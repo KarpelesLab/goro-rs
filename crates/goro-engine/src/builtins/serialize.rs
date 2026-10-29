@@ -426,7 +426,9 @@ fn not_serializable(cls: &Class) -> bool {
     }
     let mut c = Some(cls);
     while let Some(k) = c {
-        if k.lname.as_bytes() == b"splfileinfo" {
+        // CURLFile takes dynamic properties, so it has no NotSerializable
+        // marker (tests ext/curl/tests/curl_file_serialize, bug73147).
+        if matches!(k.lname.as_bytes(), b"splfileinfo" | b"curlfile") {
             return true;
         }
         c = k.parent.as_deref();

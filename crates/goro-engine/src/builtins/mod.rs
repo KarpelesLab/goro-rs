@@ -7,6 +7,7 @@ pub mod bz2;
 pub mod core_classes;
 pub mod core_funcs;
 pub mod ctype;
+pub mod curl;
 pub mod date;
 pub mod dom;
 pub mod enums;
@@ -117,6 +118,7 @@ pub fn modules() -> Vec<&'static Module> {
         &openssl::MODULE,
         &gd::MODULE,
         &exif::MODULE,
+        &curl::MODULE,
         &image::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
