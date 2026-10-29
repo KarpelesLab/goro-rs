@@ -778,6 +778,33 @@ impl Vm {
                     let v = ctx.value.clone();
                     return self.var_action(r, path.action, v, res);
                 }
+                // A property write through an undefined variable fails
+                // without defining it (observed on PHP 8.5; test
+                // Zend/tests/bug75921).
+                if matches!(path.elems[0], PathElem::Prop(..))
+                    && !matches!(path.action, PathAction::Unset)
+                    && self.peek(r).is_none()
+                {
+                    let n = ctx.names[0].clone().unwrap_or_default();
+                    let last = path.elems.len() == 1;
+                    let what = match (last, path.action) {
+                        (true, PathAction::Assign(_) | PathAction::AssignOp(..)) => "assign",
+                        (true, PathAction::IncDec(_)) => "increment/decrement",
+                        _ => "modify",
+                    };
+                    if last {
+                        let mut c = ctx;
+                        let _ = self.walk_value(&mut c)?;
+                    }
+                    return self.throw(
+                        "Error",
+                        &format!(
+                            "Attempt to {} property \"{}\" on null",
+                            what,
+                            n.to_string_lossy()
+                        ),
+                    );
+                }
                 Place::Ptr(self.var_place(r))
             }
             PathBase::This => {

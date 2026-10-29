@@ -2007,6 +2007,31 @@ impl<'a> Compiler<'a> {
                     self.free(v);
                     self.emit(Op::Send { src: v, arg: i });
                 }
+                // A place through a temporary (`C[0]`, `func_get_args()[0]`):
+                // a value, or an error for a by-reference parameter (test
+                // Zend/tests/gh12102_*).
+                _ if is_ref_capable(&a.value)
+                    && !contains_nullsafe(&a.value)
+                    && (temp_rooted(&a.value) || {
+                        let root = access_root(&a.value);
+                        !std::ptr::eq(root, &a.value) && self.check_builtin_write(root).is_err()
+                    }) =>
+                {
+                    let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    self.emit(Op::Send { src: v, arg: i });
+                    let j2 = self.emit(Op::Jmp { t: 0 });
+                    self.patch_here(j);
+                    let msg = self.add_const(Value::Str(PhpStr::intern(
+                        b"Cannot use temporary expression in write context",
+                    )));
+                    self.emit(Op::Error {
+                        msg: msg & !CONST,
+                        kind: 0,
+                    });
+                    self.patch_here(j2);
+                }
                 ExprKind::Index { index: None, .. } => {
                     // `f($a[])`: only valid for by-reference parameters.
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
@@ -3273,6 +3298,15 @@ fn writes_directly(e: &Expr<'_>) -> bool {
         }
         ExprKind::StaticCall(sc) => !matches!(sc.args, Args::FirstClassCallable),
         _ => false,
+    }
+}
+
+/// The expression an access chain (`x->a[b]->c`) starts from.
+pub(crate) fn access_root<'e, 'a>(e: &'e Expr<'a>) -> &'e Expr<'a> {
+    match &e.kind {
+        ExprKind::Prop { obj, .. } => access_root(obj),
+        ExprKind::Index { base, .. } => access_root(base),
+        _ => e,
     }
 }
 
