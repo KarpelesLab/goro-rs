@@ -200,7 +200,10 @@ struct PParser<'a> {
 
 impl Plural {
     fn parse(s: &str) -> Option<Plural> {
-        let mut p = PParser { s: s.as_bytes(), i: 0 };
+        let mut p = PParser {
+            s: s.as_bytes(),
+            i: 0,
+        };
         let e = p.cond()?;
         p.ws();
         (p.i == p.s.len()).then_some(e)
@@ -404,7 +407,13 @@ fn catalog(vm: &mut Vm, path: std::path::PathBuf) -> Option<Rc<Catalog>> {
 }
 
 /// The translation of `msgid` (and its plural form for `n`), if any.
-fn lookup(vm: &mut Vm, domain: &[u8], msgid: &[u8], plural: Option<(&[u8], u64)>, cat: i64) -> Option<Vec<u8>> {
+fn lookup(
+    vm: &mut Vm,
+    domain: &[u8],
+    msgid: &[u8],
+    plural: Option<(&[u8], u64)>,
+    cat: i64,
+) -> Option<Vec<u8>> {
     if !(0..CATEGORY_NAMES.len() as i64).contains(&cat) || msgid.is_empty() {
         return None;
     }

@@ -13,7 +13,10 @@ use crate::vm::{R, Vm};
 pub static MODULE: Module = Module {
     name: "readline",
     functions: &[
-        ("function readline(?string $prompt = null): string|false", readline),
+        (
+            "function readline(?string $prompt = null): string|false",
+            readline,
+        ),
         (
             "function readline_info(?string $var_name = null, $value = null): mixed",
             readline_info,
@@ -22,8 +25,14 @@ pub static MODULE: Module = Module {
             "function readline_add_history(string $prompt): true",
             readline_add_history,
         ),
-        ("function readline_clear_history(): true", readline_clear_history),
-        ("function readline_list_history(): array", readline_list_history),
+        (
+            "function readline_clear_history(): true",
+            readline_clear_history,
+        ),
+        (
+            "function readline_list_history(): array",
+            readline_list_history,
+        ),
         (
             "function readline_read_history(?string $filename = null): bool",
             readline_read_history,
@@ -114,11 +123,17 @@ fn readline_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let s = st(vm);
         let mut arr = PhpArray::new();
         let k = |n: &str| Key::Str(PhpStr::from(n));
-        arr.insert(k("line_buffer"), Value::Str(PhpStr::from(s.line_buffer.clone())));
+        arr.insert(
+            k("line_buffer"),
+            Value::Str(PhpStr::from(s.line_buffer.clone())),
+        );
         arr.insert(k("point"), Value::Int(0));
         arr.insert(k("end"), Value::Int(0));
         arr.insert(k("erase_empty_line"), Value::Int(0));
-        arr.insert(k("library_version"), Value::Str(PhpStr::from("EditLine wrapper")));
+        arr.insert(
+            k("library_version"),
+            Value::Str(PhpStr::from("EditLine wrapper")),
+        );
         arr.insert(
             k("readline_name"),
             Value::Str(PhpStr::from(s.readline_name.clone())),
@@ -151,11 +166,7 @@ fn readline_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Ok(Value::Str(PhpStr::from(old)))
         }
         b"attempted_completion_over" => {
-            let new = if set {
-                Some(a.int(1))
-            } else {
-                None
-            };
+            let new = if set { Some(a.int(1)) } else { None };
             let s = st(vm);
             let old = s.attempted_completion_over;
             if let Some(n) = new {
@@ -241,7 +252,8 @@ fn decode(l: &[u8]) -> Vec<u8> {
     while i < l.len() {
         if l[i] == b'\\'
             && i + 3 < l.len() + 1
-            && l.get(i + 1..i + 4).is_some_and(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)))
+            && l.get(i + 1..i + 4)
+                .is_some_and(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)))
         {
             let d = &l[i + 1..i + 4];
             out.push(((d[0] - b'0') << 6) | ((d[1] - b'0') << 3) | (d[2] - b'0'));

@@ -46,7 +46,10 @@ pub static MODULE: Module = Module {
             "function pcntl_signal_get_handler(int $signal): mixed",
             pcntl_signal_get_handler,
         ),
-        ("function pcntl_signal_dispatch(): bool", pcntl_signal_dispatch),
+        (
+            "function pcntl_signal_dispatch(): bool",
+            pcntl_signal_dispatch,
+        ),
         (
             "function pcntl_sigprocmask(int $mode, array $signals, &$old_signals = null): bool",
             pcntl_sigprocmask,
@@ -363,8 +366,8 @@ fn info_from(si: &libc::siginfo_t) -> Info {
                 i.pid = si.si_pid();
                 i.uid = si.si_uid();
                 i.status = si.si_status();
-                i.utime = si.si_utime() as i64;
-                i.stime = si.si_stime() as i64;
+                i.utime = si.si_utime();
+                i.stime = si.si_stime();
             }
             libc::SIGILL | libc::SIGFPE | libc::SIGSEGV | libc::SIGBUS => {
                 i.addr = si.si_addr() as usize;
@@ -672,7 +675,9 @@ fn signal_set(vm: &mut Vm, a: &Args, i: usize, allow_empty: bool) -> R<libc::sig
 
 fn pcntl_sigprocmask(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let mode = a.int(0) as libc::c_int;
-    if ![libc::SIG_BLOCK, libc::SIG_UNBLOCK, libc::SIG_SETMASK].contains(&mode) || a.int(0) > i32::MAX as i64 {
+    if ![libc::SIG_BLOCK, libc::SIG_UNBLOCK, libc::SIG_SETMASK].contains(&mode)
+        || a.int(0) > i32::MAX as i64
+    {
         return vm.fthrow(
             a,
             "ValueError",
@@ -1170,11 +1175,7 @@ fn pcntl_setcpuaffinity(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let ids = a.array(1);
     if ids.is_empty() {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #2 ($cpu_ids) must not be empty",
-        );
+        return vm.fthrow(a, "ValueError", "Argument #2 ($cpu_ids) must not be empty");
     }
     let max = ncpus();
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };

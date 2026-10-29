@@ -41,7 +41,10 @@ pub static MODULE: Module = Module {
             "function posix_getpgid(int $process_id): int|false",
             posix_getpgid,
         ),
-        ("function posix_getsid(int $process_id): int|false", posix_getsid),
+        (
+            "function posix_getsid(int $process_id): int|false",
+            posix_getsid,
+        ),
         ("function posix_uname(): array|false", posix_uname),
         ("function posix_times(): array|false", posix_times),
         ("function posix_ctermid(): string|false", posix_ctermid),
@@ -49,7 +52,10 @@ pub static MODULE: Module = Module {
             "function posix_ttyname($file_descriptor): string|false",
             posix_ttyname,
         ),
-        ("function posix_isatty($file_descriptor): bool", posix_isatty),
+        (
+            "function posix_isatty($file_descriptor): bool",
+            posix_isatty,
+        ),
         ("function posix_getcwd(): string|false", posix_getcwd),
         (
             "function posix_mkfifo(string $filename, int $permissions): bool",
@@ -67,7 +73,10 @@ pub static MODULE: Module = Module {
             "function posix_eaccess(string $filename, int $flags = 0): bool",
             posix_eaccess,
         ),
-        ("function posix_getgrnam(string $name): array|false", posix_getgrnam),
+        (
+            "function posix_getgrnam(string $name): array|false",
+            posix_getgrnam,
+        ),
         (
             "function posix_getgrgid(int $group_id): array|false",
             posix_getgrgid,
@@ -122,8 +131,14 @@ pub static MODULE: Module = Module {
         ("POSIX_RLIMIT_CORE", ConstVal::Int(libc::RLIMIT_CORE as i64)),
         ("POSIX_RLIMIT_CPU", ConstVal::Int(libc::RLIMIT_CPU as i64)),
         ("POSIX_RLIMIT_DATA", ConstVal::Int(libc::RLIMIT_DATA as i64)),
-        ("POSIX_RLIMIT_FSIZE", ConstVal::Int(libc::RLIMIT_FSIZE as i64)),
-        ("POSIX_RLIMIT_LOCKS", ConstVal::Int(libc::RLIMIT_LOCKS as i64)),
+        (
+            "POSIX_RLIMIT_FSIZE",
+            ConstVal::Int(libc::RLIMIT_FSIZE as i64),
+        ),
+        (
+            "POSIX_RLIMIT_LOCKS",
+            ConstVal::Int(libc::RLIMIT_LOCKS as i64),
+        ),
         (
             "POSIX_RLIMIT_MEMLOCK",
             ConstVal::Int(libc::RLIMIT_MEMLOCK as i64),
@@ -133,21 +148,42 @@ pub static MODULE: Module = Module {
             ConstVal::Int(libc::RLIMIT_MSGQUEUE as i64),
         ),
         ("POSIX_RLIMIT_NICE", ConstVal::Int(libc::RLIMIT_NICE as i64)),
-        ("POSIX_RLIMIT_NOFILE", ConstVal::Int(libc::RLIMIT_NOFILE as i64)),
-        ("POSIX_RLIMIT_NPROC", ConstVal::Int(libc::RLIMIT_NPROC as i64)),
+        (
+            "POSIX_RLIMIT_NOFILE",
+            ConstVal::Int(libc::RLIMIT_NOFILE as i64),
+        ),
+        (
+            "POSIX_RLIMIT_NPROC",
+            ConstVal::Int(libc::RLIMIT_NPROC as i64),
+        ),
         ("POSIX_RLIMIT_RSS", ConstVal::Int(libc::RLIMIT_RSS as i64)),
-        ("POSIX_RLIMIT_RTPRIO", ConstVal::Int(libc::RLIMIT_RTPRIO as i64)),
-        ("POSIX_RLIMIT_RTTIME", ConstVal::Int(libc::RLIMIT_RTTIME as i64)),
+        (
+            "POSIX_RLIMIT_RTPRIO",
+            ConstVal::Int(libc::RLIMIT_RTPRIO as i64),
+        ),
+        (
+            "POSIX_RLIMIT_RTTIME",
+            ConstVal::Int(libc::RLIMIT_RTTIME as i64),
+        ),
         (
             "POSIX_RLIMIT_SIGPENDING",
             ConstVal::Int(libc::RLIMIT_SIGPENDING as i64),
         ),
-        ("POSIX_RLIMIT_STACK", ConstVal::Int(libc::RLIMIT_STACK as i64)),
+        (
+            "POSIX_RLIMIT_STACK",
+            ConstVal::Int(libc::RLIMIT_STACK as i64),
+        ),
         ("POSIX_RLIMIT_INFINITY", ConstVal::Int(-1)),
         ("POSIX_SC_ARG_MAX", ConstVal::Int(libc::_SC_ARG_MAX as i64)),
-        ("POSIX_SC_CHILD_MAX", ConstVal::Int(libc::_SC_CHILD_MAX as i64)),
+        (
+            "POSIX_SC_CHILD_MAX",
+            ConstVal::Int(libc::_SC_CHILD_MAX as i64),
+        ),
         ("POSIX_SC_CLK_TCK", ConstVal::Int(libc::_SC_CLK_TCK as i64)),
-        ("POSIX_SC_PAGESIZE", ConstVal::Int(libc::_SC_PAGESIZE as i64)),
+        (
+            "POSIX_SC_PAGESIZE",
+            ConstVal::Int(libc::_SC_PAGESIZE as i64),
+        ),
         (
             "POSIX_SC_NPROCESSORS_CONF",
             ConstVal::Int(libc::_SC_NPROCESSORS_CONF as i64),
@@ -156,17 +192,38 @@ pub static MODULE: Module = Module {
             "POSIX_SC_NPROCESSORS_ONLN",
             ConstVal::Int(libc::_SC_NPROCESSORS_ONLN as i64),
         ),
-        ("POSIX_PC_LINK_MAX", ConstVal::Int(libc::_PC_LINK_MAX as i64)),
-        ("POSIX_PC_MAX_CANON", ConstVal::Int(libc::_PC_MAX_CANON as i64)),
-        ("POSIX_PC_MAX_INPUT", ConstVal::Int(libc::_PC_MAX_INPUT as i64)),
-        ("POSIX_PC_NAME_MAX", ConstVal::Int(libc::_PC_NAME_MAX as i64)),
-        ("POSIX_PC_PATH_MAX", ConstVal::Int(libc::_PC_PATH_MAX as i64)),
-        ("POSIX_PC_PIPE_BUF", ConstVal::Int(libc::_PC_PIPE_BUF as i64)),
+        (
+            "POSIX_PC_LINK_MAX",
+            ConstVal::Int(libc::_PC_LINK_MAX as i64),
+        ),
+        (
+            "POSIX_PC_MAX_CANON",
+            ConstVal::Int(libc::_PC_MAX_CANON as i64),
+        ),
+        (
+            "POSIX_PC_MAX_INPUT",
+            ConstVal::Int(libc::_PC_MAX_INPUT as i64),
+        ),
+        (
+            "POSIX_PC_NAME_MAX",
+            ConstVal::Int(libc::_PC_NAME_MAX as i64),
+        ),
+        (
+            "POSIX_PC_PATH_MAX",
+            ConstVal::Int(libc::_PC_PATH_MAX as i64),
+        ),
+        (
+            "POSIX_PC_PIPE_BUF",
+            ConstVal::Int(libc::_PC_PIPE_BUF as i64),
+        ),
         (
             "POSIX_PC_CHOWN_RESTRICTED",
             ConstVal::Int(libc::_PC_CHOWN_RESTRICTED as i64),
         ),
-        ("POSIX_PC_NO_TRUNC", ConstVal::Int(libc::_PC_NO_TRUNC as i64)),
+        (
+            "POSIX_PC_NO_TRUNC",
+            ConstVal::Int(libc::_PC_NO_TRUNC as i64),
+        ),
         (
             "POSIX_PC_ALLOC_SIZE_MIN",
             ConstVal::Int(libc::_PC_ALLOC_SIZE_MIN as i64),
@@ -175,7 +232,10 @@ pub static MODULE: Module = Module {
             "POSIX_PC_SYMLINK_MAX",
             ConstVal::Int(libc::_PC_SYMLINK_MAX as i64),
         ),
-        ("POSIX_SC_OPEN_MAX", ConstVal::Int(libc::_SC_OPEN_MAX as i64)),
+        (
+            "POSIX_SC_OPEN_MAX",
+            ConstVal::Int(libc::_SC_OPEN_MAX as i64),
+        ),
     ],
     listed: true,
     ..Module::EMPTY
@@ -615,11 +675,7 @@ fn posix_access(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn posix_eaccess(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // A path too long to resolve counts as empty (test posix_eaccess.phpt).
     if a.str(0).len() >= libc::PATH_MAX as usize {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #1 ($filename) must not be empty",
-        );
+        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) must not be empty");
     }
     let Some(p) = path_arg(vm, a, 0, "filename", true)? else {
         return Ok(Value::Bool(false));
@@ -831,7 +887,10 @@ fn posix_setrlimit(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #2 ($soft_limit) must be lower or equal to {}", hard),
+            &format!(
+                "Argument #2 ($soft_limit) must be lower or equal to {}",
+                hard
+            ),
         );
     }
     if !(0..=u32::MAX as i64).contains(&res) {

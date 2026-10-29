@@ -124,7 +124,11 @@ fn shmop_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #4 ($size) must be greater than 0 for the \"c\" and \"n\" access modes",
         );
     }
-    let req = if flags & libc::IPC_CREAT != 0 { size as usize } else { 0 };
+    let req = if flags & libc::IPC_CREAT != 0 {
+        size as usize
+    } else {
+        0
+    };
     // SAFETY: plain System V calls.
     let id = unsafe { libc::shmget(key, req, flags | perms) };
     if id < 0 {
@@ -161,7 +165,10 @@ fn shmop_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let e = errno();
         vm.fwarn(
             a,
-            &format!("Unable to attach to shared memory segment \"{}\"", strerror(e)),
+            &format!(
+                "Unable to attach to shared memory segment \"{}\"",
+                strerror(e)
+            ),
         )?;
         return Ok(Value::Bool(false));
     }
@@ -304,7 +311,11 @@ impl Drop for Sem {
         }
         semop(
             self.id,
-            &mut [op(SEM_USERS, -1, (libc::SEM_UNDO | libc::IPC_NOWAIT) as i16)],
+            &mut [op(
+                SEM_USERS,
+                -1,
+                (libc::SEM_UNDO | libc::IPC_NOWAIT) as i16,
+            )],
         );
     }
 }
@@ -344,13 +355,26 @@ fn sem_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let e = errno();
         vm.fwarn(
             a,
-            &format!("Failed acquiring SYSVSEM_SETVAL for key 0x{:x}: {}", key, strerror(e)),
+            &format!(
+                "Failed acquiring SYSVSEM_SETVAL for key 0x{:x}: {}",
+                key,
+                strerror(e)
+            ),
         )?;
         return Ok(Value::Bool(false));
     }
     let users = unsafe { libc::semctl(id, SEM_USERS as libc::c_int, libc::GETVAL) };
     let mut ok = true;
-    if users == 0 && unsafe { libc::semctl(id, SEM_VALUE as libc::c_int, libc::SETVAL, max as libc::c_int) } != 0 {
+    if users == 0
+        && unsafe {
+            libc::semctl(
+                id,
+                SEM_VALUE as libc::c_int,
+                libc::SETVAL,
+                max as libc::c_int,
+            )
+        } != 0
+    {
         let e = errno();
         vm.fwarn(a, &format!("Failed for key 0x{:x}: {}", key, strerror(e)))?;
         ok = false;
@@ -406,7 +430,10 @@ fn sem_release(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if count == 0 {
         vm.fwarn(
             a,
-            &format!("SysV semaphore for key 0x{:x} is not currently acquired", key),
+            &format!(
+                "SysV semaphore for key 0x{:x} is not currently acquired",
+                key
+            ),
         )?;
         return Ok(Value::Bool(false));
     }
@@ -430,7 +457,10 @@ fn sem_remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
     {
         vm.fwarn(
             a,
-            &format!("SysV semaphore for key 0x{:x} does not (any longer) exist", key),
+            &format!(
+                "SysV semaphore for key 0x{:x} does not (any longer) exist",
+                key
+            ),
         )?;
         return Ok(Value::Bool(false));
     }
@@ -501,6 +531,9 @@ impl Drop for Sysv {
 }
 
 impl Sysv {
+    // The segment is memory shared with other processes, not data owned
+    // by this object.
+    #[allow(clippy::mut_from_ref)]
     fn mem(&self) -> &mut [u8] {
         // SAFETY: the attached segment of `size` bytes.
         unsafe { std::slice::from_raw_parts_mut(self.addr, self.size) }
@@ -563,13 +596,20 @@ fn shm_attach(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let perms = a.int_or(2, 0o666) as libc::c_int;
     if size < 1 {
-        return vm.fthrow(a, "ValueError", "Argument #2 ($size) must be greater than 0");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #2 ($size) must be greater than 0",
+        );
     }
     let k = key as libc::key_t;
     let mut id = unsafe { libc::shmget(k, 0, 0) };
     if id < 0 {
         if (size as usize) < SHM_HEADER {
-            vm.fwarn(a, &format!("Failed for key 0x{:x}: memorysize too small", key))?;
+            vm.fwarn(
+                a,
+                &format!("Failed for key 0x{:x}: memorysize too small", key),
+            )?;
             return Ok(Value::Bool(false));
         }
         id = unsafe { libc::shmget(k, size as usize, libc::IPC_CREAT | libc::IPC_EXCL | perms) };
@@ -598,7 +638,10 @@ fn shm_attach(vm: &mut Vm, a: &mut Args) -> R<Value> {
         size: ds.shm_segsz,
     };
     if s.size < SHM_HEADER {
-        vm.fwarn(a, &format!("Failed for key 0x{:x}: memorysize too small", key))?;
+        vm.fwarn(
+            a,
+            &format!("Failed for key 0x{:x}: memorysize too small", key),
+        )?;
         return Ok(Value::Bool(false));
     }
     let m = s.mem();
@@ -676,7 +719,8 @@ fn shm_put_var(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn shm_get_var(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let key = a.int(1);
     let data = sysv_obj(vm, a, |s| {
-        s.find(key).map(|(_, _, off, len)| s.mem()[off..off + len].to_vec())
+        s.find(key)
+            .map(|(_, _, off, len)| s.mem()[off..off + len].to_vec())
     })?;
     let Some(data) = data else {
         vm.fwarn(a, &format!("Variable key {} doesn't exist", key))?;
@@ -756,7 +800,10 @@ struct Queue {
 impl goro_runtime::NativeData for Queue {}
 
 fn queue_id(vm: &mut Vm, a: &Args) -> R<i32> {
-    match a.obj(0).and_then(|o| with_native::<Queue, i32>(&o, |q| q.id)) {
+    match a
+        .obj(0)
+        .and_then(|o| with_native::<Queue, i32>(&o, |q| q.id))
+    {
         Some(id) => Ok(id),
         None => vm.fthrow(a, "Error", "SysvMessageQueue object is not initialized"),
     }
@@ -773,10 +820,7 @@ fn msg_get_queue(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     if id < 0 {
         let e = errno();
-        vm.fwarn(
-            a,
-            &format!("Failed for key 0x{:x}: {}", key, strerror(e)),
-        )?;
+        vm.fwarn(a, &format!("Failed for key 0x{:x}: {}", key, strerror(e)))?;
         return Ok(Value::Bool(false));
     }
     new_obj(vm, "SysvMessageQueue", Box::new(Queue { id }))
@@ -886,14 +930,7 @@ fn msg_send(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let flags = if blocking { 0 } else { libc::IPC_NOWAIT };
     vm.out.flush();
     let r = loop {
-        let r = unsafe {
-            libc::msgsnd(
-                id,
-                buf.as_ptr() as *const libc::c_void,
-                body.len(),
-                flags,
-            )
-        };
+        let r = unsafe { libc::msgsnd(id, buf.as_ptr() as *const libc::c_void, body.len(), flags) };
         if r != 0 && errno() == libc::EINTR {
             continue;
         }

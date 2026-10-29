@@ -57,7 +57,10 @@ pub static MODULE: Module = Module {
             jdmonthname,
         ),
         ("function jdtofrench(int $julian_day): string", jdtofrench),
-        ("function jdtogregorian(int $julian_day): string", jdtogregorian),
+        (
+            "function jdtogregorian(int $julian_day): string",
+            jdtogregorian,
+        ),
         (
             "function jdtojewish(int $julian_day, bool $hebrew = false, int $flags = 0): string",
             jdtojewish,
@@ -72,7 +75,10 @@ pub static MODULE: Module = Module {
             "function juliantojd(int $month, int $day, int $year): int",
             juliantojd,
         ),
-        ("function unixtojd(?int $timestamp = null): int|false", unixtojd),
+        (
+            "function unixtojd(?int $timestamp = null): int|false",
+            unixtojd,
+        ),
     ],
     constants: &[
         ("CAL_GREGORIAN", ConstVal::Int(0)),
@@ -504,7 +510,14 @@ fn cal_info(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 /// The month and year checks of cal_days_in_month() and cal_to_jd() (test
 /// gh19371.phpt).
-fn check_month_year(vm: &mut Vm, a: &Args, month: i64, year: i64, margn: usize, yargn: usize) -> R<()> {
+fn check_month_year(
+    vm: &mut Vm,
+    a: &Args,
+    month: i64,
+    year: i64,
+    margn: usize,
+    yargn: usize,
+) -> R<()> {
     if !(1..=i32::MAX as i64 - 1).contains(&month) {
         return vm.fthrow(
             a,
@@ -562,7 +575,10 @@ fn cal_to_jd(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return vm.fthrow(
             a,
             "ValueError",
-            &format!("Argument #2 ($month) must be between 1 and {}", i32::MAX - 1),
+            &format!(
+                "Argument #2 ($month) must be between 1 and {}",
+                i32::MAX - 1
+            ),
         );
     }
     if !(i32::MIN as i64..=i32::MAX as i64).contains(&day) {

@@ -186,7 +186,11 @@ fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
         directives(vm, &core_ini, &mut out);
         for (name, inis) in &mods {
             // ext/gettext's line (test gettext_phpinfo.phpt).
-            let support = if *name == "gettext" { "GetText Support" } else { "" };
+            let support = if *name == "gettext" {
+                "GetText Support"
+            } else {
+                ""
+            };
             if support.is_empty() {
                 out.push_str(&format!("\n{name}\n\n{name} support => enabled\n"));
             } else {
