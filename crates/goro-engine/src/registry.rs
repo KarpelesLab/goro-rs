@@ -85,6 +85,9 @@ pub struct Module {
     pub on_ini_set: Option<fn(&mut Vm, &[u8], &[u8]) -> R<bool>>,
     /// Whether `php -m` lists it (core pieces are folded into "Core").
     pub listed: bool,
+    /// The lines of its phpinfo() section ("name => value\n" each), in
+    /// place of the default "<name> support => enabled".
+    pub info: Option<fn(&mut Vm) -> String>,
 }
 
 impl Module {
@@ -101,6 +104,7 @@ impl Module {
         startup_ini: None,
         on_ini_set: None,
         listed: true,
+        info: None,
     };
 }
 

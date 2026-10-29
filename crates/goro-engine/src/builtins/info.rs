@@ -160,18 +160,20 @@ fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // Modules by name (several registry modules can share one), the
     // unlisted ones folded into Core.
     let mut core_ini: Vec<&'static str> = Vec::new();
-    let mut mods: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    type InfoFn = Option<fn(&mut Vm) -> String>;
+    let mut mods: Vec<(&'static str, Vec<&'static str>, InfoFn)> = Vec::new();
     for m in vm.modules.iter() {
         let inis = m.ini.iter().map(|(k, _)| *k);
         if !m.listed || m.name == "Core" {
             core_ini.extend(inis);
-        } else if let Some(e) = mods.iter_mut().find(|(n, _)| *n == m.name) {
+        } else if let Some(e) = mods.iter_mut().find(|(n, _, _)| *n == m.name) {
             e.1.extend(inis);
+            e.2 = e.2.or(m.info);
         } else {
-            mods.push((m.name, inis.collect()));
+            mods.push((m.name, inis.collect(), m.info));
         }
     }
-    mods.sort_by_key(|(n, _)| n.to_ascii_lowercase());
+    mods.sort_by_key(|(n, _, _)| n.to_ascii_lowercase());
     if flags & 4 != 0 {
         out.push('\n');
         out.push_str(HR);
@@ -184,17 +186,17 @@ fn phpinfo(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if flags & 8 != 0 {
         out.push_str(&format!("\nCore\n\nPHP Version => {version}\n"));
         directives(vm, &core_ini, &mut out);
-        for (name, inis) in &mods {
-            // ext/gettext's line (test gettext_phpinfo.phpt).
-            let support = if *name == "gettext" {
-                "GetText Support"
-            } else {
-                ""
-            };
-            if support.is_empty() {
-                out.push_str(&format!("\n{name}\n\n{name} support => enabled\n"));
-            } else {
-                out.push_str(&format!("\n{name}\n\n{support} => enabled\n"));
+        for (name, inis, info) in &mods {
+            match info {
+                Some(f) => {
+                    out.push_str(&format!("\n{name}\n\n"));
+                    out.push_str(&f(vm));
+                }
+                // ext/gettext's line (test gettext_phpinfo.phpt).
+                None if *name == "gettext" => {
+                    out.push_str(&format!("\n{name}\n\nGetText Support => enabled\n"))
+                }
+                None => out.push_str(&format!("\n{name}\n\n{name} support => enabled\n")),
             }
             directives(vm, inis, &mut out);
         }

@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-curl"
+description = "PHP curl extension: an HTTP/1.x and file:// URL transfer client with libcurl's options, cookies, multipart forms and error codes"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+goro-ext-openssl = { path = "../goro-ext-openssl" }
+goro-ext-zlib = { path = "../goro-ext-zlib" }
+goro-ext-hash = { path = "../goro-ext-hash" }
+libc = "0.2"
