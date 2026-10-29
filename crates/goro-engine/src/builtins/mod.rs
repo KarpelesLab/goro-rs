@@ -39,6 +39,7 @@ pub mod phar;
 pub mod random;
 pub mod reflection;
 pub mod serialize;
+pub mod session;
 pub mod simplexml;
 pub mod sockets;
 pub mod sodium;
@@ -114,6 +115,8 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlreader::MODULE,
         &simplexml::MODULE,
         &openssl::MODULE,
+        &session::MODULE,
+        &session::rewrite::MODULE,
     ];
     v.extend_from_slice(intl::MODULES);
     v

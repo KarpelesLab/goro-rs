@@ -33,11 +33,6 @@ pub static MODULE: Module = Module {
             "function ob_implicit_flush(bool $enable = true): void",
             ob_implicit_flush,
         ),
-        (
-            "function output_add_rewrite_var(string $name, string $value): bool",
-            ret_true,
-        ),
-        ("function output_reset_rewrite_vars(): bool", ret_true),
         ("function flush(): void", flush),
     ],
     listed: false,
@@ -308,10 +303,6 @@ fn ob_list_handlers(vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn ob_implicit_flush(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.out.implicit_flush = a.bool_or(0, true);
     Ok(Value::Null)
-}
-
-fn ret_true(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(true))
 }
 
 fn flush(vm: &mut Vm, _a: &mut Args) -> R<Value> {

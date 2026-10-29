@@ -680,6 +680,11 @@ pub(crate) fn const_deprecation(name: &[u8]) -> Option<&'static str> {
     const FILTER: &str = "8.1, use htmlspecialchars() instead";
     Some(match name {
         b"E_STRICT" => "8.4, the error level was removed",
+        // The constant session_start() defines (not one a script defined
+        // first: test ext/session/tests/SID_type_confusion.phpt).
+        b"SID" if super::session::sid_is_internal() => {
+            "8.4, as GET/POST sessions were deprecated"
+        }
         b"DATE_RFC7231" => {
             "8.5, as this format ignores the associated timezone and always uses GMT"
         }
