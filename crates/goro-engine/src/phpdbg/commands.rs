@@ -205,7 +205,10 @@ fn cmd_run(vm: &mut Vm, rest: &str, running: bool) -> Option<Flow> {
     };
     let stdin = stdin.map(String::into_bytes);
     if running {
-        if confirm(vm, "Do you really want to restart execution? (type y or n): ") {
+        if confirm(
+            vm,
+            "Do you really want to restart execution? (type y or n): ",
+        ) {
             return Some(Flow::Abort(RunEnd::Restart(args, stdin)));
         }
         return None;
@@ -624,6 +627,16 @@ fn cmd_back(vm: &mut Vm, running: bool) {
         ));
         k += 1;
     }
+    // A fiber's function is called by the engine (test
+    // sapi/phpdbg/tests/gh13827.phpt).
+    if !vm.ex_parents.is_empty()
+        && let Some(f) = vm.ex.frames.first()
+    {
+        out.push_str(&format!(
+            " => {} (internal function)\n",
+            frame_name(f.code(), f.flags)
+        ));
+    }
     let out = out.trim_end().to_string();
     msg(vm, &out);
 }
@@ -716,13 +729,7 @@ fn value_line(v: &Value) -> Option<String> {
 }
 
 fn var_row(addr: usize, refs: usize, v: &Value, name: &str) -> String {
-    let mut s = format!(
-        "{:#018x} {:<8}{:<10}{}",
-        addr,
-        refs,
-        type_label(v),
-        name
-    );
+    let mut s = format!("{:#018x} {:<8}{:<10}{}", addr, refs, type_label(v), name);
     if let Some(l) = value_line(v) {
         s.push('\n');
         s.push_str(&l);
@@ -790,20 +797,15 @@ fn cmd_info(vm: &mut Vm, rest: &str, running: bool) {
             let mut s = format!("[Superglobal variables ({})]\n{}", names.len(), VAR_HEADER);
             let g = vm.globals_array();
             for n in names {
-                let v = g.get_bytes(n.as_bytes()).cloned().unwrap_or_default();
+                // (All arrays, set or not; the counts as the test
+                // sapi/phpdbg/tests/info_001.phpt shows them.)
                 let refs = if n == "_REQUEST" { 1 } else { 2 };
-                let addr = match &v {
-                    Value::Array(a) => a.data_addr(),
+                let addr = match g.get_bytes(n.as_bytes()) {
+                    Some(Value::Array(a)) => a.data_addr(),
                     _ => 0,
                 };
                 s.push('\n');
-                s.push_str(&format!(
-                    "{:#018x} {:<8}{:<10}${}",
-                    addr,
-                    refs,
-                    type_label(&v),
-                    n
-                ));
+                s.push_str(&format!("{:#018x} {:<8}{:<10}${}", addr, refs, "array", n));
             }
             msg(vm, &s);
         }
@@ -819,7 +821,9 @@ fn cmd_info(vm: &mut Vm, rest: &str, running: bool) {
                 let t = match c {
                     Value::Str(s) => s.to_string_lossy(),
                     Value::Int(i) => i.to_string(),
-                    Value::Float(f) => goro_runtime::convert::float_to_string(*f, 14).to_string_lossy(),
+                    Value::Float(f) => {
+                        goro_runtime::convert::float_to_string(*f, 14).to_string_lossy()
+                    }
                     _ => continue,
                 };
                 if !lits.contains(&t) {
@@ -976,7 +980,10 @@ fn user_classes(vm: &Vm, running: bool) -> Vec<ClassRow> {
                     c.name.to_string_lossy(),
                     c.method_order.borrow().len(),
                     parent,
-                    c.file.as_ref().map(|f| f.to_string_lossy()).unwrap_or_default(),
+                    c.file
+                        .as_ref()
+                        .map(|f| f.to_string_lossy())
+                        .unwrap_or_default(),
                     c.line_start,
                 ));
             }
@@ -995,7 +1002,8 @@ fn user_classes(vm: &Vm, running: bool) -> Vec<ClassRow> {
                 let parent = c.parent.as_ref().map(|p| {
                     let lp = super::lower(p);
                     // Linked only when the parent was declared before.
-                    let known = names[..k].contains(&lp) || vm.classes.contains_key(&PhpStr::from(lp));
+                    let known = names[..k].contains(&lp)
+                        || (!names.contains(&lp) && vm.classes.contains_key(&PhpStr::from(lp)));
                     (p.to_string_lossy(), known)
                 });
                 out.push((

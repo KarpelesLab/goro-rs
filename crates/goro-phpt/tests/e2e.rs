@@ -32,6 +32,7 @@ fn config(root: &Path) -> Config {
         heavy: false,
         online: false,
         cgi: None,
+        phpdbg: None,
     }
 }
 

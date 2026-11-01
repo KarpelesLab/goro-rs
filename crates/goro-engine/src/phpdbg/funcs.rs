@@ -81,7 +81,11 @@ fn break_file(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn break_method(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let s = format!("{}::{}", a.str(0).to_string_lossy(), a.str(1).to_string_lossy());
+    let s = format!(
+        "{}::{}",
+        a.str(0).to_string_lossy(),
+        a.str(1).to_string_lossy()
+    );
     add_bp(vm, symbol_bp(&s));
     Ok(Value::Null)
 }

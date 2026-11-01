@@ -4,7 +4,7 @@
 
 use goro_runtime::{Key, KeyRef, Value};
 
-use super::{msg, with};
+use super::{msg, sync_out, with, write_raw};
 use crate::vm::{Vm, frame_flags};
 
 #[derive(Clone)]
@@ -29,6 +29,7 @@ pub(crate) enum Snap {
     Count(usize),
 }
 
+#[derive(Clone)]
 pub(crate) struct Watch {
     pub id: u32,
     pub shown: String,
@@ -139,6 +140,9 @@ pub(crate) fn check(vm: &mut Vm) -> Option<String> {
     if with(|d| d.watches.is_empty()) {
         return None;
     }
+    if vm.header_callback.is_some() && vm.out.written == 0 {
+        report_before_headers(vm);
+    }
     let mut watches = with(|d| std::mem::take(&mut d.watches));
     let mut out: Vec<String> = Vec::new();
     let mut keep = Vec::new();
@@ -202,6 +206,41 @@ pub(crate) fn check(vm: &mut Vm) -> Option<String> {
         None
     } else {
         Some(out.join("\n"))
+    }
+}
+
+/// A watch message as the script's first output: the header callback runs
+/// in the middle of it (after "Old value: "), under the debugger, and the
+/// script does not stop again once the message ends (tests
+/// sapi/phpdbg/tests/gh15210_001.phpt, gh15210_002.phpt).
+fn report_before_headers(vm: &mut Vm) {
+    for w in with(|d| d.watches.clone()) {
+        let Read::Value(v) = read(vm, &w) else {
+            continue;
+        };
+        let new = snap(w.kind, &v);
+        let (Some(Snap::Val(_, old)), Some(Snap::Val(_, text))) = (&w.snap, &new) else {
+            continue;
+        };
+        if old == text {
+            continue;
+        }
+        msg(vm, &format!("[Breaking on watchpoint {}]", w.shown));
+        write_raw(b"Old value: ");
+        with(|d| d.line_start = true);
+        vm.send_headers();
+        // (A command in the callback may have abandoned the script.)
+        if with(|d| d.abort.is_some()) {
+            return;
+        }
+        sync_out(vm);
+        write_raw(format!("{}\nNew value: {}\n\n", old, text).as_bytes());
+        with(|d| {
+            if let Some(x) = d.watches.iter_mut().find(|x| x.id == w.id) {
+                x.snap = new.clone();
+            }
+        });
+        return;
     }
 }
 
@@ -311,7 +350,10 @@ pub(crate) fn command(vm: &mut Vm, rest: &str, running: bool) {
             if found {
                 msg(vm, &format!("[Removed watchpoint #{}]", n.unwrap_or(0)));
             } else {
-                msg(vm, "[Nothing was deleted, no corresponding watchpoint found]");
+                msg(
+                    vm,
+                    "[Nothing was deleted, no corresponding watchpoint found]",
+                );
             }
             return;
         }

@@ -82,10 +82,14 @@ impl BpKind {
             (BpKind::Func { lname: a, .. }, BpKind::Func { lname: b, .. }) => a == b,
             (
                 BpKind::Method {
-                    class: a, method: m, ..
+                    class: a,
+                    method: m,
+                    ..
                 },
                 BpKind::Method {
-                    class: b, method: n, ..
+                    class: b,
+                    method: n,
+                    ..
                 },
             ) => a == b && m == n,
             (BpKind::Opcode { name: a }, BpKind::Opcode { name: b }) => a == b,
@@ -98,9 +102,17 @@ impl BpKind {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Step {
     /// `step`: at the next statement on another line, in any frame.
-    Into { depth: usize, code: usize, line: u32 },
+    Into {
+        depth: usize,
+        code: usize,
+        line: u32,
+    },
     /// `next`: the same, without stopping in called functions.
-    Over { depth: usize, code: usize, line: u32 },
+    Over {
+        depth: usize,
+        code: usize,
+        line: u32,
+    },
     /// `finish`: once the current function has returned.
     Finish { depth: usize },
     /// `leave`: at the current function's return.
@@ -410,10 +422,7 @@ pub(crate) fn set_context(vm: &mut Vm, path: &[u8], announce: bool) -> bool {
     if announce {
         msg(
             vm,
-            &format!(
-                "[Set execution context: {}]",
-                String::from_utf8_lossy(&abs)
-            ),
+            &format!("[Set execution context: {}]", String::from_utf8_lossy(&abs)),
         );
     }
     let src = Rc::new(src);
@@ -509,6 +518,8 @@ fn do_run(args: Option<Vec<Vec<u8>>>, stdin: Option<Vec<u8>>) -> RunEnd {
         }
     }
     watch::remove_all(&mut vm);
+    // Seen now: shutdown flushes the output itself.
+    sync_out(&mut vm);
     vm.shutdown();
     if let Some(end) = with(|d| d.abort.take()) {
         abandon(&mut vm);
@@ -546,7 +557,12 @@ fn uncaught_end(vm: &mut Vm, e: ObjRef) {
     vm.ex.pending.clear();
     vm.ex.native_calls.clear();
     with(|d| d.last_uncaught = true);
-    if vm.err.exception_handlers.last().is_some_and(|h| !h.is_null()) {
+    if vm
+        .err
+        .exception_handlers
+        .last()
+        .is_some_and(|h| !h.is_null())
+    {
         vm.report_uncaught(e);
         return;
     }
@@ -721,7 +737,11 @@ fn on_marker(vm: &mut Vm) -> R<()> {
     }
     let file = code.file.to_vec();
     let first = !code.ops[..ip].iter().any(|o| matches!(o, Op::Ticks));
-    let need_ops = with(|d| d.bps.iter().any(|b| matches!(b.kind, BpKind::Opcode { .. })));
+    let need_ops = with(|d| {
+        d.bps
+            .iter()
+            .any(|b| matches!(b.kind, BpKind::Opcode { .. }))
+    });
     let ops: Vec<&'static str> = if need_ops {
         code.ops[ip + 1..]
             .iter()
@@ -738,6 +758,9 @@ fn on_marker(vm: &mut Vm) -> R<()> {
         .filter(|_| code.flags & fflags::CLOSURE == 0)
         .map(|c| lower(c));
     let watch_msg = watch::check(vm);
+    if with(|d| d.abort.is_some()) {
+        return Err(Unwind::Fatal);
+    }
     let (header, stop) = with(|d| {
         let same_line = d.last_marker == (depth, cid, line);
         d.last_marker = (depth, cid, line);
@@ -830,40 +853,47 @@ fn on_marker(vm: &mut Vm) -> R<()> {
 /// finally block around the current instruction of some frame.
 fn will_be_caught(vm: &Vm, ex: &ObjRef) -> bool {
     let cls = vm.class_of(ex);
-    let n = vm.ex.frames.len();
-    for i in (0..n).rev() {
-        let f = &vm.ex.frames[i];
-        let ip = if i == n - 1 {
-            vm.ex.ip.saturating_sub(1)
-        } else {
-            (f.ip as usize).saturating_sub(1)
-        } as u32;
-        let code = f.code();
-        for tr in &code.try_ranges {
-            if ip < tr.start {
-                continue;
-            }
-            if ip < tr.end && tr.catch != 0 {
-                let mut at = tr.catch as usize;
-                while let Some(Op::Catch { list, next, .. }) = code.ops.get(at) {
-                    for &k in &code.lists[*list as usize] {
-                        let k = (k & !crate::bytecode::CONST) as usize;
-                        if let Some(Value::Str(name)) = code.consts.get(k) {
-                            let l = lower(name);
-                            if vm.instance_of_lname(&cls, &l) {
-                                return true;
-                            }
-                        }
+    // The running fiber's frames, then those of the code that resumed it.
+    std::iter::once(&vm.ex)
+        .chain(vm.ex_parents.iter().rev())
+        .any(|state| {
+            let n = state.frames.len();
+            (0..n).rev().any(|i| {
+                let f = &state.frames[i];
+                let ip = if i == n - 1 {
+                    state.ip.saturating_sub(1)
+                } else {
+                    (f.ip as usize).saturating_sub(1)
+                } as u32;
+                frame_catches(vm, f.code(), ip, &cls)
+            })
+        })
+}
+
+fn frame_catches(vm: &Vm, code: &FuncCode, ip: u32, cls: &crate::class::Class) -> bool {
+    for tr in &code.try_ranges {
+        if ip < tr.start {
+            continue;
+        }
+        if ip < tr.end && tr.catch != 0 {
+            let mut at = tr.catch as usize;
+            while let Some(Op::Catch { list, next, .. }) = code.ops.get(at) {
+                for &k in &code.lists[*list as usize] {
+                    let k = (k & !crate::bytecode::CONST) as usize;
+                    if let Some(Value::Str(name)) = code.consts.get(k)
+                        && vm.instance_of_lname(cls, &lower(name))
+                    {
+                        return true;
                     }
-                    if *next as usize <= at {
-                        break;
-                    }
-                    at = *next as usize;
                 }
+                if *next as usize <= at {
+                    break;
+                }
+                at = *next as usize;
             }
-            if tr.finally != 0 && ip < tr.finally {
-                return true;
-            }
+        }
+        if tr.finally != 0 && ip < tr.finally {
+            return true;
         }
     }
     false
@@ -898,18 +928,32 @@ fn on_exception(vm: &mut Vm, ex: &ObjRef) -> R<()> {
         }
         found
     });
+    // Destroying a suspended generator unwinds it with an internal
+    // exception that is not the script's.
+    let internal = ex.class_name().as_bytes();
+    if internal == b"GeneratorExit_" {
+        return Ok(());
+    }
     if origin.is_none() && !will_be_caught(vm, ex) {
-        let (cls, efile, eline) = exception_place(vm, ex);
+        let (mut cls, mut efile, mut eline) = exception_place(vm, ex);
+        // A destroyed fiber's unwinding has no place of its own: the stop
+        // shows where the fiber is (test sapi/phpdbg/tests/gh13827.phpt).
+        if internal == b"FiberExit_" {
+            cls = "GracefulExit".into();
+        }
+        let shown_file = String::from_utf8_lossy(&efile).into_owned();
+        let shown_line = eline;
+        if efile.is_empty() {
+            efile = file.clone();
+            eline = line;
+        }
         let m = match vm.get_prop_raw(ex, b"message") {
             Value::Str(s) => s.to_string_lossy(),
             _ => String::new(),
         };
         let header = format!(
             "[Uncaught {} in {} on line {}: {}]",
-            cls,
-            String::from_utf8_lossy(&efile),
-            eline,
-            m
+            cls, shown_file, shown_line, m
         );
         with(|d| d.step = None);
         return stop_at(vm, Some(&header), &efile, eline, false);
