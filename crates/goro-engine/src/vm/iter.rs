@@ -184,7 +184,27 @@ impl Vm {
         {
             self.hide_native = Rc::as_ptr(f);
         }
+        // (foreach only: iterator_count() and friends show it, test ext/dom/
+        // tests/bug79852)
+        let frames = self.ex.frames.len() as u32;
+        let from_native = self
+            .ex
+            .native_calls
+            .last()
+            .is_some_and(|c| c.depth == frames);
+        let hide_php = !from_native
+            && f.as_ref().is_some_and(|f| match &f.kind {
+                crate::func::FuncKind::User(code) => code.file.is_empty(),
+                _ => false,
+            });
+        if hide_php {
+            let depth = self.ex.frames.len() as u32;
+            self.ex.hidden_iter_frames.push(depth);
+        }
         let r = self.call_method(it, lname, args);
+        if hide_php {
+            self.ex.hidden_iter_frames.pop();
+        }
         self.hide_native = std::ptr::null();
         r
     }
@@ -286,7 +306,9 @@ impl Vm {
                         }
                         return Ok(true);
                     }
+                    let extra = crate::builtins::spl::ao_foreach_handle(self, &o)?;
                     let it = self.get_iterator_of(&o)?;
+                    crate::builtins::spl::ao_keep_foreach_handle(&it, extra);
                     if self.is_generator_obj(&it) {
                         self.gen_rewind_traverse(&it)?;
                         unsafe {

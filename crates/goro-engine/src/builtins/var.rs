@@ -624,12 +624,19 @@ impl Vm {
                 }
             }
             Value::Array(a) => {
-                let rc = if a.is_empty() || a.data().is_literal() {
+                // Only the outermost literal is immutable: one held by another
+                // array or a property default is counted (tests
+                // general_functions/debug_zval_dump_b, debug_zval_dump_o).
+                let rc = if a.is_empty() || (a.data().is_literal() && indent == 0) {
                     None
                 } else {
                     Some(refcount.unwrap_or(a.refcount()))
                 };
-                let packed = if a.data().is_packed() { " packed" } else { "" };
+                let packed = if a.data().is_packed() && !a.is_empty() {
+                    " packed"
+                } else {
+                    ""
+                };
                 let id = a.data() as *const _ as usize;
                 match rc {
                     None => out.extend_from_slice(
@@ -746,6 +753,17 @@ impl Vm {
                 let v = r.get();
                 self.zval_dump_into(out, &v, indent, None, false)?;
             }
+            // (tests general_functions/bug73973, gh10885)
+            Value::Resource(r) => {
+                let mut line = Vec::new();
+                self.var_dump_into(&mut line, v, indent, false)?;
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                out.extend_from_slice(&line);
+                let n = refcount.unwrap_or(r.refcount());
+                out.extend_from_slice(format!(" refcount({n})\n").as_bytes());
+            }
             other => self.var_dump_into(out, other, indent, false)?,
         }
         Ok(())
@@ -860,7 +878,10 @@ fn debug_zval_dump(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let mut out = Vec::new();
         // The argument copy adds one reference.
         let rc = match &v {
-            Value::Array(arr) => Some(arr.refcount()),
+            // Without this function's own `v` (test general_functions/
+            // debug_zval_dump_refs).
+            Value::Array(arr) => Some(arr.refcount().saturating_sub(1)),
+            Value::Resource(r) => Some(r.refcount().saturating_sub(1)),
             Value::Object(o) => Some(o.refcount()),
             Value::Str(s) if !s.is_immortal() => Some(s.refcount()),
             _ => None,
@@ -939,6 +960,9 @@ fn settype(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return vm.value_error("settype(): Argument #2 ($type) must be a valid type");
         }
     };
+    // A typed property keeps its type: the new value is coerced to it, or
+    // refused (test ext/standard/tests/general_functions/settype_typed_property).
+    let nv = vm.typed_ref_value(&r, nv)?;
     let old = r.set(nv);
     drop(old);
     Ok(Value::Bool(true))

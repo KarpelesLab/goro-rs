@@ -72,6 +72,7 @@ pub static MODULE: Module = Module {
                 public $bucket;
                 public string $data;
                 public int $datalen;
+                public int $dataLength;
                 private function __construct() {}
             }",
         ),
@@ -514,7 +515,28 @@ fn attach(vm: &mut Vm, a: &Args, prepend: bool) -> R<Value> {
             side,
             filter: f,
         };
-        with_stream(vm, a, 0, |_, s| {
+        let added = with_stream(vm, a, 0, |vm, s| {
+            let mut af = af;
+            // Data already in the read buffer goes through the new filter at
+            // once (tests filters/filter_errors_*).
+            if side == FilterSide::Read {
+                let mut pre = std::mem::take(&mut s.filtered);
+                if s.read_filters.is_empty() {
+                    let n = s.unread_in_chunk() as usize;
+                    if n > 0 {
+                        let mut buf = vec![0u8; n];
+                        let k = s.read_raw(vm, &mut buf).unwrap_or(0);
+                        pre.extend_from_slice(&buf[..k]);
+                    }
+                }
+                if !pre.is_empty() {
+                    let mut out = Vec::new();
+                    if !af.filter.filter(vm, &pre, false, &mut out)? {
+                        return Ok(false);
+                    }
+                    s.filtered = out;
+                }
+            }
             let chain = match side {
                 FilterSide::Read => &mut s.read_filters,
                 FilterSide::Write => &mut s.write_filters,
@@ -524,8 +546,12 @@ fn attach(vm: &mut Vm, a: &Args, prepend: bool) -> R<Value> {
             } else {
                 chain.push(af);
             }
-            Ok(())
+            Ok(true)
         })?;
+        if !added {
+            vm.fwarn(a, "Filter failed to process pre-buffered data")?;
+            return Ok(Value::Bool(false));
+        }
     }
     Ok(Value::Resource(ResRef::new(
         PhpStr::intern(b"stream filter"),
@@ -576,6 +602,26 @@ fn stream_filter_remove(vm: &mut Vm, a: &mut Args) -> R<Value> {
         // SAFETY: `stream` keeps the resource alive for the call.
         let mut s = unsafe { (*cell).borrow_mut() };
         let mut gone: Vec<AttachedFilter> = Vec::new();
+        // A read filter is flushed too; what it gives back is still to be
+        // read, and one that fails stays (test filters/filter_errors_user).
+        if let Some(i) = s.read_filters.iter().position(|f| f.id == id) {
+            let mut f = s.read_filters.remove(i);
+            let mut out = Vec::new();
+            let r = f.filter.filter(vm, &[], true, &mut out);
+            let ok = matches!(r, Ok(true));
+            if ok {
+                s.filtered.extend_from_slice(&out);
+                gone.push(f);
+            } else {
+                s.read_filters.insert(i, f);
+            }
+            r?;
+            if !ok {
+                drop(s);
+                vm.fwarn(a, "Unable to flush filter, not removing")?;
+                return Ok(Value::Bool(false));
+            }
+        }
         // A write filter removed is closed: what it gives back goes through
         // the filters after it to the stream (test
         // ext/bz2/tests/bug81092.phpt: a complete bzip2 stream).
@@ -724,7 +770,10 @@ impl StreamFilter for Base64 {
                 b'0'..=b'9' => vals.push(b - b'0' + 52),
                 b'+' => vals.push(62),
                 b'/' => vals.push(63),
-                b'=' | b' ' | b'\t' | b'\r' | b'\n' => {}
+                b' ' | b'\t' | b'\r' | b'\n' => {}
+                // Padding only ends a quantum with data in it (test
+                // filters/filter_errors_convert_base64_decode).
+                b'=' if vals.len() % 4 >= 2 => {}
                 _ => {
                     let f = vm.active_function_name();
                     vm.warn(&format!(
@@ -849,11 +898,17 @@ impl StreamFilter for QuotedPrintable {
                     out.push(v(h) * 16 + v(l));
                     i += 3;
                 }
+                // A truncated soft break at the very end (test filters/
+                // ghsa-r977-prxv-hc43).
+                (Some(b'\r'), None) if closing => i += 2,
                 _ => {
                     vm.warn(&format!(
                         "{}(): Stream filter (convert.quoted-printable-decode): invalid byte sequence",
                         vm.active_function_name()
                     ))?;
+                    // The rest of this input is dropped; the decoder still
+                    // waits after its `=` (test filters/bug74267).
+                    self.carry = b"=".to_vec();
                     return Ok(false);
                 }
             }
@@ -1020,6 +1075,8 @@ fn stream_filter_register(vm: &mut Vm, a: &mut Args) -> R<Value> {
 /// A php_user_filter instance on a stream.
 struct UserFilter {
     obj: goro_runtime::ObjRef,
+    /// The stream the filter is on, given to `$stream` on each call.
+    stream: Option<goro_runtime::object::WeakRes>,
 }
 
 /// The data of a `userfilter.bucket brigade` resource.
@@ -1070,22 +1127,16 @@ fn new_user_filter(
     if declared(vm, b"params") {
         vm.set_prop_raw(&o, b"params", params.clone());
     }
-    if declared(vm, b"stream") {
-        vm.set_prop_raw(
-            &o,
-            b"stream",
-            stream
-                .map(|r| Value::Resource(r.clone()))
-                .unwrap_or(Value::Null),
-        );
-    }
     if vm.class_of(&o).find_method(b"oncreate").is_some() {
         let ok = vm.call_method(&o, b"oncreate", Vec::new())?;
         if matches!(ok, Value::Bool(false)) {
             return Ok(None);
         }
     }
-    Ok(Some(Box::new(UserFilter { obj: o })))
+    Ok(Some(Box::new(UserFilter {
+        obj: o,
+        stream: stream.map(|r| r.downgrade()),
+    })))
 }
 
 fn new_bucket(vm: &mut Vm, data: &[u8]) -> R<goro_runtime::ObjRef> {
@@ -1093,9 +1144,22 @@ fn new_bucket(vm: &mut Vm, data: &[u8]) -> R<goro_runtime::ObjRef> {
         .find_class(b"StreamBucket", false)?
         .expect("StreamBucket class");
     let o = vm.instantiate_raw(&cls)?;
+    // The handle is what identifies the bucket: a clone shares it (test
+    // filters/gh17345).
+    let handle = ResRef::new(PhpStr::intern(b"userfilter.bucket"), Box::new(()));
+    vm.set_prop_raw(&o, b"bucket", Value::Resource(handle));
     vm.set_prop_raw(&o, b"data", Value::Str(PhpStr::new(data)));
     vm.set_prop_raw(&o, b"datalen", Value::Int(data.len() as i64));
+    vm.set_prop_raw(&o, b"dataLength", Value::Int(data.len() as i64));
     Ok(o)
+}
+
+/// The resource id of a bucket's handle.
+fn bucket_id(vm: &mut Vm, b: &goro_runtime::ObjRef) -> Option<i64> {
+    match vm.get_prop_raw(b, b"bucket") {
+        Value::Resource(r) => Some(r.id()),
+        _ => None,
+    }
 }
 
 impl StreamFilter for UserFilter {
@@ -1111,19 +1175,19 @@ impl StreamFilter for UserFilter {
             Box::new(Brigade::default()),
         );
         let consumed = goro_runtime::PhpRef::new(Value::Int(0));
-        let r = vm.call_method(
-            &self.obj,
-            b"filter",
-            vec![
-                Value::Resource(in_res.clone()),
-                Value::Resource(out_res.clone()),
-                Value::Ref(consumed),
-                Value::Bool(closing),
-            ],
-        )?;
-        let code = match r {
-            Value::Int(i) => i,
-            _ => 0,
+        let set = self.set_stream_prop(vm);
+        let r = match set {
+            Ok(()) => vm.call_method(
+                &self.obj,
+                b"filter",
+                vec![
+                    Value::Resource(in_res.clone()),
+                    Value::Resource(out_res.clone()),
+                    Value::Ref(consumed),
+                    Value::Bool(closing),
+                ],
+            ),
+            Err(e) => Err(e),
         };
         let left = in_res
             .res()
@@ -1139,6 +1203,10 @@ impl StreamFilter for UserFilter {
                 f
             ))?;
         }
+        let code = match r? {
+            Value::Int(i) => i,
+            _ => 0,
+        };
         let data = out_res.res().data.borrow();
         if let Some(b) = data.as_ref().and_then(|d| d.downcast_ref::<Brigade>()) {
             for bucket in b.0.borrow().iter() {
@@ -1159,6 +1227,12 @@ impl StreamFilter for UserFilter {
         Ok(true)
     }
 
+    /// A flush reaches the filter, with nothing to filter (test filters/
+    /// gh20370_dynamic_stream_property).
+    fn flush(&mut self, vm: &mut Vm, out: &mut Vec<u8>) -> R<bool> {
+        self.filter(vm, &[], false, out)
+    }
+
     fn on_close(&mut self, vm: &mut Vm) -> R<()> {
         if self.has(vm, b"onclose") {
             vm.call_method(&self.obj, b"onclose", Vec::new())?;
@@ -1170,6 +1244,28 @@ impl StreamFilter for UserFilter {
 impl UserFilter {
     fn has(&self, vm: &Vm, m: &[u8]) -> bool {
         vm.class_of(&self.obj).find_method(m).is_some()
+    }
+
+    /// Gives the filter its stream: only a property that exists and is
+    /// public is written, under its type (tests filters/gh20370*).
+    fn set_stream_prop(&self, vm: &mut Vm) -> R<()> {
+        let Some(res) = self.stream.as_ref().and_then(|w| w.upgrade()) else {
+            return Ok(());
+        };
+        let name = PhpStr::intern(b"stream");
+        let cls = vm.class_of(&self.obj);
+        let writable = match vm.lookup_prop(&cls, &name, std::ptr::null()) {
+            crate::vm::objects::PropLookup::Found(_) => true,
+            crate::vm::objects::PropLookup::Dynamic => vm
+                .object_props_array(&self.obj, false)
+                .get_str(&name)
+                .is_some(),
+            _ => false,
+        };
+        if writable {
+            vm.write_prop(&self.obj, &name, Value::Resource(res), None)?;
+        }
+        Ok(())
     }
 }
 
@@ -1218,11 +1314,22 @@ fn bucket_add(vm: &mut Vm, a: &Args, front: bool) -> R<Value> {
     // The bucket's data property is what passes on; keep datalen in step.
     if let Value::Str(s) = vm.get_prop_raw(&bucket, b"data") {
         vm.set_prop_raw(&bucket, b"datalen", Value::Int(s.len() as i64));
+        vm.set_prop_raw(&bucket, b"dataLength", Value::Int(s.len() as i64));
     }
+    let id = bucket_id(vm, &bucket);
+    let queued: Vec<goro_runtime::ObjRef> = {
+        let data = r.res().data.borrow();
+        data.as_ref()
+            .and_then(|d| d.downcast_ref::<Brigade>())
+            .map(|b| b.0.borrow().iter().cloned().collect())
+            .unwrap_or_default()
+    };
+    let same: Vec<bool> = queued.iter().map(|x| bucket_id(vm, x) == id).collect();
     let data = r.res().data.borrow();
     if let Some(b) = data.as_ref().and_then(|d| d.downcast_ref::<Brigade>()) {
         let mut q = b.0.borrow_mut();
-        q.retain(|x| !goro_runtime::ObjRef::ptr_eq(x, &bucket));
+        let mut it = same.iter();
+        q.retain(|_| !*it.next().unwrap_or(&false));
         if front {
             q.push_front(bucket);
         } else {

@@ -17,6 +17,7 @@ members = [
     "crates/goro-ext-filter",
     "crates/goro-ext-gmp",
     "crates/goro-ext-uri",
+    "crates/goro-ext-tidy",
     "crates/goro-ext-sodium",
     "crates/goro-xml",
     "crates/goro-ext-openssl",

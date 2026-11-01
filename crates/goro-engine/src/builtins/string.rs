@@ -147,6 +147,10 @@ pub static MODULE: Module = Module {
         ),
         ("function strrev(string $string): string", strrev),
         (
+            "function hebrev(string $string, int $max_chars_per_line = 0): string",
+            hebrev,
+        ),
+        (
             "function str_word_count(string $string, int $format = 0, ?string $characters = null): array|int",
             str_word_count,
         ),
@@ -930,6 +934,106 @@ fn chunk_split(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     let r = std_ext::strings::chunk_split(a.bytes(0), a.int_or(1, 76), end);
     Ok(sv(sr(vm, r)?))
+}
+
+/// hebrev() (PHP manual: logical Hebrew text to visual text, in the ISO-8859-8
+/// bytes 0xE0-0xFA; the layout of mixed text and of long lines follows test
+/// strings/hebrev_basic). Each input line is laid out right to left: runs of
+/// Hebrew are reversed, other text keeps its order, the runs swap places, and
+/// punctuation at the edge of a run moves with the line's direction. Lines
+/// over `$max_chars_per_line` are cut at spaces from their visual end.
+fn hebrev(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let input = a.str(0);
+    let max = a.int_or(1, 0);
+    let mut out = Vec::with_capacity(input.len());
+    for (i, line) in input.split(|&c| c == b'\n').enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        let visual = hebrev_line(line);
+        if max <= 0 || (visual.len() as i64) <= max {
+            out.extend_from_slice(&visual);
+            continue;
+        }
+        let max = max as usize;
+        let mut rest: &[u8] = &visual;
+        let mut first = true;
+        while !rest.is_empty() {
+            if !first {
+                out.push(b'\n');
+            }
+            first = false;
+            if rest.len() <= max {
+                out.extend_from_slice(rest);
+                break;
+            }
+            // The last words that fit, from the end of what is left.
+            let start = rest.len() - max;
+            let cut = match rest[start..].iter().position(|&c| c == b' ') {
+                // Keep a word that starts exactly at the window whole.
+                Some(_) if start > 0 && rest[start - 1] == b' ' => start,
+                Some(p) => start + p + 1,
+                None => start,
+            };
+            out.extend_from_slice(&rest[cut..]);
+            rest = &rest[..cut];
+            while rest.last() == Some(&b' ') {
+                rest = &rest[..rest.len() - 1];
+            }
+        }
+    }
+    Ok(Value::Str(PhpStr::from(out)))
+}
+
+fn hebrev_line(line: &[u8]) -> Vec<u8> {
+    let hebrew = |c: u8| (0xE0..=0xFA).contains(&c);
+    let strong = |c: u8| hebrew(c) || c.is_ascii_alphanumeric();
+    // Runs of one direction; neutral bytes inside a run stay in it.
+    let mut runs: Vec<(usize, usize, bool)> = Vec::new();
+    let mut i = 0;
+    while i < line.len() {
+        if !strong(line[i]) {
+            let s = i;
+            while i < line.len() && !strong(line[i]) {
+                i += 1;
+            }
+            runs.push((s, i, true));
+            continue;
+        }
+        let is_heb = hebrew(line[i]);
+        let s = i;
+        let mut end = i;
+        while i < line.len() {
+            if strong(line[i]) {
+                if hebrew(line[i]) != is_heb {
+                    break;
+                }
+                end = i + 1;
+            }
+            i += 1;
+        }
+        i = end;
+        runs.push((s, end, is_heb));
+    }
+    let mut out = Vec::with_capacity(line.len());
+    for &(s, e, rtl) in runs.iter().rev() {
+        if rtl {
+            out.extend(line[s..e].iter().rev().map(|&c| match c {
+                b'(' => b')',
+                b')' => b'(',
+                b'[' => b']',
+                b']' => b'[',
+                b'{' => b'}',
+                b'}' => b'{',
+                b'<' => b'>',
+                b'>' => b'<',
+                c => c,
+            }));
+        } else {
+            out.extend_from_slice(&line[s..e]);
+        }
+    }
+    out
 }
 
 fn strrev(_vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1724,7 +1828,11 @@ fn http_build_query(vm: &mut Vm, a: &mut Args) -> R<Value> {
         prefix: &[u8],
         depth: usize,
     ) -> R<()> {
-        if depth > 64 {
+        // Test http/http_build_query/gh20583.
+        if depth >= vm.native_stack_levels() {
+            return vm.throw("Error", "Maximum call stack size reached.");
+        }
+        if depth > 64 && vm.native_stack_levels() == usize::MAX {
             return Ok(());
         }
         for (k, v) in pairs_of(vm, v) {

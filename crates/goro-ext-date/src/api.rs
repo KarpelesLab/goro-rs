@@ -59,16 +59,18 @@ pub fn idate(fmt: &[u8], ts: i64, zone: &TimeZone) -> Result<i64, IdateError> {
             let secs = (ts.rem_euclid(86_400) + 3600) % 86_400;
             secs * 10 / 864
         }
-        b'd' => t.d as i64,
-        b'h' => {
+        // The unpadded forms are accepted too (test ext/standard/tests/time/
+        // idate).
+        b'd' | b'j' => t.d as i64,
+        b'h' | b'g' => {
             let h = t.h % 12;
             if h == 0 { 12 } else { h as i64 }
         }
-        b'H' => t.h as i64,
+        b'H' | b'G' => t.h as i64,
         b'i' => t.i as i64,
         b'I' => t.is_dst as i64,
         b'L' => civil::is_leap(t.y) as i64,
-        b'm' => t.m as i64,
+        b'm' | b'n' => t.m as i64,
         b'N' => match t.weekday() {
             0 => 7,
             w => w as i64,

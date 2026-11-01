@@ -260,7 +260,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "function php_ini_scanned_files(): string|false",
-            php_ini_loaded_file,
+            php_ini_scanned_files,
         ),
         // runtime
         ("function gc_collect_cycles(): int", gc_collect_cycles),
@@ -878,7 +878,14 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             continue;
         };
-        let exists = vm.var_exists(name);
+        // $this exists for the modes that keep or prefix an existing name,
+        // and is never overwritten by the "if exists" ones (test ext/standard/
+        // tests/array/bug77135).
+        let is_this = name.as_bytes() == b"this";
+        if is_this && matches!(mode, 1 | 5 | 6) {
+            continue;
+        }
+        let exists = is_this || vm.var_exists(name);
         let target: Option<PhpStr> = match mode {
             0 => Some(name.clone()),
             1 => (!exists).then(|| name.clone()),
@@ -890,7 +897,7 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
             // Observed on PHP 8.5: EXTR_PREFIX_ALL skips an empty key
             // (EXTR_PREFIX_INVALID makes it "prefix_").
             3 => (!name.is_empty()).then(|| prefixed(&prefix, name)),
-            4 => Some(if valid_var_name(name) {
+            4 => Some(if valid_var_name(name) && !is_this {
                 name.clone()
             } else {
                 prefixed(&prefix, name)
@@ -906,7 +913,10 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if t.as_bytes() == b"this" {
             return vm.throw("Error", "Cannot re-assign $this");
         }
+        // Counted like any name, but $GLOBALS itself stays out of reach (test
+        // ext/standard/tests/array/extract_safety).
         if t.as_bytes() == b"GLOBALS" {
+            count += 1;
             continue;
         }
         if refs {
@@ -928,7 +938,15 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }
         }
-        vm.assign_var_var(&Value::Str(t), v.deref())?;
+        // A typed reference keeps its type (test ext/standard/tests/array/
+        // extract_typed_ref).
+        let p = vm.var_var_place(&t)?;
+        let mut nv = v.deref();
+        if let Value::Ref(r) = unsafe { &*p } {
+            let r = r.clone();
+            nv = vm.typed_ref_value(&r, nv)?;
+        }
+        vm.assign_var_var(&Value::Str(t), nv)?;
         count += 1;
     }
     Ok(Value::Int(count))
@@ -1024,7 +1042,12 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 None => {
                     return vm.throw(
                         "Error",
-                        &format!("Class \"{}\" not found", String::from_utf8_lossy(cls)),
+                        // Without the leading backslash (test ext/standard/
+                        // tests/general_functions/gh9905).
+                        &format!(
+                            "Class \"{}\" not found",
+                            String::from_utf8_lossy(cls.strip_prefix(b"\\").unwrap_or(cls))
+                        ),
                     );
                 }
             },
@@ -1094,10 +1117,22 @@ fn get_defined_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         return Ok(Value::Array(out));
     }
+    // Module constants in declaration order (test ext/standard/tests/url/
+    // parse_url_basic_010), then the rest sorted.
+    for m in vm.modules.iter() {
+        for (k, _) in m.constants {
+            let name = PhpStr::new(k.as_bytes());
+            if let Some(v) = vm.constants.get(&name)
+                && !vm.user_constants.contains(&name)
+            {
+                out.insert(Key::Str(name), v.clone());
+            }
+        }
+    }
     let mut keys: Vec<PhpStr> = vm
         .constants
         .keys()
-        .filter(|k| !vm.user_constants.contains(k))
+        .filter(|k| !vm.user_constants.contains(k) && out.get_str(k).is_none())
         .cloned()
         .collect();
     keys.sort();
@@ -1214,12 +1249,13 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let m = lower(&a.str(1));
     Ok(Value::Bool(match c {
         Some(c) => {
-            // A parent's private static method is not the child's (tests
-            // Zend/tests/method_exists_002, inheritance/bug50810).
+            // A parent's private method counts for an object but not for a
+            // class name (tests Zend/tests/method_exists_002, ext/standard/
+            // tests/class_object/method_exists_basic_001).
+            let by_object = matches!(v, Value::Object(_));
             c.find_method_str(&m).is_some_and(|f| {
-                use crate::class::mflags::{PRIVATE, STATIC};
-                f.flags & (PRIVATE | STATIC) != (PRIVATE | STATIC)
-                    || std::ptr::eq(f.scope.get(), &*c)
+                use crate::class::mflags::PRIVATE;
+                by_object || f.flags & PRIVATE == 0 || std::ptr::eq(f.scope.get(), &*c)
             }) || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
         }
         None => false,
@@ -1288,6 +1324,7 @@ fn get_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // (SimpleXMLElement; observed on PHP 8.5).
     let cls = vm.class_of(&o);
     if cls.native.prop.is_some()
+        && !super::spl::is_array_object(&o)
         && let Some(h) = cls.native.props_for
         && let Some(arr) = h(vm, &o)
     {
@@ -2147,8 +2184,34 @@ fn get_cfg_var(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Array(out))
 }
 
+thread_local! {
+    /// The ini file read (-c) and the list of scanned ones (PHP_INI_SCAN_DIR).
+    static LOADED_INI: std::cell::RefCell<(Option<Vec<u8>>, Option<Vec<u8>>)> =
+        const { std::cell::RefCell::new((None, None)) };
+}
+
+/// Records the ini file the command line named.
+pub fn note_loaded_ini(path: &[u8]) {
+    LOADED_INI.with(|l| l.borrow_mut().0 = Some(path.to_vec()));
+}
+
+/// Records the files read from the scan directory, one per line.
+pub fn note_scanned_ini(list: &[u8]) {
+    LOADED_INI.with(|l| l.borrow_mut().1 = Some(list.to_vec()));
+}
+
 fn php_ini_loaded_file(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(false))
+    Ok(LOADED_INI.with(|l| match &l.borrow().0 {
+        Some(p) => Value::Str(PhpStr::new(p)),
+        None => Value::Bool(false),
+    }))
+}
+
+fn php_ini_scanned_files(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    Ok(LOADED_INI.with(|l| match &l.borrow().1 {
+        Some(p) => Value::Str(PhpStr::new(p)),
+        None => Value::Bool(false),
+    }))
 }
 
 // ---------------------------------------------------------------- runtime
@@ -2707,8 +2770,26 @@ fn get_current_user(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(u)))
 }
 
-fn get_resources(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::new()))
+/// get_resources() (PHP manual): the live streams, by resource id.
+fn get_resources(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let want = a.opt_str(0);
+    let mut live = super::file::open_stream_resources();
+    live.sort_by_key(|r| r.id());
+    let mut out = PhpArray::new();
+    for r in live {
+        // (A Phar object's listing is no PHP stream: test ext/phar/tests/tar/
+        // bug70417.)
+        if r.is_closed() || super::file::is_listing_without_uri(&r) {
+            continue;
+        }
+        if let Some(t) = &want
+            && t.as_bytes() != r.res().kind.borrow().as_bytes()
+        {
+            continue;
+        }
+        out.insert(Key::Int(r.id()), Value::Resource(r));
+    }
+    Ok(Value::Array(out))
 }
 
 fn clone_fn(vm: &mut Vm, a: &mut Args) -> R<Value> {

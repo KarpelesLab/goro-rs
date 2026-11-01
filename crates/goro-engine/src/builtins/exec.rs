@@ -250,6 +250,33 @@ fn fd_stream(fd: OwnedFd, mode: &[u8]) -> ResRef {
     ))
 }
 
+/// For a pipe already read from, what PHP's read chunk would hold: the bytes
+/// waiting on it, which go. The number of bytes.
+fn discard_read_ahead(r: &ResRef, fd: RawFd) -> usize {
+    let data = r.res().data.borrow();
+    let Some(cell) = data
+        .as_ref()
+        .and_then(|d| d.downcast_ref::<RefCell<Stream>>())
+    else {
+        return 0;
+    };
+    let Ok(s) = cell.try_borrow() else {
+        return 0;
+    };
+    if !s.did_read || !s.is_pipe() {
+        return 0;
+    }
+    // SAFETY: fcntl and read on an open descriptor, with a valid buffer.
+    unsafe {
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        let mut buf = [0u8; 8192];
+        let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+        libc::fcntl(fd, libc::F_SETFL, fl);
+        n.max(0) as usize
+    }
+}
+
 /// The descriptor behind a stream resource, if it has one.
 /// The user-space stream object of a resource, if it is one.
 fn user_obj(r: &ResRef) -> Option<goro_runtime::ObjRef> {
@@ -597,6 +624,7 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let specs = a.array(1);
     let mut child: Vec<(i64, ChildFd)> = Vec::new();
     let mut parent: Vec<(i64, Parent)> = Vec::new();
+    let mut pty: Option<(OwnedFd, OwnedFd)> = None;
     // Child ends to close once the child runs.
     let mut keep: Vec<OwnedFd> = Vec::new();
     for (k, v) in specs.iter() {
@@ -610,7 +638,21 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let v = v.deref();
         match &v {
             Value::Resource(r) => match stream_fd(r) {
-                Ok(Some(fd)) => child.push((idx, ChildFd::Dup(fd))),
+                Ok(Some(fd)) => {
+                    // What a read of this pipe had buffered can't follow the
+                    // descriptor to the child (test streams/
+                    // stream_cast_loses_data).
+                    let lost = discard_read_ahead(r, fd);
+                    if lost > 0 {
+                        vm.fwarn(
+                            a,
+                            &format!(
+                                "{lost} bytes of buffered data lost during stream conversion!"
+                            ),
+                        )?;
+                    }
+                    child.push((idx, ChildFd::Dup(fd)));
+                }
                 Ok(None) => {
                     let kind = {
                         let data = r.res().data.borrow();
@@ -734,17 +776,30 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
                         };
                         child.push((idx, ChildFd::Redirect(t)));
                     }
-                    b"pty" => match open_pty() {
-                        Ok((master, slave)) => {
-                            child.push((idx, ChildFd::Dup(slave.as_raw_fd())));
-                            keep.push(slave);
-                            parent.push((idx, Parent::Pipe(master, b"r+")));
+                    // All "pty" descriptors of a call share one terminal (test
+                    // file/bug69442).
+                    b"pty" => {
+                        if pty.is_none() {
+                            match open_pty() {
+                                Ok(pair) => pty = Some(pair),
+                                Err(e) => {
+                                    vm.fwarn(a, &format!("Failed to open PTY master: {}", e))?;
+                                    return Ok(Value::Bool(false));
+                                }
+                            }
                         }
-                        Err(e) => {
-                            vm.fwarn(a, &format!("Failed to open PTY master: {}", e))?;
+                        let Some((master, slave)) = &pty else {
                             return Ok(Value::Bool(false));
+                        };
+                        child.push((idx, ChildFd::Dup(slave.as_raw_fd())));
+                        match master.try_clone() {
+                            Ok(m) => parent.push((idx, Parent::Pipe(m, b"r+"))),
+                            Err(e) => {
+                                vm.fwarn(a, &format!("Failed to open PTY master: {}", e))?;
+                                return Ok(Value::Bool(false));
+                            }
                         }
-                    },
+                    }
                     other => {
                         vm.fwarn(
                             a,
@@ -830,6 +885,8 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     drop(keep);
+    drop(pty);
+    goro_runtime::object::release_reserved_res_id();
     let mut pipes = PhpArray::new();
     let mut held = Vec::new();
     for (idx, p) in parent {
@@ -1152,7 +1209,9 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 "Argument #5 ($microseconds) must be greater than or equal to 0",
             );
         }
-    } else if a.opt_int(4).is_some() {
+    } else if a.opt_int(4).is_some_and(|u| u != 0) {
+        // 0 is what the parameter defaults to (test streams/
+        // stream_select_null_usec).
         return vm.fthrow(
             a,
             "ValueError",
@@ -1199,7 +1258,9 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     }
-    if entries.is_empty() && sets.iter().flatten().all(|s| !s.is_empty()) {
+    // Nothing could be selected on, an empty set or none castable alike (test
+    // streams/gh14506).
+    if entries.is_empty() {
         return vm.throw("ValueError", "No stream arrays were passed");
     }
     let mut pfds: Vec<libc::pollfd> = entries

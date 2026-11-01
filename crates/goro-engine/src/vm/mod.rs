@@ -341,6 +341,9 @@ pub struct ExecState {
     pub stack: SlotStack,
     pub pending: Vec<Pending>,
     pub native_calls: Vec<NativeCall>,
+    /// Frame indexes of iterator methods written in PHP that foreach called
+    /// (no frames in traces).
+    pub hidden_iter_frames: Vec<u32>,
     /// The top frame's slots and code (kept in sync by [`ExecState::sync_top`]
     /// on every push/pop: the dispatch loop reads them on each operand).
     pub top: TopFrame,

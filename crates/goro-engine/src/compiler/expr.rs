@@ -259,6 +259,11 @@ impl<'a> Compiler<'a> {
                         return None;
                     }
                     let v = self.const_value(&it.value)?;
+                    // Only the outermost array is a literal of its own (test
+                    // ext/standard/tests/general_functions/debug_zval_dump_b).
+                    if let Value::Array(inner) = &v {
+                        inner.data().unmark_literal();
+                    }
                     match &it.key {
                         Some(k) => {
                             let k = self.const_value(k)?;

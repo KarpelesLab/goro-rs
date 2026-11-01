@@ -42,6 +42,10 @@ pub(super) const FUNCTIONS: &[(&str, crate::func::NativeFn)] = &[
         strftime,
     ),
     (
+        "function strptime(string $timestamp, string $format): array|false",
+        strptime,
+    ),
+    (
         "function gmstrftime(string $format, ?int $timestamp = null): string|false",
         gmstrftime,
     ),
@@ -262,6 +266,46 @@ fn gmmktime(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn checkdate(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(api::checkdate(a.int(0), a.int(1), a.int(2))))
+}
+
+/// strptime() (PHP manual: parses with the C library's strptime(3); tests
+/// time/strptime_basic, strptime_parts).
+fn strptime(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    vm.deprecated(
+        "Function strptime() is deprecated since 8.2, use date_parse_from_format() (for locale-independent parsing), or IntlDateFormatter::parse() (for locale-dependent parsing) instead",
+    )?;
+    let (ts, fmt) = (a.str(0), a.str(1));
+    let (Ok(cts), Ok(cfmt)) = (
+        std::ffi::CString::new(ts.as_bytes()),
+        std::ffi::CString::new(fmt.as_bytes()),
+    ) else {
+        return Ok(Value::Bool(false));
+    };
+    // SAFETY: both strings are NUL-terminated and `tm` is plain data.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let end = unsafe { libc::strptime(cts.as_ptr(), cfmt.as_ptr(), &mut tm) };
+    if end.is_null() {
+        return Ok(Value::Bool(false));
+    }
+    let used = end as usize - cts.as_ptr() as usize;
+    let mut out = goro_runtime::PhpArray::new();
+    for (k, v) in [
+        ("tm_sec", tm.tm_sec),
+        ("tm_min", tm.tm_min),
+        ("tm_hour", tm.tm_hour),
+        ("tm_mday", tm.tm_mday),
+        ("tm_mon", tm.tm_mon),
+        ("tm_year", tm.tm_year),
+        ("tm_wday", tm.tm_wday),
+        ("tm_yday", tm.tm_yday),
+    ] {
+        out.insert(goro_runtime::Key::from(k), Value::Int(v as i64));
+    }
+    out.insert(
+        goro_runtime::Key::from("unparsed"),
+        Value::Str(goro_runtime::PhpStr::new(&ts.as_bytes()[used..])),
+    );
+    Ok(Value::Array(out))
 }
 
 fn strftime_impl(vm: &mut Vm, a: &Args, gmt: bool) -> R<Value> {

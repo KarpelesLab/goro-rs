@@ -20,11 +20,11 @@ pub static MODULE: Module = Module {
             crypt,
         ),
         (
-            "function password_hash(string $password, string|int|null $algo, array $options = []): string",
+            "function password_hash(#[\\SensitiveParameter] string $password, string|int|null $algo, array $options = []): string",
             password_hash,
         ),
         (
-            "function password_verify(string $password, string $hash): bool",
+            "function password_verify(#[\\SensitiveParameter] string $password, string $hash): bool",
             password_verify,
         ),
         (

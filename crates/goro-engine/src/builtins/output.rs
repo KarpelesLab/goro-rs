@@ -43,6 +43,7 @@ pub static MODULE: Module = Module {
 /// (PHP manual: output_handler, "Redirect all the output of your scripts
 /// to a function").
 pub fn start_ini_handler(vm: &mut Vm) {
+    super::tidy::start_clean_output(vm);
     let Some(h) = vm.get_ini(b"output_handler") else {
         return;
     };

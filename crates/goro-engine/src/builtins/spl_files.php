@@ -36,6 +36,11 @@ class SplFileInfo implements Stringable {
     protected function __h_stat($name, $fn) {
         $this->__h_chk();
         $p = $this->getPathname();
+        // A glob without a match stats nothing (test
+        // GlobIterator_internal_null_pointer).
+        if ($p === '' && $this instanceof GlobIterator) {
+            return false;
+        }
         $r = @$fn($p);
         if ($r === false) {
             throw new RuntimeException("SplFileInfo::$name(): stat failed for $p");
@@ -214,6 +219,12 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
         }
         $this->__fp = $fp;
         $this->__mode = $mode;
+        // Found on include_path: the object's path is where it was found
+        // (test SplFileObject/fileobject_004).
+        if ($useIncludePath && !str_contains($filename, '://')
+            && ($found = stream_resolve_include_path($filename)) !== false) {
+            $filename = $found;
+        }
         $this->__h_setPath($filename);
     }
     protected function __h_fchk() {

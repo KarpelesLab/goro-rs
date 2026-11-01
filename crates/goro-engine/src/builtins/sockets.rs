@@ -1145,14 +1145,18 @@ fn std_to_sockaddr(sa: &std::net::SocketAddr) -> (libc::sockaddr_storage, libc::
 fn unix_sockaddr(path: &[u8]) -> Option<(libc::sockaddr_un, libc::socklen_t)> {
     // SAFETY: zeroed sockaddr_un is valid.
     let mut s: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    if path.len() >= s.sun_path.len() {
+    // An abstract name (a leading NUL) may fill sun_path, and its length is
+    // exact: it has no terminator (unix(7)).
+    let abstract_name = path.first() == Some(&0);
+    if path.len() > s.sun_path.len() || (!abstract_name && path.len() == s.sun_path.len()) {
         return None;
     }
     s.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (d, b) in s.sun_path.iter_mut().zip(path) {
         *d = *b as libc::c_char;
     }
-    let len = std::mem::size_of::<libc::sa_family_t>() + path.len() + 1;
+    let len =
+        std::mem::size_of::<libc::sa_family_t>() + path.len() + if abstract_name { 0 } else { 1 };
     Some((s, len as libc::socklen_t))
 }
 
@@ -1164,6 +1168,13 @@ fn unix_path_limit(vm: &mut Vm, a: &Args, t: &mut Target) -> R<()> {
         .sun_path
         .len()
         - 1;
+    // An abstract name needs no terminator: one byte more (test streams/
+    // bug60106-002).
+    let max = if t.host.first() == Some(&0) {
+        max + 1
+    } else {
+        max
+    };
     if matches!(t.kind, Kind::Unix | Kind::Udg) && t.host.len() > max {
         vm.fnotice(
             a,
@@ -1589,6 +1600,11 @@ fn stream_socket_client(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let flags = a.int_or(4, 4);
     let ctx = ctx_value(a, 5);
+    // Without STREAM_CLIENT_CONNECT or _ASYNC_CONNECT nothing connects, so
+    // nothing can fail (test streams/bug61115-2).
+    if flags & (2 | 4) == 0 {
+        return Ok(Value::Bool(false));
+    }
     // NUL bytes show as \0 (test streams/ghsa-3cr5-j632-f35r.phpt).
     let mut shown = Vec::with_capacity(addr.len());
     for &b in addr.as_bytes() {
@@ -1604,6 +1620,25 @@ fn stream_socket_client(vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn fsockopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let host = a.str(0);
     let port = a.int_or(1, -1);
+    // The timeout in microseconds must fit an integer (test streams/gh14780).
+    if a.has(4) {
+        let t = match a.val(4) {
+            Value::Float(f) => Some(f),
+            Value::Int(n) => Some(n as f64),
+            _ => None,
+        };
+        let limit = i64::MAX as f64 / 1_000_000.0;
+        if let Some(t) = t
+            && t != -1.0
+            && !(0.0..=limit).contains(&t)
+        {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                &format!("Argument #6 must be -1 or between 0 and {limit}"),
+            );
+        }
+    }
     let Some(timeout) = float_timeout(vm, a, 4)? else {
         return Ok(Value::Null);
     };
@@ -1622,7 +1657,29 @@ fn fsockopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if port > 0 {
         addr.extend_from_slice(format!(":{port}").as_bytes());
     }
-    client_common(vm, a, &addr, &shown, timeout, 4, None, 2)
+    // pfsockopen() keeps one stream per address: a second call finds it, and
+    // closing either closes it (tests streams/bug54623, streams/gh14780).
+    let persistent = a.fname() == "pfsockopen";
+    if persistent {
+        let found = PERSISTENT.with(|p| p.borrow().get(&addr).cloned());
+        if let Some(r) = found
+            && !r.is_closed()
+        {
+            return Ok(Value::Resource(r));
+        }
+    }
+    let v = client_common(vm, a, &addr, &shown, timeout, 4, None, 2)?;
+    if persistent && let Value::Resource(r) = &v {
+        *r.res().kind.borrow_mut() = PhpStr::intern(b"persistent stream");
+        PERSISTENT.with(|p| p.borrow_mut().insert(addr, r.clone()));
+    }
+    Ok(v)
+}
+
+thread_local! {
+    /// The streams pfsockopen() opened, by address.
+    static PERSISTENT: std::cell::RefCell<std::collections::HashMap<Vec<u8>, ResRef>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 fn stream_socket_server(vm: &mut Vm, a: &mut Args) -> R<Value> {

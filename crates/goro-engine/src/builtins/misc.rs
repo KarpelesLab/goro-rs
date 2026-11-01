@@ -387,6 +387,34 @@ pub(crate) fn memory_limit_cap(vm: &Vm, v: &[u8]) -> Option<(PhpStr, Option<Stri
 /// Startup diagnostics for deprecated `-d` settings, in registration
 /// order (observed on PHP 8.5).
 pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
+    // Directives removed from PHP stop it at startup (test ext/standard/tests/
+    // general_functions/get_cfg_var_variation8). Only magic_quotes_gpc is
+    // tested; the rest of the list is from memory, not checked against the
+    // manual or a reference PHP.
+    for (k, _) in ini {
+        let removed = [
+            &b"magic_quotes_gpc"[..],
+            b"magic_quotes_runtime",
+            b"magic_quotes_sybase",
+            b"register_globals",
+            b"register_long_arrays",
+            b"safe_mode",
+        ];
+        if removed.contains(&&k[..]) {
+            let text = format!(
+                "Directive '{}' is no longer available in PHP",
+                String::from_utf8_lossy(k)
+            );
+            let _ = vm.raise_at(
+                crate::vm::errors::E_ERROR,
+                &text,
+                goro_runtime::PhpStr::from("Unknown"),
+                0,
+            );
+            vm.out.flush();
+            std::process::exit(1);
+        }
+    }
     super::date::startup_timezone_check(vm, ini);
     // memory_limit is capped by max_memory_limit (tests tests/basic/
     // gh17951_ini_parse_*).

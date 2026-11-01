@@ -62,10 +62,6 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Serializable, Count
     public function setIteratorClass(string $iteratorClass): void {}
     public function getIteratorClass(): string {}
     public function __debugInfo(): array {}
-    public function __get($name) {}
-    public function __set($name, $value) {}
-    public function __isset($name) {}
-    public function __unset($name) {}
 }
 class ArrayIterator implements SeekableIterator, ArrayAccess, Serializable, Countable {
     const STD_PROP_LIST = 1;
@@ -97,10 +93,6 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Serializable, Coun
     public function valid(): bool {}
     public function seek(int $offset): void {}
     public function __debugInfo(): array {}
-    public function __get($name) {}
-    public function __set($name, $value) {}
-    public function __isset($name) {}
-    public function __unset($name) {}
 }
 class RecursiveArrayIterator extends ArrayIterator implements RecursiveIterator {
     const CHILD_ARRAYS_ONLY = 4;
@@ -368,10 +360,6 @@ pub static MODULE: Module = Module {
         ("arrayobject::setiteratorclass", ao_set_iter_class),
         ("arrayobject::getiteratorclass", ao_get_iter_class),
         ("arrayobject::__debuginfo", ao_debug_info),
-        ("arrayobject::__get", ao_magic_get),
-        ("arrayobject::__set", ao_magic_set),
-        ("arrayobject::__isset", ao_magic_isset),
-        ("arrayobject::__unset", ao_magic_unset),
         ("arrayiterator::__construct", ai_construct),
         ("arrayiterator::offsetexists", ao_offset_exists),
         ("arrayiterator::offsetget", ao_offset_get),
@@ -399,10 +387,6 @@ pub static MODULE: Module = Module {
         ("arrayiterator::valid", ai_valid),
         ("arrayiterator::seek", ai_seek),
         ("arrayiterator::__debuginfo", ao_debug_info),
-        ("arrayiterator::__get", ao_magic_get),
-        ("arrayiterator::__set", ao_magic_set),
-        ("arrayiterator::__isset", ao_magic_isset),
-        ("arrayiterator::__unset", ao_magic_unset),
         ("recursivearrayiterator::haschildren", rai_has_children),
         ("recursivearrayiterator::getchildren", rai_get_children),
         // SplFixedArray
@@ -626,6 +610,8 @@ pub struct AoData {
     /// A sort is running: the data can't change (test
     /// ArrayObject_exchange_array_during_sorting).
     sorting: bool,
+    /// See [`ao_foreach_handle`].
+    loop_handle: Option<ObjRef>,
     /// A RecursiveArrayIterator child made from an array element: the
     /// parent and the element's position. The data is that element, so
     /// changes reach the parent (tests bug42654, bug42654_2); `storage`
@@ -656,6 +642,7 @@ fn ao_hooks() -> NativeHooks {
                     iter_class: PhpStr::from("ArrayIterator"),
                     pos: 0,
                     sorting: false,
+                    loop_handle: None,
                     link: None,
                 },
             )
@@ -685,6 +672,7 @@ fn ao_hooks() -> NativeHooks {
                 iter_class: d.iter_class.clone(),
                 pos: d.pos,
                 sorting: false,
+                loop_handle: None,
                 link: None,
             });
             if let Some(d) = d {
@@ -701,6 +689,7 @@ fn ao_hooks() -> NativeHooks {
             }
         }),
         dim_storage: Some(|_, o| ao_storage_ptr(o)),
+        prop: Some(ao_prop),
         compare: Some(ao_compare),
         count: Some(|vm, o| Ok(ao_len(vm, o))),
         ..Default::default()
@@ -1545,6 +1534,31 @@ fn ao_get_iterator(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Object(it))
 }
 
+/// The object handles the tests expect after a foreach over an ArrayObject
+/// fit two handles taken for the loop and released lowest first (inferred
+/// from tests ArrayObject/arrayObject___construct_basic2-5,
+/// arrayObject_getIteratorClass_basic1, not documented behaviour).
+pub(crate) fn ao_foreach_handle(vm: &mut Vm, o: &ObjRef) -> R<Option<ObjRef>> {
+    let is_aggregate = is_ao(o) && !is_subclass_named(&vm.class_of(o), b"arrayiterator");
+    if is_aggregate {
+        vm.new_std_object().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// The iterator keeps the handle for the length of the loop.
+pub(crate) fn ao_keep_foreach_handle(it: &ObjRef, extra: Option<ObjRef>) {
+    if extra.is_some() && is_ao(it) {
+        with(it, |d: &mut AoData| d.loop_handle = extra);
+    }
+}
+
+/// Whether `o` is an ArrayObject or ArrayIterator.
+pub(crate) fn is_array_object(o: &ObjRef) -> bool {
+    is_ao(o)
+}
+
 fn ao_exchange(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.this_obj().clone();
     ao_modifiable(vm, &o)?;
@@ -1593,9 +1607,32 @@ fn ao_user_offset(vm: &mut Vm, o: &ObjRef, m: &[u8], args: Vec<Value>) -> R<Opti
     vm.call_method(o, m, args).map(Some)
 }
 
-fn ao_magic_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let o = a.this_obj().clone();
-    let n = a.str(0);
+/// ARRAY_AS_PROPS: a property that isn't there as such is an element; a
+/// subclass's magic methods stay out of it (tests bug45622b,
+/// ArrayObject/arrayObject_magicMethods6).
+fn ao_prop(vm: &mut Vm, o: &ObjRef, n: &PhpStr, acc: crate::class::ObjAccess) -> Option<R<Value>> {
+    use crate::class::ObjAccess;
+    if ao_flags(o) & 2 == 0 {
+        return None;
+    }
+    Some(match acc {
+        ObjAccess::Read | ObjAccess::Fetch => ao_magic_get(vm, o, n),
+        ObjAccess::Write(v) => ao_magic_set(vm, o, n, v),
+        ObjAccess::Isset => ao_magic_isset(vm, o, n),
+        ObjAccess::Empty => ao_magic_isset(vm, o, n).map(|set| match set {
+            Value::Bool(true) => {
+                let arr = ao_array(vm, o);
+                let v = arr.get(Key::from_php_str(n).as_ref()).map(|v| v.deref());
+                Value::Bool(!v.is_some_and(|v| vm.to_bool(&v)))
+            }
+            _ => Value::Bool(true),
+        }),
+        ObjAccess::Unset => ao_magic_unset(vm, o, n),
+    })
+}
+
+fn ao_magic_get(vm: &mut Vm, o: &ObjRef, n: &PhpStr) -> R<Value> {
+    let (o, n) = (o.clone(), n.clone());
     if ao_flags(&o) & 2 != 0
         && let Some(v) = ao_user_offset(vm, &o, b"offsetget", vec![Value::Str(n.clone())])?
     {
@@ -1617,10 +1654,8 @@ fn ao_magic_get(vm: &mut Vm, a: &mut Args) -> R<Value> {
     vm.read_prop(&o, &n, false, None)
 }
 
-fn ao_magic_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let o = a.this_obj().clone();
-    let n = a.str(0);
-    let v = a.val(1);
+fn ao_magic_set(vm: &mut Vm, o: &ObjRef, n: &PhpStr, v: Value) -> R<Value> {
+    let (o, n) = (o.clone(), n.clone());
     if ao_flags(&o) & 2 != 0
         && ao_user_offset(vm, &o, b"offsetset", vec![Value::Str(n.clone()), v.clone()])?.is_some()
     {
@@ -1643,9 +1678,8 @@ fn ao_magic_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn ao_magic_isset(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let o = a.this_obj().clone();
-    let n = a.str(0);
+fn ao_magic_isset(vm: &mut Vm, o: &ObjRef, n: &PhpStr) -> R<Value> {
+    let (o, n) = (o.clone(), n.clone());
     if ao_flags(&o) & 2 != 0 {
         let arr = ao_array(vm, &o);
         return Ok(Value::Bool(
@@ -1656,9 +1690,8 @@ fn ao_magic_isset(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Bool(vm.prop_isset(&o, &n, false)?))
 }
 
-fn ao_magic_unset(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let o = a.this_obj().clone();
-    let n = a.str(0);
+fn ao_magic_unset(vm: &mut Vm, o: &ObjRef, n: &PhpStr) -> R<Value> {
+    let (o, n) = (o.clone(), n.clone());
     if ao_flags(&o) & 2 != 0 {
         if let Some(p) = ao_storage_ptr(&o) {
             let old = if let Value::Array(arr) = unsafe { &mut *p } {

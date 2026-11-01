@@ -44,6 +44,22 @@ fn hooks() -> NativeHooks {
             cls.flags
                 .set(cls.flags.get() | cflags::NOT_CLONEABLE | cflags::NOT_SERIALIZABLE);
         }),
+        // Test directory/DirectoryClass_cannot_construct.
+        // `new` only: ReflectionClass::newInstanceWithoutConstructor() and
+        // PDO::FETCH_CLASS still make one (tests directory/
+        // DirectoryClass_reflection_create_instance_no_construct, ext/pdo/
+        // tests/pdo_fetch_class_opaque_object).
+        new_check: Some(|vm| {
+            let frames = vm.ex.frames.len() as u32;
+            let by_internal = vm.ex.native_calls.last().is_some_and(|c| c.depth == frames);
+            if by_internal {
+                return Ok(());
+            }
+            vm.throw(
+                "Error",
+                "Cannot directly construct Directory, use dir() instead",
+            )
+        }),
         ..Default::default()
     }
 }

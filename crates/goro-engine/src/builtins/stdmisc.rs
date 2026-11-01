@@ -29,10 +29,6 @@ pub static MODULE: Module = Module {
         ("function realpath_cache_get(): array", realpath_cache_get),
         ("function realpath_cache_size(): int", realpath_cache_size),
         (
-            "function stream_set_chunk_size($stream, int $size): int",
-            stream_set_chunk_size,
-        ),
-        (
             "function get_meta_tags(string $filename, bool $use_include_path = false): array|false",
             get_meta_tags,
         ),
@@ -245,39 +241,22 @@ fn ftok(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Int(k as i64))
 }
 
-fn realpath_cache_get(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    // paths are not cached
-    Ok(Value::Array(PhpArray::new()))
+/// The running script was resolved to open it, so it and its directories
+/// are in the cache (test file/realpath_cache).
+fn realpath_note_script(vm: &mut Vm) {
+    let script = vm.script_path.clone();
+    let p = vm.fs_path(&script);
+    super::file::realpath_cache_note(&p);
 }
 
-fn realpath_cache_size(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Int(0))
+fn realpath_cache_get(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    realpath_note_script(vm);
+    Ok(Value::Array(super::file::realpath_cache_entries()))
 }
 
-thread_local! {
-    /// stream_set_chunk_size() values, by resource.
-    static CHUNKS: std::cell::RefCell<std::collections::HashMap<i64, i64>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-fn stream_set_chunk_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let size = a.int(1);
-    let id = match a.val(0) {
-        Value::Resource(r) => r.id(),
-        _ => 0,
-    };
-    super::file::with_stream(vm, a, 0, |_, _| Ok(()))?;
-    if size <= 0 {
-        return vm.fthrow(
-            a,
-            "ValueError",
-            "Argument #2 ($size) must be greater than 0",
-        );
-    }
-    let old = CHUNKS
-        .with(|c| c.borrow_mut().insert(id, size))
-        .unwrap_or(8192);
-    Ok(Value::Int(old))
+fn realpath_cache_size(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    realpath_note_script(vm);
+    Ok(Value::Int(super::file::realpath_cache_bytes()))
 }
 
 /// The `<meta name=... content=...>` tags before `</head>`.
