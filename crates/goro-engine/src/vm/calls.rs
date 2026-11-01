@@ -16,6 +16,9 @@ use crate::func::{Args, Func, FuncKind, NativeSig};
 /// Frame flag: the return value goes to a variable (assign semantics).
 pub const RET_VAR: u32 = 2048;
 
+/// `InitFCall` cache key of a user function (1: a native one).
+const CACHED_USER: usize = 2;
+
 /// A resolved callee.
 #[derive(Clone)]
 pub struct Callee {
@@ -75,7 +78,8 @@ const SLOW_ACTIVATION: u32 = fflags::DEPRECATED
     | fflags::ABSTRACT
     | fflags::NODISCARD
     | fflags::GENERATOR
-    | fflags::VARIADIC;
+    | fflags::VARIADIC
+    | fflags::INTERNAL_CODE;
 
 /// Pushes and starts the frame of a user function whose arguments are
 /// bound simply (see `args_bind_simply`): fills the constant defaults of
@@ -274,18 +278,15 @@ impl Vm {
             return;
         }
         let mut fl = flags;
-        let (base, mark, args, byref, np) = match &c.func.kind {
+        let (base, mark, args, byref, direct) = match &c.func.kind {
             FuncKind::User(code) if c.magic_name.is_none() => {
-                const SLOW: u32 = fflags::DEPRECATED
-                    | fflags::ABSTRACT
-                    | fflags::NODISCARD
-                    | fflags::GENERATOR
-                    | fflags::VARIADIC;
-                if code.flags & SLOW != 0 || code.file.is_empty() {
-                    fl |= pending_flags::SLOW;
-                }
                 let (b, m) = self.ex.stack.alloc(code.num_slots as usize);
-                (b, m, Vec::new(), code.byref_mask, code.direct_params)
+                let direct = if code.byref_mask == 0 {
+                    code.direct_params
+                } else {
+                    0
+                };
+                (b, m, Vec::new(), code.byref_mask, direct)
             }
             FuncKind::User(_) => (
                 std::ptr::null_mut(),
@@ -342,7 +343,7 @@ impl Vm {
             at!((*d).has_named).write(false);
             at!((*d).passed).write(0);
             at!((*d).byref).write(byref);
-            at!((*d).np).write(np);
+            at!((*d).direct).write(direct);
             v.set_len(v.len() + 1);
         }
     }
@@ -412,14 +413,12 @@ impl Vm {
         statics: *const RefCell<Vec<Option<PhpRef>>>,
     ) -> *mut Slot {
         let FuncKind::User(code) = &func.kind else {
-            unreachable!()
+            // SAFETY: the callers pass user functions only.
+            unsafe { std::hint::unreachable_unchecked() }
         };
-        let mut fl = flags;
-        if code.flags & SLOW_ACTIVATION != 0 || code.file.is_empty() {
-            fl |= pending_flags::SLOW;
-        }
         let (base, mark) = self.ex.stack.alloc(code.num_slots as usize);
-        let (byref, np) = (code.byref_mask, code.direct_params);
+        let byref = code.byref_mask;
+        let direct = if byref == 0 { code.direct_params } else { 0 };
         let v = &mut self.ex.pending;
         v.reserve(1);
         // SAFETY: as in push_callee.
@@ -437,13 +436,13 @@ impl Vm {
             at!((*d).static_class).write(static_class);
             at!((*d).scope).write(scope);
             at!((*d).closure).write(closure);
-            at!((*d).flags).write(fl);
+            at!((*d).flags).write(flags);
             at!((*d).magic_name).write(None);
             at!((*d).statics).write(statics);
             at!((*d).has_named).write(false);
             at!((*d).passed).write(0);
             at!((*d).byref).write(byref);
-            at!((*d).np).write(np);
+            at!((*d).direct).write(direct);
             v.set_len(v.len() + 1);
         }
         base
@@ -540,7 +539,20 @@ impl Vm {
     ) -> R<()> {
         let _ = nargs;
         let code = self.code_ref();
-        let c = code.caches[cache as usize].get();
+        // SAFETY: the compiler allots the cache index of each instruction.
+        let c = unsafe { code.caches.get_unchecked(cache as usize) }.get();
+        if c.key == CACHED_USER {
+            // SAFETY: functions are never removed; the pointer came from
+            // an Rc, a user function's.
+            let func = unsafe {
+                let p = c.a as *const Func;
+                Rc::increment_strong_count(p);
+                Rc::from_raw(p)
+            };
+            let scope = func.scope.get();
+            self.push_user(func, None, scope, scope, 0);
+            return Ok(());
+        }
         let func: Rc<Func> = if c.key != 0 {
             let p = c.a as *const Func;
             unsafe {
@@ -568,7 +580,7 @@ impl Vm {
                 Some(f) => {
                     // Functions are never removed: cache the pointer.
                     code.caches[cache as usize].set(Cache {
-                        key: 1,
+                        key: if f.is_native() { 1 } else { CACHED_USER },
                         a: Rc::as_ptr(&f) as usize,
                         b: 0,
                         ..Cache::default()
@@ -1761,7 +1773,7 @@ impl Vm {
         let p = self.ex.pending.last_mut().unwrap();
         p.argc = p.argc.max(arg + 1);
         if !p.base.is_null() {
-            if arg < p.np {
+            if arg < p.func.code().map_or(0, |c| c.direct_params) {
                 let old = unsafe { (*p.base.add(arg as usize)).replace(v) };
                 drop(old);
             } else {
@@ -1797,13 +1809,52 @@ impl Vm {
     #[inline(always)]
     fn direct_arg_slot(&mut self, arg: u32) -> Option<*mut Slot> {
         let p = self.ex.pending.last_mut()?;
-        if arg < 63 && p.byref >> arg & 1 == 0 && arg < p.np && !p.base.is_null() {
-            p.argc = p.argc.max(arg + 1);
-            p.passed |= 1 << arg;
+        if arg < p.direct {
+            // Positional arguments come in order, before any named one.
+            p.argc = arg + 1;
+            // SAFETY: a parameter slot of the callee.
+            return Some(unsafe { p.base.add(arg as usize) });
+        }
+        self.direct_arg_slot_mixed(arg)
+    }
+
+    /// [`direct_arg_slot`](Self::direct_arg_slot) of a function with
+    /// by-reference parameters.
+    #[inline]
+    fn direct_arg_slot_mixed(&mut self, arg: u32) -> Option<*mut Slot> {
+        let p = self.ex.pending.last_mut()?;
+        if arg < 63
+            && p.byref >> arg & 1 == 0
+            && !p.base.is_null()
+            && arg < p.func.code().map_or(0, |c| c.direct_params)
+        {
+            p.argc = arg + 1;
             // SAFETY: a parameter slot of the callee.
             Some(unsafe { p.base.add(arg as usize) })
         } else {
             None
+        }
+    }
+
+    /// The fresh parameter slot of by-value argument `arg` when the pending
+    /// call takes it directly, without marking it passed yet.
+    ///
+    /// # Safety
+    /// A call must be pending (`Send*` run between `Init*` and `DoCall`).
+    #[inline(always)]
+    pub(crate) unsafe fn plain_arg_slot(&mut self, arg: u32) -> *mut Slot {
+        // SAFETY: per the contract.
+        let p = unsafe {
+            let len = self.ex.pending.len();
+            &mut *self.ex.pending.as_mut_ptr().add(len - 1)
+        };
+        if arg < p.direct {
+            // Positional arguments come in order, before any named one.
+            p.argc = arg + 1;
+            // SAFETY: a parameter slot of the callee.
+            unsafe { p.base.add(arg as usize) }
+        } else {
+            std::ptr::null_mut()
         }
     }
 
@@ -1815,8 +1866,7 @@ impl Vm {
             return Err(v);
         };
         if arg < 63 && p.byref >> arg & 1 == 0 && p.base.is_null() && arg as usize == p.args.len() {
-            p.argc = p.argc.max(arg + 1);
-            p.passed |= 1 << arg;
+            p.argc = arg + 1;
             p.args.push(v);
             Ok(())
         } else {
@@ -1993,7 +2043,16 @@ impl Vm {
         let Value::Str(n) = name else {
             return self.throw("Error", "Named argument name must be a string");
         };
-        self.pending().has_named = true;
+        let p = self.pending();
+        if !p.has_named {
+            // The positional arguments so far are the first ones.
+            p.has_named = true;
+            p.passed |= if p.argc >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << p.argc) - 1
+            };
+        }
         let p = self.ex.pending.last().unwrap();
         let f = p.func.clone();
         if p.magic_name.is_some() {
@@ -2079,7 +2138,11 @@ impl Vm {
 
     /// `DoCall`: makes the pending call. User functions get a frame (the
     /// loop continues in it); natives run now.
-    pub(crate) fn do_call(&mut self, dst: Reg) -> R<Option<Value>> {
+    ///
+    /// True when a frame was entered with nothing released (no destructor
+    /// can be waiting because of the call).
+    #[inline(always)]
+    pub(crate) fn do_call(&mut self, dst: Reg) -> R<bool> {
         let ret = if dst == NONE {
             std::ptr::null_mut()
         } else {
@@ -2089,41 +2152,51 @@ impl Vm {
         let top = self.ex.pending.last().expect("DoCall without pending call");
         if top.flags & (pending_flags::NO_CTOR | pending_flags::MAGIC_CALL) == 0 {
             if let FuncKind::User(_) = &top.func.kind {
-                self.activate(ret, ret_var, false)?;
-                return Ok(None);
+                return self.activate(ret, ret_var, false);
             }
-            let is_new = top.flags & pending_flags::NEW != 0;
-            let parts = self.take_native_pending();
-            let v = self.call_native_parts(parts, false)?;
-            if !is_new && !ret.is_null() {
-                self.put(dst, v);
-            }
-            return Ok(None);
+            self.do_native_call(dst, ret)?;
+            return Ok(false);
         }
+        self.do_call_rare(dst, ret, ret_var)?;
+        Ok(false)
+    }
+
+    /// `DoCall` of a native function.
+    #[inline(never)]
+    fn do_native_call(&mut self, dst: Reg, ret: *mut Slot) -> R<()> {
+        let is_new = self.ex.pending.last().unwrap().flags & pending_flags::NEW != 0;
+        let parts = self.take_native_pending();
+        let v = self.call_native_parts(parts, false)?;
+        if !is_new && !ret.is_null() {
+            self.put(dst, v);
+        }
+        Ok(())
+    }
+
+    /// `DoCall` without a constructor to run, or of a magic trampoline.
+    #[inline(never)]
+    fn do_call_rare(&mut self, dst: Reg, ret: *mut Slot, ret_var: bool) -> R<()> {
         let p = self.ex.pending.pop().unwrap();
         if p.flags & pending_flags::NO_CTOR != 0 {
             self.discard_pending(p);
-            return Ok(None);
+            return Ok(());
         }
         if p.magic_name.is_some() {
             let v = self.call_magic_pending(p)?;
             if !ret.is_null() {
                 self.put(dst, v);
             }
-            return Ok(None);
+            return Ok(());
         }
         match &p.func.kind {
-            FuncKind::User(_) => {
-                self.activate_slow(p, ret, ret_var, false)?;
-                Ok(None)
-            }
+            FuncKind::User(_) => self.activate_slow(p, ret, ret_var, false),
             FuncKind::Native { .. } => {
                 let is_new = p.flags & pending_flags::NEW != 0;
                 let v = self.call_native_pending(p)?;
                 if !is_new && !ret.is_null() {
                     self.put(dst, v);
                 }
-                Ok(None)
+                Ok(())
             }
         }
     }
@@ -2639,7 +2712,7 @@ impl Vm {
     /// attributes to act on) builds the frame in place; anything else goes
     /// through [`activate_slow`](Self::activate_slow).
     #[inline(always)]
-    pub(crate) fn activate(&mut self, ret: *mut Slot, ret_var: bool, entry: bool) -> R<()> {
+    pub(crate) fn activate(&mut self, ret: *mut Slot, ret_var: bool, entry: bool) -> R<bool> {
         let len = self.ex.pending.len();
         // SAFETY: there is a pending call on top; it stays there (and keeps
         // the function and its code alive) until truncated below.
@@ -2649,14 +2722,16 @@ impl Vm {
         };
         let code: &FuncCode = unsafe { &*Rc::as_ptr(code) };
         let argc = p.argc;
-        // Extra arguments make argc exceed np; named ones set has_named;
-        // magic trampolines take values (not here: do_call checks).
-        if p.flags & pending_flags::SLOW != 0
-            || p.has_named
-            || argc > p.np
+        // Extra arguments make argc exceed the parameters; named ones set
+        // has_named; magic trampolines take values (not here: do_call
+        // checks).
+        if p.has_named
+            || code.flags & SLOW_ACTIVATION != 0
+            || argc > code.direct_params
             || !binds_simply(self, code, p.base, argc)
         {
-            return self.activate_general(ret, ret_var, entry);
+            self.activate_general(ret, ret_var, entry)?;
+            return Ok(false);
         }
         let mut flags = 0;
         if entry {
@@ -2703,7 +2778,7 @@ impl Vm {
             );
             self.ex.pending.set_len(len - 1);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// [`activate`](Self::activate) of the pending call on top when the
@@ -3321,6 +3396,86 @@ impl Vm {
         self.deliver_return(v, flags, ret)
     }
 
+    /// `return` of a temporary or a scalar, from a frame releasing its own
+    /// slots, to a caller's slot holding nothing to release: the value
+    /// moves straight there. False (nothing done) for anything else.
+    #[inline(always)]
+    pub(crate) fn return_plain(&mut self, src: Reg) -> bool {
+        let len = self.ex.frames.len();
+        // SAFETY: a frame is running.
+        let f = unsafe { &mut *self.ex.frames.as_mut_ptr().add(len - 1) };
+        if f.flags
+            & (frame_flags::GENERATOR
+                | frame_flags::ATTACHED
+                | frame_flags::OWN_SLOTS
+                | frame_flags::ENTRY)
+            != 0
+            || len < 2
+        {
+            return false;
+        }
+        let ret = f.ret;
+        // SAFETY: `ret` is null or a slot of the caller, which is not
+        // released while the callee runs (and never one of the callee's).
+        if !ret.is_null() && !super::exec::holds_no_resources(unsafe { &*ret }) {
+            return false;
+        }
+        if src & (CONST | TMP) == TMP {
+            let sp = self.slot_ptr(src);
+            // SAFETY: a slot of the frame; what moves out leaves it empty.
+            unsafe {
+                if matches!(&*sp, None | Some(Value::Ref(_))) {
+                    return false;
+                }
+                if !ret.is_null() {
+                    std::ptr::copy_nonoverlapping(sp, ret, 1);
+                    std::ptr::write(sp, None);
+                }
+            }
+        } else {
+            let scalar = match self.peek(src) {
+                Some(Value::Int(i)) => Value::Int(*i),
+                Some(Value::Float(x)) => Value::Float(*x),
+                Some(Value::Bool(b)) => Value::Bool(*b),
+                Some(Value::Null) => Value::Null,
+                _ => return false,
+            };
+            if !ret.is_null() {
+                // SAFETY: as above; the old value owns nothing.
+                unsafe { std::ptr::write(ret, Some(scalar)) };
+            }
+        }
+        // Released in place: the locals, then the frame's handles.
+        let n = f.code().num_slots as usize;
+        let mark = f.mark;
+        let mut s = f.base;
+        // SAFETY: the frame's slots.
+        let end = unsafe { s.add(n) };
+        while s != end {
+            // SAFETY: as above.
+            unsafe {
+                if super::exec::holds_no_resources(&*s) {
+                    std::ptr::write(s, None);
+                } else {
+                    let old = (*s).take();
+                    drop(old);
+                }
+                s = s.add(1);
+            }
+        }
+        self.ex.stack.release(mark);
+        // SAFETY: as in do_return; the caller's frame is below (`len >= 2`).
+        unsafe {
+            let fp: *mut Frame = f;
+            self.ex.frames.set_len(len - 1);
+            drop_frame_in_place(fp);
+            let top = &*self.ex.frames.as_ptr().add(len - 2);
+            self.ex.top = super::TopFrame::of(top.base, top.code);
+            self.ex.ip = top.ip as usize;
+        }
+        true
+    }
+
     /// [`do_return`](Self::do_return) from generator bodies and frames
     /// whose slots are not their own.
     #[inline(never)]
@@ -3870,7 +4025,7 @@ impl Vm {
                 let is_gen = p.func.code().is_some_and(|c| c.is_generator());
                 let depth = self.ex.frames.len();
                 self.ex.pending.push(p);
-                self.activate(ret, false, true)?;
+                let _ = self.activate(ret, false, true)?;
                 if is_gen || self.ex.frames.len() == depth {
                     return Ok(result.unwrap_or_default());
                 }

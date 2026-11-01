@@ -1057,6 +1057,9 @@ pub mod fflags {
     /// `num_required..=direct_params` arguments then binds by filling the
     /// constant defaults of the parameters not passed.
     pub const SIMPLE_PARAMS: u32 = 1 << 20;
+    /// Code of an internal class written in PHP (no file): its calls bind
+    /// the way internal functions do.
+    pub const INTERNAL_CODE: u32 = 1 << 21;
 }
 
 /// Jump table for `switch` / `match`.

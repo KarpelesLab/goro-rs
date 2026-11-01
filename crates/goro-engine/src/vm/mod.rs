@@ -179,14 +179,17 @@ pub struct Pending {
     pub statics: *const RefCell<Vec<Option<PhpRef>>>,
     /// Whether a named argument was sent (affects defaults filling).
     pub has_named: bool,
-    /// Bit set of parameters passed (for named arguments), first 64.
+    /// Bit set of parameters passed, first 64. Only valid once a named
+    /// argument was sent: the first one adds the positional arguments.
     pub passed: u64,
     /// Which arguments go by reference ([`crate::bytecode::byref_mask`];
     /// 0 for magic trampolines, which take values).
     pub byref: u64,
-    /// User functions: parameters with their own slot (arguments past
-    /// them are extra or variadic).
-    pub np: u32,
+    /// Positional arguments below this go straight to their parameter's
+    /// slot: the parameters with their own slot of a user function with no
+    /// by-reference parameter (arguments past them are extra or variadic);
+    /// 0 for anything else, whose arguments take a closer look.
+    pub direct: u32,
 }
 
 pub mod pending_flags {
@@ -197,9 +200,6 @@ pub mod pending_flags {
     pub const MAGIC_STATIC: u32 = 8;
     /// Callable through a Closure created from a callable string/array.
     pub const VIA_CLOSURE: u32 = 16;
-    /// A user function that needs the general activation (attributes to
-    /// act on, abstract, generator, variadic, internal class code).
-    pub const SLOW: u32 = 32;
     /// Called the way an internal function calls (`$closure->__invoke()`):
     /// binding errors don't name the call site.
     pub const INTERNAL_CALLER: u32 = 64;

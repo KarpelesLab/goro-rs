@@ -661,6 +661,9 @@ impl<'a> Compiler<'a> {
         }) {
             flags |= fflags::SIMPLE_PARAMS;
         }
+        if self.file.is_empty() {
+            flags |= fflags::INTERNAL_CODE;
+        }
         let byref_mask = crate::bytecode::byref_mask(&params);
         let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {

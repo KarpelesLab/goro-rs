@@ -538,6 +538,10 @@ impl Vm {
                     unsafe {
                         if holds_no_resources(&*p) {
                             std::ptr::write(p, Some(v));
+                            // Nothing released (and a temporary ran no code).
+                            if src & (CONST | TMP) == TMP {
+                                continue;
+                            }
                         } else {
                             let old = (*p).replace(v);
                             drop(old);
@@ -832,9 +836,11 @@ impl Vm {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
-                    let v = self.get_hot(src)?;
-                    if let Some(v) = self.do_return(v, false)? {
-                        return Ok(v);
+                    if !self.return_plain(src) {
+                        let v = self.get_hot(src)?;
+                        if let Some(v) = self.do_return(v, false)? {
+                            return Ok(v);
+                        }
                     }
                 }
                 Op::ReturnRef { src } => {
@@ -958,7 +964,11 @@ impl Vm {
                     nargs,
                     cache,
                     fallback,
-                } => self.op_init_fcall(name, nargs, cache, fallback)?,
+                } => {
+                    self.op_init_fcall(name, nargs, cache, fallback)?;
+                    // Nothing released.
+                    continue;
+                }
                 Op::InitDynCall { callee, nargs } => self.op_init_dyn_call(callee, nargs)?,
                 Op::InitMethod {
                     obj,
@@ -974,6 +984,23 @@ impl Vm {
                 } => self.op_init_static_call(class, name, nargs, cache)?,
                 Op::InitParentHook { name, set } => self.op_init_parent_hook(name, set)?,
                 Op::Send { src, arg } => {
+                    // A temporary moves straight to its parameter's fresh
+                    // slot.
+                    if src & (CONST | TMP) == TMP {
+                        let sp = self.slot_ptr(src);
+                        // SAFETY: a slot of the frame, and a call is pending.
+                        unsafe {
+                            if !matches!(&*sp, None | Some(Value::Ref(_))) {
+                                let s = self.plain_arg_slot(arg);
+                                if !s.is_null() {
+                                    debug_assert!((*s).is_none());
+                                    std::ptr::copy_nonoverlapping(sp, s, 1);
+                                    std::ptr::write(sp, None);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     let v = self.get_hot(src)?;
                     self.send_val(arg, v, false)?;
                 }
@@ -1023,12 +1050,12 @@ impl Vm {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
-                    if let Some(v) = self.do_call(dst)? {
-                        // A native call returned a value.
-                        let _ = v;
-                    }
+                    let entered = self.do_call(dst)?;
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
+                    }
+                    if entered {
+                        continue;
                     }
                 }
                 Op::CallableConvert { dst } => {
