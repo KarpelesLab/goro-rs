@@ -231,7 +231,7 @@ fn c1_remap(v: u32) -> u32 {
 }
 
 /// Looks up a named reference (the HTML 4.01 names plus `apos`).
-fn named_entity(name: &str) -> Option<char> {
+pub fn named_entity(name: &str) -> Option<char> {
     if name == "apos" {
         return Some('\'');
     }

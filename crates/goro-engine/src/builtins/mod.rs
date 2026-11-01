@@ -71,6 +71,7 @@ pub mod streams;
 pub mod string;
 pub mod strmisc;
 pub mod sysv;
+pub mod tidy;
 pub mod tokenizer;
 pub mod uri;
 pub mod userstream;
@@ -159,6 +160,7 @@ pub fn modules() -> Vec<&'static Module> {
         &simplexml::MODULE,
         &xsl::MODULE,
         &dba::MODULE,
+        &tidy::MODULE,
         &soap::MODULE,
         &openssl::MODULE,
         &opcache::MODULE,
