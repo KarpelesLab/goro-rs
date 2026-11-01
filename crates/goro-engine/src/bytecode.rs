@@ -1127,6 +1127,14 @@ impl Consts {
     }
 }
 
+impl<'a> IntoIterator for &'a Consts {
+    type Item = &'a Value;
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Option<Value>>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().flatten()
+    }
+}
+
 impl std::ops::Index<usize> for Consts {
     type Output = Value;
     #[inline]
