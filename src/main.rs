@@ -53,6 +53,8 @@ fn usage() -> &'static str {
 
   --cgi            Run as the CGI SAPI (as when invoked as php-cgi); see
                    `goro --cgi -h`.
+  --fpm            Run as the FastCGI Process Manager (as when invoked as
+                   php-fpm); see `goro --fpm -h`.
 
 "
 }
@@ -208,12 +210,40 @@ fn main() {
     } else {
         (as_cgi, args)
     };
+    // The FPM SAPI: `goro --fpm ...`, or goro run as php-fpm.
+    let as_fpm = std::env::args_os().next().is_some_and(|a0| {
+        std::path::Path::new(&a0)
+            .file_name()
+            .is_some_and(|n| n.as_bytes().starts_with(b"php-fpm"))
+    });
+    let (fpm_mode, args) = if args.first().is_some_and(|a| a == "--fpm") {
+        (true, args[1..].to_vec())
+    } else {
+        (as_fpm && !cgi_mode, args)
+    };
     let code = std::thread::Builder::new()
         .name("php".into())
         .stack_size(STACK_SIZE)
         .spawn(move || {
             let pid = std::process::id();
-            let code = if cgi_mode { cgi(args) } else { cli(args) };
+            let code = if fpm_mode {
+                goro_engine::fpm::main(
+                    std::env::args_os().collect(),
+                    args,
+                    goro_engine::fpm::Hooks {
+                        version: format!(
+                            "PHP 8.5.4 (fpm-fcgi) (built: {}) (NTS)\nCopyright (c) The PHP Group\nZend Engine v4.5.4, Copyright (c) Zend Technologies\n    with goro-rs {}, a clean-room implementation",
+                            BUILT,
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        cli,
+                    },
+                )
+            } else if cgi_mode {
+                cgi(args)
+            } else {
+                cli(args)
+            };
             // A child of pcntl_fork() has no main thread to return to.
             if std::process::id() != pid {
                 std::process::exit(code);

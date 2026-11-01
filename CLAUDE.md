@@ -30,10 +30,14 @@ The development machine is the maintainer's desktop, shared with other work.
 - Don't let a hang hold the build lock: run tests under `timeout` (e.g.
   `flock ... timeout 900 cargo test ...`), or build under the lock with
   `--no-run` and run the test binaries outside it.
-- Memory: every goro process must be memory-capped. `goro --test` caps
-  each test (RLIMIT_AS) and goro enforces `memory_limit` (4 GB backstop when
-  unlimited). Run any goro or php85 script outside the runner under
-  `prlimit --as=4294967296 timeout 120 ...`. Never keep old goro binary
+- Memory: every process is limited to 4 GB, all the time (maintainer's rule).
+  `goro --test` caps each test at 4 GB (RLIMIT_AS, `--mem-limit 4096`) and goro
+  enforces `memory_limit` (4 GB backstop when unlimited). Run any goro or php85
+  script outside the runner under `prlimit --as=4294967296 timeout 120 ...`.
+  Cargo commands too, so rustc and the linker are capped:
+  `flock /tmp/claude-1000/goro-build.lock prlimit --as=4294967296 timeout 1800 cargo build ...`.
+  If something fails because of the cap, report it; don't raise the cap or work
+  around it. Never keep old goro binary
   copies (baselines) that predate the memory_limit enforcement. On
   2026-10-29 uncapped goro test processes reached 30–110 GB and the kernel
   OOM killer killed the maintainer's applications.

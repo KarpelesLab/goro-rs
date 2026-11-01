@@ -189,7 +189,7 @@ pub struct StreamContext {
     pub params: RefCell<PhpArray>,
 }
 
-fn new_context(options: PhpArray) -> Value {
+pub fn new_context(options: PhpArray) -> Value {
     Value::Resource(ResRef::new(
         PhpStr::intern(b"stream-context"),
         Box::new(StreamContext {

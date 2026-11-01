@@ -627,9 +627,44 @@ fn report_xpath_error(vm: &mut Vm, fname: &str, e: &XPathError) -> R<()> {
 
 /// A node-set result as a list object (namespace nodes wrapped first).
 fn node_list(vm: &mut Vm, v: Vec<NodeId>, modern: bool) -> R<Value> {
-    // Namespace nodes must get their objects before the list holds them.
+    // Every node gets its object first (a namespace node after its
+    // element's), then the list (object ids observed on PHP 8.5; tests
+    // xpath_domnamespacenode.phpt, gh12616_3.phpt).
+    // Dom\XPath refuses namespace nodes (test
+    // modern/xml/XMLDocument_xpath.phpt).
+    if modern
+        && with_arena(|ar| {
+            v.iter()
+                .any(|&n| matches!(ar.data(n), goro_xml::tree::NodeData::Namespace(_)))
+        })
+    {
+        free_ns_nodes();
+        return super::throw_dom_msg(
+            vm,
+            "The namespace axis is not well-defined in the living DOM specification. Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
+            9,
+        );
+    }
+    let mut items = Vec::with_capacity(v.len());
+    for &n in &v {
+        let owner = with_arena(|ar| match ar.data(n) {
+            goro_xml::tree::NodeData::Namespace(_) => ar.parent(n),
+            _ => None,
+        });
+        if let Some(p) = owner
+            && let Value::Object(o) = super::wrap_node(vm, p)?
+        {
+            items.push(o);
+        }
+        if let Value::Object(o) = super::wrap_node(vm, n)? {
+            items.push(o);
+        }
+    }
     let r = new_list(vm, ListKind::Static(v), modern);
     free_ns_nodes();
+    if let Ok(l) = &r {
+        super::lists::keep_items(l, items);
+    }
     r
 }
 
@@ -707,6 +742,14 @@ pub fn xpath_hooks() -> NativeHooks {
         debug_props: Some(|vm, o| {
             let mut out = vm.plain_props_array(o, true);
             if with_xp(o, |_| ()).is_none() {
+                // Reading `document` throws; the dump goes on and the
+                // exception follows it (test gh16316.phpt).
+                if vm.err.deferred.is_none()
+                    && let Err(e) =
+                        super::throw_dom::<()>(vm, goro_xml::tree::DomError::InvalidState)
+                {
+                    vm.err.deferred = Some(e);
+                }
                 out.insert(
                     goro_runtime::Key::Str(PhpStr::from("registerNodeNamespaces")),
                     Value::Bool(true),

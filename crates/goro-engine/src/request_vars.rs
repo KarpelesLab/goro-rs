@@ -187,6 +187,7 @@ pub fn set_globals(vm: &mut Vm, r: &RequestData, server: PhpArray) {
             // stays (tests tests/basic/rfc1867_*.phpt).
             let mut limits = crate::cli_server::upload::Limits::from_ini(vm);
             limits.mb_lead = crate::builtins::mbstring::translation_lead(vm);
+            limits.vars_warn_only = true;
             let progress = crate::builtins::session::upload_progress_name(vm);
             vm.ext::<crate::cli_server::upload::UploadLog>().armed = progress;
             let res = crate::cli_server::upload::boundary(&ct)

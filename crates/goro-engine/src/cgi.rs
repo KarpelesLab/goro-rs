@@ -121,7 +121,7 @@ const DEFAULT_INI: &[(&str, &str)] = &[
 /// The line of the first `$_SERVER` in a script, where the argv
 /// deprecation is reported (PHP fills $_SERVER when it compiles the first
 /// use; test tests/basic/011.phpt).
-fn first_server_use(src: &[u8]) -> Option<u32> {
+pub(crate) fn first_server_use(src: &[u8]) -> Option<u32> {
     // Only a script reading argv or argc (test
     // sapi/cgi/tests/auto_globals_no_jit.phpt reads other entries).
     if !src.windows(4).any(|w| w == b"argv" || w == b"argc") {

@@ -233,6 +233,8 @@ pub struct DocSettings {
     /// Created implicitly for a node made without a document (`new
     /// DOMElement(...)`): its nodes report no owner document.
     pub hidden: bool,
+    /// Imported from SimpleXML: as `Dom\` nodes (true) or legacy ones.
+    pub sxe_imported: Option<bool>,
 }
 
 impl Default for DocSettings {
@@ -248,6 +250,7 @@ impl Default for DocSettings {
             class_map: Vec::new(),
             doc_class: None,
             hidden: false,
+            sxe_imported: None,
         }
     }
 }
@@ -265,6 +268,7 @@ impl Clone for DocSettings {
             class_map: self.class_map.clone(),
             doc_class: self.doc_class.clone(),
             hidden: self.hidden,
+            sxe_imported: self.sxe_imported,
         }
     }
 }
