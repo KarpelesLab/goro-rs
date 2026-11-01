@@ -148,6 +148,10 @@ pub const HEAVY_TESTS: &[&str] = &[
     "gh15613.phpt",
     // a 2 GB string with memory_limit=6144M
     "soap_qname_crash.phpt",
+    // a 4.3 GB string: more than the 4 GB per-process cap
+    "gh20620.phpt",
+    // "requires about 8G RAM" (its SKIPIF looks at free memory)
+    "gmp_setbit_long.phpt",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
