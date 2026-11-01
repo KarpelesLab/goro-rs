@@ -478,7 +478,17 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Err(e) if modern => return throw_dom(vm, e),
         Err(e) => return legacy_error(vm, a, d, e),
     };
+    // A legacy document needs its document element (observed on PHP 8.5).
+    if !modern && with_arena(|ar| ar.document_element(d).is_none()) {
+        vm.fwarn(a, "Document Missing Root Element")?;
+        return Ok(Value::Bool(false));
+    }
     let mut q = q;
+    // The XML namespace always goes with the "xml" prefix (observed on
+    // PHP 8.5; test gh12870_b.phpt).
+    if !modern && q.ns.as_deref() == Some(XML_NS) {
+        q.prefix = Some("xml".into());
+    }
     if !modern && q.ns.is_some() && q.prefix.is_none() && q.ns.as_deref() != Some(XMLNS_NS) {
         // A namespaced attribute needs a prefix in libxml's model: PHP
         // finds or declares one on the document element (observed on PHP
@@ -495,6 +505,25 @@ fn create_attribute_ns(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     }
                 };
                 q.prefix = Some(p);
+            }
+        });
+    }
+    // A prefix the document element binds to another namespace is
+    // replaced by a made-up one (observed on PHP 8.5; tests
+    // createAttributeNS_prefix_conflicts/*.phpt).
+    if !modern
+        && let (Some(p), Some(ns)) = (q.prefix.clone(), q.ns.clone())
+        && &*p != "xml"
+        && &*p != "xmlns"
+    {
+        with_arena(|ar| {
+            if let Some(de) = ar.document_element(d)
+                && ar.lookup_ns(de, Some(&p)).is_some_and(|u| u != ns)
+            {
+                q.prefix = Some(match ar.lookup_prefix(de, &ns) {
+                    Some(x) => x,
+                    None => super::element::generated_prefix(ar, de).as_str().into(),
+                });
             }
         });
     }
@@ -556,6 +585,12 @@ fn import_node(vm: &mut Vm, a: &mut Args) -> R<Value> {
         );
     };
     let deep = a.bool(1);
+    // A node of this document is returned as it is (observed on PHP 8.5;
+    // test bug47530.phpt).
+    if !modern && with_arena(|ar| ar.doc_of(n) == d && !matches!(ar.data(n), NodeData::Document(_)))
+    {
+        return Ok(a.val(0));
+    }
     let r = with_arena(|ar| match ar.data(n) {
         NodeData::Document(_) => Err(DomError::NotSupported),
         NodeData::Doctype(_) if !modern => Err(DomError::NotSupported),
@@ -1342,8 +1377,39 @@ fn run_xinclude(vm: &mut Vm, fname: &str, d: NodeId, flags: u32) -> R<i64> {
         vm: vm as *mut Vm,
         _p: std::marker::PhantomData,
     };
+    // Node objects of the document whose nodes the substitution removes
+    // become unusable (observed on PHP 8.5: "Invalid State Error"; test
+    // gh17847.phpt).
+    let before: Vec<(NodeId, goro_runtime::WeakObj)> = xmlstore::with(|s| {
+        s.dom_objs
+            .iter()
+            .filter(|(n, _)| {
+                **n != d
+                    && s.arena.is_live(**n)
+                    && s.arena.doc_of(**n) == d
+                    && s.arena.is_connected(**n)
+            })
+            .map(|(n, w)| (*n, w.clone()))
+            .collect()
+    });
     let (n, errs) =
         xmlstore::with(|s| goro_xml::xinclude::process(&mut s.arena, d, flags, &mut host));
+    let gone: Vec<goro_runtime::ObjRef> = xmlstore::with(|s| {
+        let mut v = Vec::new();
+        for (id, w) in before {
+            if !s.arena.is_live(id) || !s.arena.is_connected(id) {
+                s.dom_objs.remove(&id);
+                if let Some(o) = w.upgrade() {
+                    v.push(o);
+                }
+            }
+        }
+        v
+    });
+    for o in gone {
+        let old = o.obj().native.borrow_mut().take();
+        drop(old);
+    }
     host.loader.finish(vm)?;
     libxml::report(vm, fname, &errs, Style::Dom, flags, None)?;
     Ok(n as i64)
@@ -1882,7 +1948,12 @@ fn text_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn comment_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let t = s8(&a.str(0));
-    construct_node(vm, a, NodeData::Comment(t))
+    let none = !a.has(0);
+    let r = construct_node(vm, a, NodeData::Comment(t))?;
+    if none && let Some(n) = node_of(a.this_obj()) {
+        with_arena(|ar| ar.mark_null_content(n));
+    }
+    Ok(r)
 }
 
 fn cdata_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -2001,7 +2072,22 @@ pub(crate) fn dom_import_simplexml(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let o = a.obj(0).unwrap();
     let n = simplexml_node(&o);
     match n {
-        Some(n) => wrap_node(vm, n),
+        Some(n) => {
+            // A document is imported one way only (observed on PHP 8.5;
+            // test dom_import_simplexml.phpt).
+            let modern = a.func.lname.as_bytes().starts_with(b"dom\\");
+            let d = with_arena(|ar| ar.doc_of(n));
+            let prev = with_settings(d, |s| *s.sxe_imported.get_or_insert(modern));
+            if prev != modern {
+                let other = if prev { "Dom\\Node" } else { "DOMNode" };
+                return vm.fthrow(
+                    a,
+                    "TypeError",
+                    &format!("Argument #1 ($node) must not be already imported as a {other}"),
+                );
+            }
+            wrap_node(vm, n)
+        }
         None => vm.fthrow(
             a,
             "TypeError",

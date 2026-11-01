@@ -2640,9 +2640,9 @@ impl Vm {
 
     pub(crate) fn register_class(&mut self, cls: Rc<Class>) {
         let ln = cls.lname.clone();
-        if !cls.has_flag(cflags::ANON) {
-            self.class_order.push(ln.clone());
-        }
+        // Anonymous classes are listed too (observed on PHP 8.5; test
+        // ext/dom/tests/DOMXPath_callables_errors.phpt).
+        self.class_order.push(ln.clone());
         self.classes.insert(ln, cls);
     }
 

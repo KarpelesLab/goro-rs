@@ -129,6 +129,9 @@ pub const ONLINE_TESTS: &[&str] = &[
     "ext/curl/tests/bug71523.phpt",
     "ext/curl/tests/curl_basic_008.phpt",
     "ext/curl/tests/curl_basic_010.phpt",
+    // WSDLs from unknown hosts ("i_dont_exist.com")
+    "ext/soap/tests/bugs/bug34657.phpt",
+    "ext/soap/tests/bugs/bug70469.phpt",
     "ext/standard/tests/file/file_get_contents_error002.phpt",
     "ext/standard/tests/file/file_get_contents_with_custom_uri_parser.phpt",
     "ext/standard/tests/network/gethostbyname_basic001.phpt",
@@ -143,6 +146,8 @@ pub const HEAVY_TESTS: &[&str] = &[
     "file_get_contents_file_put_contents_5gb.phpt",
     // a 2 GB string
     "gh15613.phpt",
+    // a 2 GB string with memory_limit=6144M
+    "soap_qname_crash.phpt",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
