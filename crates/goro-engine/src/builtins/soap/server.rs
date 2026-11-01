@@ -752,7 +752,7 @@ fn store_last(this: &ObjRef, xml: &[u8]) {
 /// Outcome of processing a request.
 enum Out {
     Doc(String),
-    Fault(ObjRef, Option<Function>),
+    Fault(ObjRef, Option<Box<Function>>),
     /// A fault built from text (code, message): before the service runs.
     Plain(&'static str, String),
     /// A protocol fault found before the call: sent, then the script
@@ -826,7 +826,7 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 Out::Early(e)
             } else if super::is_fault_obj(vm, &Value::Object(e.clone())) {
                 let f = with(&this, |d| d.cur_func.take()).flatten();
-                Out::Fault(e, f)
+                Out::Fault(e, f.map(Box::new))
             } else if instance_of(vm, &e, "Exception") {
                 // Exceptions leave handle() (Errors become faults; observed
                 // on PHP 8.5; test bugs/bug47273.phpt).
@@ -857,7 +857,7 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         Out::Fault(f, func) => {
-            let xml = fault_xml(vm, ver, &f, sdl, &st, &headers, func.as_ref())?;
+            let xml = fault_xml(vm, ver, &f, sdl, &st, &headers, func.as_deref())?;
             store_last(&this, xml.as_bytes());
             send_fault_doc(vm, ver, &xml);
         }
@@ -1211,7 +1211,7 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
             if super::is_fault_obj(vm, &r)
                 && let Value::Object(f) = r
             {
-                return Ok(Out::Fault(f, func_def.clone()));
+                return Ok(Out::Fault(f, func_def.clone().map(Box::new)));
             }
             if let Value::Object(o) = &r
                 && instance_of(vm, o, "SoapHeader")
@@ -1346,7 +1346,7 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     if super::is_fault_obj(vm, &result)
         && let Value::Object(f) = result
     {
-        return Ok(Out::Fault(f, func_def));
+        return Ok(Out::Fault(f, func_def.map(Box::new)));
     }
     let resp_name = doc.local(call).to_string();
     let _ = uri;

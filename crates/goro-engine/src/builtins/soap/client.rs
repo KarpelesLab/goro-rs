@@ -63,7 +63,7 @@ fn sdl_of(o: &ObjRef) -> Option<Rc<Sdl>> {
     with_data(o, |d| d.sdl.clone()).flatten()
 }
 
-fn opt<'a>(opts: &'a PhpArray, k: &str) -> Option<Value> {
+fn opt(opts: &PhpArray, k: &str) -> Option<Value> {
     opts.get_bytes(k.as_bytes()).map(|v| v.deref())
 }
 

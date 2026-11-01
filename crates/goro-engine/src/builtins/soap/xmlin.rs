@@ -67,14 +67,14 @@ impl InDoc {
         matches!(self.arena.node_type(n), NodeType::Text | NodeType::CData)
     }
 
-    pub fn local<'a>(&'a self, n: NodeId) -> &'a str {
+    pub fn local(&self, n: NodeId) -> &str {
         match self.arena.qname(n) {
             Some(q) => &q.local,
             None => "",
         }
     }
 
-    pub fn ns<'a>(&'a self, n: NodeId) -> &'a str {
+    pub fn ns(&self, n: NodeId) -> &str {
         match self.arena.qname(n) {
             Some(q) => q.ns_str(),
             None => "",

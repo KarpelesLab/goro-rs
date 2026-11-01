@@ -511,7 +511,7 @@ fn builtin(vm: &mut Vm, dx: &mut Dx, conv: Conv, n: NodeId) -> R<Value> {
         Conv::Hex => {
             let t = trimmed(d, n);
             let b = t.as_bytes();
-            if b.len() % 2 != 0 {
+            if !b.len().is_multiple_of(2) {
                 return violation(vm);
             }
             let mut out = Vec::with_capacity(b.len() / 2);

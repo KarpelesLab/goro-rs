@@ -447,21 +447,18 @@ pub fn init_fault(
     let s = Value::Str(PhpStr::from(string));
     vm.set_prop_raw(o, b"message", s.clone());
     vm.set_prop_raw(o, b"faultstring", s);
-    match code {
-        Some((ns, c)) => {
-            let ns = ns.or_else(|| {
-                matches!(
-                    c.as_str(),
-                    "Client" | "Server" | "VersionMismatch" | "MustUnderstand"
-                )
-                .then(|| xmlout::NS_SOAP11_ENV.to_string())
-            });
-            vm.set_prop_raw(o, b"faultcode", Value::Str(PhpStr::from(c)));
-            if let Some(ns) = ns {
-                vm.set_prop_raw(o, b"faultcodens", Value::Str(PhpStr::from(ns)));
-            }
+    if let Some((ns, c)) = code {
+        let ns = ns.or_else(|| {
+            matches!(
+                c.as_str(),
+                "Client" | "Server" | "VersionMismatch" | "MustUnderstand"
+            )
+            .then(|| xmlout::NS_SOAP11_ENV.to_string())
+        });
+        vm.set_prop_raw(o, b"faultcode", Value::Str(PhpStr::from(c)));
+        if let Some(ns) = ns {
+            vm.set_prop_raw(o, b"faultcodens", Value::Str(PhpStr::from(ns)));
         }
-        None => {}
     }
     // Every property is (re)set, so a second constructor call starts
     // over (test SoapFault/gh14586.phpt).

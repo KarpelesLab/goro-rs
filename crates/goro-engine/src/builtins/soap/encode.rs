@@ -920,22 +920,22 @@ fn array_to_xml(
     let mut item_name = "item".to_string();
     let mut item_elem: Option<TId> = None;
     let mut dims_decl = 1usize;
-    if let (Some(t), Some(sdl)) = (tid, &sdl) {
-        if let Some(info) = array_info(sdl, t) {
-            item_q = info.item.clone();
-            item_enc = info.item.as_ref().and_then(|(ns, n)| sdl.find_type(ns, n));
-            dims_decl = info.dims.max(1);
-            if let Some(e) = info.elem {
-                item_elem = Some(e);
-                let ed = &sdl.types[sdl.deref_element(e)];
-                item_name = ed.name.clone();
-                if item_enc.is_none() {
-                    item_enc = ed.base.as_ref().and_then(|b| sdl.resolve(b));
-                    if let Some(Enc::Builtin(b)) = item_enc {
-                        item_q = Some((b.ns.into(), b.name.into()));
-                    } else if let Some(Enc::Type(x)) = item_enc {
-                        item_q = Some((sdl.types[x].ns.clone(), sdl.types[x].name.clone()));
-                    }
+    if let (Some(t), Some(sdl)) = (tid, &sdl)
+        && let Some(info) = array_info(sdl, t)
+    {
+        item_q = info.item.clone();
+        item_enc = info.item.as_ref().and_then(|(ns, n)| sdl.find_type(ns, n));
+        dims_decl = info.dims.max(1);
+        if let Some(e) = info.elem {
+            item_elem = Some(e);
+            let ed = &sdl.types[sdl.deref_element(e)];
+            item_name = ed.name.clone();
+            if item_enc.is_none() {
+                item_enc = ed.base.as_ref().and_then(|b| sdl.resolve(b));
+                if let Some(Enc::Builtin(b)) = item_enc {
+                    item_q = Some((b.ns.into(), b.name.into()));
+                } else if let Some(Enc::Type(x)) = item_enc {
+                    item_q = Some((sdl.types[x].ns.clone(), sdl.types[x].name.clone()));
                 }
             }
         }
@@ -1030,7 +1030,7 @@ fn array_to_xml(
     for it in flat {
         let name = match &lit_name {
             Some((ns, n)) => cx.doc.qname(Some(el), ns, n),
-            None => match item_elem.and_then(|e| sdl.as_ref().map(|s| (s, e))) {
+            None => match sdl.as_ref().zip(item_elem) {
                 Some((s, e)) => {
                     let ed = &s.types[s.deref_element(e)];
                     if ed.qualified {
