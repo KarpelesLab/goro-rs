@@ -800,9 +800,11 @@ impl Vm {
                         b"debug_backtrace" | b"debug_print_backtrace"
                     )
                 });
+                // eval frames have no "args" at all (observed on PHP 8.5;
+                // test Zend/tests/bug73156).
                 let args = if with_args && fname != "eval" && called_above {
                     Some(vec![Value::Str(code.file.clone())])
-                } else if with_args {
+                } else if with_args && fname != "eval" {
                     Some(Vec::new())
                 } else {
                     None

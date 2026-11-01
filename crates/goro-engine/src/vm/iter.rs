@@ -411,8 +411,33 @@ impl Vm {
                 let Some((p, k, v)) = a.data().next_from(data as u32) else {
                     return Ok(false);
                 };
+                let mut v = v.deref();
+                // The loop sees changes made to properties it has not
+                // reached yet (test Zend/tests/bug71266): read the current
+                // value of a dynamic property, or of a declared one that is
+                // not shadowed.
+                if let (KeyRef::Str(name), Some(Value::Object(o))) = (k, pack.get_int(0)) {
+                    let cls = self.class_of(o);
+                    let slot = match cls.prop_map.borrow().get(name) {
+                        Some(idxs) if idxs.len() == 1 => {
+                            Some(cls.props.borrow()[idxs[0] as usize].slot as usize)
+                        }
+                        Some(_) => None,
+                        None => {
+                            if let Some(cur) = o.obj().props.borrow().get_bytes(name) {
+                                v = cur.deref();
+                            }
+                            None
+                        }
+                    };
+                    if let Some(s) = slot {
+                        let cur = o.obj().slots.borrow()[s].clone();
+                        if !self.is_uninit(&cur) {
+                            v = cur.deref();
+                        }
+                    }
+                }
                 let k = k.to_value();
-                let v = v.deref();
                 unsafe { *sb = Some(enc(M_PROPS_VAL, p as i64 + 1)) };
                 self.put(val, v);
                 if key != NONE {
