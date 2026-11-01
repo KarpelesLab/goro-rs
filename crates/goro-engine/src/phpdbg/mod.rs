@@ -861,7 +861,7 @@ fn will_be_caught(vm: &Vm, ex: &ObjRef) -> bool {
                 let ip = if i == n - 1 {
                     state.ip().saturating_sub(1)
                 } else {
-                    (f.ip() as usize).saturating_sub(1)
+                    f.ip().saturating_sub(1)
                 } as u32;
                 frame_catches(vm, f.code(), ip, &cls)
             })

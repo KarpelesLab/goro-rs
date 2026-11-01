@@ -602,7 +602,7 @@ fn cmd_back(vm: &mut Vm, running: bool) {
         let ip = if i == n - 1 {
             vm.ex.ip().saturating_sub(1)
         } else {
-            (f.ip() as usize).saturating_sub(1)
+            f.ip().saturating_sub(1)
         };
         let line = code.line_of(ip);
         let name = frame_name(code, f.flags);
