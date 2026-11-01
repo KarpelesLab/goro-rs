@@ -54,7 +54,7 @@ record. Because it was written with php-src as a reference, it is out of
 bounds for this implementation (see [CLEANROOM.md](CLEANROOM.md)).
 
 php-src test suite (8.5.4), share of the tests that run: **93.3%** overall
-(17,795 passing, 1,278 failing, 2,500 skipped), as of 2026-11-01. The
+(17,971 passing, 1,283 failing, 2,318 skipped), as of 2026-11-02. The
 ext/opcache tests now run (goro has no optimizer or JIT, so tests that dump
 opcodes fail where they used to be skipped).
 The extension libraries below are wired into the engine; ext/random,
@@ -290,6 +290,12 @@ the XML extensions each pass 87-100% of their tests that run.
   multi-reference values, classmaps, typemaps, an HTTP(S) transport with
   Basic and Digest authentication. The `soap.wsdl_cache*` settings are
   accepted but WSDLs are parsed on every load.
+- ext/xsl: `XSLTProcessor` on an XSLT 1.0 engine in `goro-xml`, with
+  `php:function()`, security preferences and EXSLT common, dates (the
+  functions that read a date), functions, math, sets and strings.
+  `setProfiling()` writes only the profile's header.
+- ext/dba: the `cdb`, `cdb_make`, `flatfile` and `inifile` handlers. Handlers
+  that need libraries (db4, gdbm, qdbm, lmdb, tcadb) are not built.
 - `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
   xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
   error codes, messages and positions, DTDs, entities, LIBXML_* options and

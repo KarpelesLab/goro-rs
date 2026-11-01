@@ -1370,7 +1370,7 @@ impl goro_xml::xinclude::XIncludeHost for XiHost<'_> {
     }
 }
 
-fn run_xinclude(vm: &mut Vm, fname: &str, d: NodeId, flags: u32) -> R<i64> {
+pub(crate) fn run_xinclude(vm: &mut Vm, fname: &str, d: NodeId, flags: u32) -> R<i64> {
     let loader = PhpLoader::new(vm, fname);
     let mut host = XiHost {
         loader,

@@ -26,6 +26,10 @@
 mod eval;
 pub mod number;
 mod parser;
+pub mod pattern;
+
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::tree::{Arena, NodeId};
 pub use number::{number_to_string, string_to_number};
@@ -228,6 +232,136 @@ pub trait FunctionHandler {
         local: &str,
         args: Vec<Value>,
     ) -> Result<Value, XPathError>;
+
+    /// [`FunctionHandler::call`] with the context of the call.
+    fn call_ctx(
+        &mut self,
+        arena: &mut Arena,
+        ns: &str,
+        local: &str,
+        args: Vec<Value>,
+        context: CallContext,
+    ) -> Result<Value, XPathError> {
+        let _ = context;
+        self.call(arena, ns, local, args)
+    }
+
+    /// A function without prefix outside the core library (host-language
+    /// expressions only: [`compile_bound`]).
+    fn call_host(
+        &mut self,
+        arena: &mut Arena,
+        name: &str,
+        args: Vec<Value>,
+        context: CallContext,
+    ) -> Result<Value, XPathError> {
+        let _ = (arena, args, context);
+        Err(XPathError::with_name(XPathErrorKind::UnknownFunction, name))
+    }
+
+    /// The value of the variable `{ns}local` (host-language expressions
+    /// only).
+    fn variable(&mut self, arena: &mut Arena, ns: &str, local: &str) -> Result<Value, XPathError> {
+        let _ = (arena, ns);
+        Err(XPathError::with_name(XPathErrorKind::UndefVariable, local))
+    }
+
+    /// Document order tables kept across evaluations, when the trees don't
+    /// change between them.
+    fn order_cache(&mut self) -> Option<&mut OrderCache> {
+        None
+    }
+}
+
+/// The context of an extension function call (XPath 1.0 section 1).
+#[derive(Clone, Copy, Debug)]
+pub struct CallContext {
+    /// The context node.
+    pub node: NodeId,
+    /// The context position.
+    pub pos: usize,
+    /// The context size.
+    pub size: usize,
+}
+
+/// See [`FunctionHandler::order_cache`].
+#[derive(Default)]
+pub struct OrderCache {
+    pub(crate) orders: HashMap<NodeId, Rc<eval::Order>>,
+}
+
+impl OrderCache {
+    /// Forgets the table of the tree at `root`.
+    pub fn forget(&mut self, root: NodeId) {
+        self.orders.remove(&root);
+    }
+
+    /// Forgets everything (the trees may have changed).
+    pub fn clear(&mut self) {
+        self.orders.clear();
+    }
+}
+
+/// Prefix bindings shared by many expressions.
+pub type NsMap = Rc<HashMap<String, String>>;
+
+/// An expression with its prefixes bound in advance (the namespace
+/// declarations in scope where it is written, XSLT 1.0 section 2.4),
+/// evaluated by [`evaluate_bound`]. Variable references and functions
+/// without prefix that the core library lacks go to the
+/// [`FunctionHandler`].
+#[derive(Clone, Debug)]
+pub struct BoundExpr {
+    expr: parser::Expr,
+    ns: NsMap,
+    unbound: Option<String>,
+}
+
+impl BoundExpr {
+    /// The prefix bindings.
+    pub fn namespaces(&self) -> &NsMap {
+        &self.ns
+    }
+
+    /// The first prefix used but not bound.
+    pub fn unbound_prefix(&self) -> Option<&str> {
+        self.unbound.as_deref()
+    }
+}
+
+/// Compiles `expr` with the bindings `ns`.
+pub fn compile_bound(expr: &str, ns: NsMap) -> Result<BoundExpr, XPathError> {
+    let e = parser::parse_host(expr)?;
+    let unbound = eval::unbound_prefix(&e, &ns);
+    Ok(BoundExpr {
+        expr: e,
+        ns,
+        unbound,
+    })
+}
+
+/// Evaluates a [`BoundExpr`] with the context node, position and size
+/// given. Namespace nodes the evaluation makes are added to
+/// `namespace_nodes`.
+pub fn evaluate_bound(
+    arena: &mut Arena,
+    b: &BoundExpr,
+    context: CallContext,
+    functions: &mut dyn FunctionHandler,
+    namespace_nodes: &mut Vec<NodeId>,
+) -> Result<Value, XPathError> {
+    if let Some(p) = &b.unbound {
+        return Err(XPathError::with_name(XPathErrorKind::UndefPrefix, p));
+    }
+    let mut ev = eval::bound(arena, b.ns.clone(), functions, namespace_nodes);
+    ev.expr(
+        &b.expr,
+        eval::C {
+            node: context.node,
+            pos: context.pos,
+            size: context.size,
+        },
+    )
 }
 
 /// The evaluation context: namespace bindings, extension functions and

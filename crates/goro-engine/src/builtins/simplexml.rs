@@ -202,6 +202,14 @@ fn spec(vm: &mut Vm, o: &ObjRef) -> R<Spec> {
 }
 
 /// A new object of class `cls` for `spec`.
+/// A SimpleXML object of a result document (`XSLTProcessor::transformToDoc()`
+/// with a SimpleXML class): it stands for the document node, whose element
+/// children are its children (tests gh19988.phpt,
+/// transformToDoc_sxe_type_error.phpt).
+pub(crate) fn wrap_document(vm: &mut Vm, cls: &Rc<Class>, doc: NodeId) -> R<Value> {
+    make(vm, cls, Spec::of(doc, &Filter::default()))
+}
+
 fn make(vm: &mut Vm, cls: &Rc<Class>, spec: Spec) -> R<Value> {
     let o = vm.instantiate_raw(cls)?;
     let hold = xmlstore::with(|s| s.hold(spec.node));
@@ -450,7 +458,11 @@ fn props(a: &Arena, s: &Spec) -> Vec<(Key, Pv)> {
     }
     match &s.iter {
         Iter::None | Iter::Child => match a.data(s.node) {
-            NodeData::Element(_) => element_props(a, s.node, &s.filter, &mut out),
+            // A result document of ext/xsl (test
+            // transformToDoc_sxe_type_error.phpt).
+            NodeData::Element(_) | NodeData::Document(_) => {
+                element_props(a, s.node, &s.filter, &mut out)
+            }
             NodeData::Attribute(_) => out.push((Key::Int(0), Pv::Str(a.attr_value(s.node)))),
             NodeData::EntityRef(name) => {
                 if let Some(v) = a.entity_value(a.doc_of(s.node), name) {
@@ -1587,7 +1599,12 @@ fn m_count(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn m_get_name(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (_, s) = this_spec(vm, a)?;
-    let n = xmlstore::with(|st| first(&st.arena, &s).map(|n| local_name(&st.arena, n)));
+    let n = xmlstore::with(|st| {
+        first(&st.arena, &s)
+            // A result document of ext/xsl has no name (test gh19988.phpt).
+            .filter(|&n| !matches!(st.arena.data(n), NodeData::Document(_)))
+            .map(|n| local_name(&st.arena, n))
+    });
     Ok(Value::from(n.unwrap_or_default().as_bytes()))
 }
 

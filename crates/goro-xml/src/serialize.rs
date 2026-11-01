@@ -272,6 +272,7 @@ impl Writer<'_> {
                 self.out.push(' ');
                 self.attr(n);
             }
+            NodeData::Text(t) if arena.is_no_escape(n) => self.out.push_str(t),
             NodeData::Text(t) => escape_text(t, &mut self.out),
             NodeData::CData(t) => {
                 // "]]>" cannot appear in a section: split it.

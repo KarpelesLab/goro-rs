@@ -1,35 +1,101 @@
 //! XPath 1.0 evaluation (W3C XPath 1.0 sections 2-5).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::number::string_to_number;
 use super::parser::{ArOp, Axis, CmpOp, CoreFn, Expr, NodeTest, PathExpr, Start, Step};
-use super::{Context, FunctionHandler, Value, XPathError, XPathErrorKind as K};
+use super::{CallContext, Context, FunctionHandler, Value, XPathError, XPathErrorKind as K};
 use crate::tree::{Arena, NodeData, NodeId, NsDecl, Str, XML_NS};
 
 /// The context of an expression: node, position and size.
 #[derive(Clone, Copy)]
-struct C {
-    node: NodeId,
-    pos: usize,
-    size: usize,
+pub(super) struct C {
+    pub(super) node: NodeId,
+    pub(super) pos: usize,
+    pub(super) size: usize,
 }
 
 /// Document order keys of one tree (built on demand).
-struct Order {
+pub struct Order {
+    /// The root of the tree.
+    root: NodeId,
     /// Indexed by `NodeId::index()`; 0 = not in the tree.
     key: Vec<u64>,
 }
 
-struct Eval<'r> {
-    arena: &'r mut Arena,
-    ns: HashMap<String, String>,
+pub(super) struct Eval<'r> {
+    pub(super) arena: &'r mut Arena,
+    ns: Rc<HashMap<String, String>>,
     funcs: Option<&'r mut dyn FunctionHandler>,
     nsnodes: HashMap<(NodeId, Option<Str>), NodeId>,
     /// Creation index of namespace nodes (order among one element's).
     ns_index: HashMap<NodeId, u32>,
     created: &'r mut Vec<NodeId>,
-    order: Option<Order>,
+    order: Option<Rc<Order>>,
+}
+
+/// An evaluator for prefixes bound in advance (XSLT expressions).
+pub(super) fn bound<'r>(
+    arena: &'r mut Arena,
+    ns: Rc<HashMap<String, String>>,
+    funcs: &'r mut dyn FunctionHandler,
+    created: &'r mut Vec<NodeId>,
+) -> Eval<'r> {
+    Eval {
+        arena,
+        ns,
+        funcs: Some(funcs),
+        nsnodes: HashMap::new(),
+        ns_index: HashMap::new(),
+        created,
+        order: None,
+    }
+}
+
+/// The first prefix of `e` missing from `ns`.
+pub(super) fn unbound_prefix(e: &Expr, ns: &HashMap<String, String>) -> Option<String> {
+    let bad = |p: &String| (!ns.contains_key(p) && p != "xml").then(|| p.clone());
+    match e {
+        Expr::Or(a, b)
+        | Expr::And(a, b)
+        | Expr::Cmp(_, a, b)
+        | Expr::Arith(_, a, b)
+        | Expr::Union(a, b) => unbound_prefix(a, ns).or_else(|| unbound_prefix(b, ns)),
+        Expr::Neg(a) => unbound_prefix(a, ns),
+        Expr::Literal(_) | Expr::Number(_) => None,
+        Expr::Fn(_, args) | Expr::HostFn(_, args) => {
+            args.iter().find_map(|a| unbound_prefix(a, ns))
+        }
+        Expr::ExtFn(p, _, args) => {
+            bad(p).or_else(|| args.iter().find_map(|a| unbound_prefix(a, ns)))
+        }
+        Expr::Var(p, _) => p.as_ref().and_then(bad),
+        Expr::Path(p) => {
+            if let Start::Filter(f, preds) = &p.start {
+                if let Some(x) = unbound_prefix(f, ns) {
+                    return Some(x);
+                }
+                if let Some(x) = preds.iter().find_map(|a| unbound_prefix(a, ns)) {
+                    return Some(x);
+                }
+            }
+            for s in &p.steps {
+                match &s.test {
+                    NodeTest::NsAny(pr) | NodeTest::Name(Some(pr), _) => {
+                        if let Some(x) = bad(pr) {
+                            return Some(x);
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(x) = s.preds.iter().find_map(|a| unbound_prefix(a, ns)) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+    }
 }
 
 pub(super) fn evaluate(
@@ -46,7 +112,7 @@ pub(super) fn evaluate(
     };
     let mut ev = Eval {
         arena,
-        ns,
+        ns: Rc::new(ns),
         funcs,
         nsnodes: HashMap::new(),
         ns_index: HashMap::new(),
@@ -117,7 +183,8 @@ fn resolve(
         }
         Expr::Neg(a) => resolve(a, arena, context, ctx, out),
         Expr::Literal(_) | Expr::Number(_) => Ok(()),
-        Expr::Fn(_, args) => {
+        Expr::Var(_, name) => Err(XPathError::with_name(K::UndefVariable, name)),
+        Expr::Fn(_, args) | Expr::HostFn(_, args) => {
             for a in args {
                 resolve(a, arena, context, ctx, out)?;
             }
@@ -383,7 +450,11 @@ impl Eval<'_> {
                 stack[start..].reverse();
             }
         }
-        self.order = Some(Order { key });
+        let o = Rc::new(Order { root, key });
+        if let Some(c) = self.funcs.as_deref_mut().and_then(|f| f.order_cache()) {
+            c.orders.insert(root, o.clone());
+        }
+        self.order = Some(o);
     }
 
     /// Sort key, or None when the node is not in the indexed tree.
@@ -409,8 +480,16 @@ impl Eval<'_> {
             return;
         }
         let root = self.arena.root(v[0]);
-        if self.order.is_none() {
-            self.build_order(root);
+        if !self.order.as_ref().is_some_and(|o| o.root == root) {
+            let known = self
+                .funcs
+                .as_deref_mut()
+                .and_then(|f| f.order_cache())
+                .and_then(|c| c.orders.get(&root).cloned());
+            match known {
+                Some(o) => self.order = Some(o),
+                None => self.build_order(root),
+            }
         }
         let keys: Option<Vec<(u64, u32)>> = v.iter().map(|&n| self.key_of(n)).collect();
         match keys {
@@ -434,7 +513,7 @@ impl Eval<'_> {
 
     // ----- expressions --------------------------------------------------------------
 
-    fn expr(&mut self, e: &Expr, c: C) -> Result<Value, XPathError> {
+    pub(super) fn expr(&mut self, e: &Expr, c: C) -> Result<Value, XPathError> {
         Ok(match e {
             Expr::Or(a, b) => {
                 Value::Boolean(self.expr(a, c)?.to_boolean() || self.expr(b, c)?.to_boolean())
@@ -487,7 +566,12 @@ impl Eval<'_> {
                         &format!("{p}:{l}"),
                     ));
                 };
-                match f.call(arena, &uri, l, vals)? {
+                let cc = CallContext {
+                    node: c.node,
+                    pos: c.pos,
+                    size: c.size,
+                };
+                match f.call_ctx(arena, &uri, l, vals, cc)? {
                     Value::NodeSet(mut v) => {
                         self.order = None;
                         self.sort_nodes(&mut v);
@@ -495,6 +579,41 @@ impl Eval<'_> {
                     }
                     v => v,
                 }
+            }
+            Expr::HostFn(name, args) => {
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args {
+                    vals.push(self.expr(a, c)?);
+                }
+                let arena = &mut *self.arena;
+                let Some(f) = self.funcs.as_deref_mut() else {
+                    return Err(XPathError::with_name(K::UnknownFunction, name));
+                };
+                let cc = CallContext {
+                    node: c.node,
+                    pos: c.pos,
+                    size: c.size,
+                };
+                match f.call_host(arena, name, vals, cc)? {
+                    Value::NodeSet(mut v) => {
+                        self.order = None;
+                        self.sort_nodes(&mut v);
+                        Value::NodeSet(v)
+                    }
+                    v => v,
+                }
+            }
+            Expr::Var(p, l) => {
+                let uri = match p {
+                    Some(p) if p == "xml" => XML_NS.to_string(),
+                    Some(p) => self.ns.get(p).cloned().unwrap_or_default(),
+                    None => String::new(),
+                };
+                let arena = &mut *self.arena;
+                let Some(f) = self.funcs.as_deref_mut() else {
+                    return Err(XPathError::with_name(K::UndefVariable, l));
+                };
+                f.variable(arena, &uri, l)?
             }
             Expr::Path(p) => Value::NodeSet(self.path(p, c)?),
         })
@@ -527,7 +646,11 @@ impl Eval<'_> {
     }
 
     /// Applies a predicate to `nodes` (in proximity order).
-    fn filter(&mut self, nodes: Vec<NodeId>, pred: &Expr) -> Result<Vec<NodeId>, XPathError> {
+    pub(super) fn filter(
+        &mut self,
+        nodes: Vec<NodeId>,
+        pred: &Expr,
+    ) -> Result<Vec<NodeId>, XPathError> {
         let size = nodes.len();
         // Fast path for numeric literals.
         if let Expr::Number(n) = pred {
@@ -576,7 +699,7 @@ impl Eval<'_> {
         Ok(out)
     }
 
-    fn matches(&self, n: NodeId, axis: Axis, test: &NodeTest) -> bool {
+    pub(super) fn matches(&self, n: NodeId, axis: Axis, test: &NodeTest) -> bool {
         let arena = &*self.arena;
         let data = arena.data(n);
         match test {
@@ -622,7 +745,7 @@ impl Eval<'_> {
     }
 
     /// The nodes of `axis` from `n` matching `test`, in proximity order.
-    fn axis(&mut self, n: NodeId, axis: Axis, test: &NodeTest) -> Vec<NodeId> {
+    pub(super) fn axis(&mut self, n: NodeId, axis: Axis, test: &NodeTest) -> Vec<NodeId> {
         let mut out = Vec::new();
         match axis {
             Axis::Child => {
