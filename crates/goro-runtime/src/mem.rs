@@ -16,7 +16,11 @@
 //! occasional lost update from a helper thread only blurs the count.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{
+    AtomicBool, AtomicUsize,
+    Ordering::{Acquire, Relaxed, Release},
+};
 
 /// The global allocator of the `goro` binary.
 pub struct CountingAlloc;
@@ -34,6 +38,11 @@ static IN_HOOK: AtomicBool = AtomicBool::new(false);
 static HOOK: AtomicUsize = AtomicUsize::new(0);
 /// Set after the first crossing: the next one is final.
 static HEADROOM_USED: AtomicBool = AtomicBool::new(false);
+
+/// The system refused memory (under RLIMIT_AS, say).
+static SYSTEM_REFUSED: AtomicBool = AtomicBool::new(false);
+/// Live [`Allowance`]s: their users handle a refusal themselves.
+static ALLOWANCES: AtomicUsize = AtomicUsize::new(0);
 
 /// Extra bytes granted after the limit is crossed, for the fatal error and
 /// the shutdown functions.
@@ -59,6 +68,41 @@ fn over(size: usize, total: usize) {
         f(size, hard);
     }
     IN_HOOK.store(false, Relaxed);
+}
+
+/// The system allocator refused `size` bytes. An installed hook ends the
+/// process with PHP's error, better than the abort a null result leads to.
+#[cold]
+#[inline(never)]
+fn refused(size: usize) {
+    if ALLOWANCES.load(Relaxed) != 0 || IN_HOOK.swap(true, Relaxed) {
+        return;
+    }
+    SYSTEM_REFUSED.store(true, Relaxed);
+    let h = HOOK.load(Relaxed);
+    if h != 0 {
+        // SAFETY: only set_hook stores here, from a function of this type.
+        let f: fn(usize, bool) = unsafe { std::mem::transmute(h) };
+        f(size, true);
+    }
+    IN_HOOK.store(false, Relaxed);
+}
+
+/// Whether the fatal error being reported comes from the system refusing
+/// memory, rather than from memory_limit.
+pub fn system_refused() -> bool {
+    SYSTEM_REFUSED.load(Relaxed)
+}
+
+/// Keeps glibc from reserving an arena (64 MB of address space) per thread:
+/// that counts against RLIMIT_AS, and nothing here allocates from many
+/// threads at once. Call before starting threads.
+pub fn limit_system_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: mallopt takes plain integers. Single-threaded at this point.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 1);
+    }
 }
 
 #[inline(always)]
@@ -88,6 +132,12 @@ fn credit(size: usize) {
 // from the layout alone, which `dealloc` and `realloc` receive too, so
 // blocks carry no header. Accounting (`charge`/`credit`) is by requested
 // size, as before, so memory_limit sees the same numbers.
+//
+// A thread that ends leaves its pool (live blocks may still be in its
+// chunks) in a fixed table, and the next new thread takes it over, so a
+// process starting many short-lived threads keeps few chunks. This costs the
+// fast paths nothing: the exit guard is registered, and a pool taken over,
+// in the cold path that first gives a thread memory.
 
 const SMALL_MAX: usize = 512;
 const NCLASS: usize = 16;
@@ -128,16 +178,129 @@ struct Pool {
     free: [*mut u8; NCLASS],
     bump: *mut u8,
     end: *mut u8,
+    /// The exit guard was asked for.
+    guarded: bool,
+    /// The pool was handed back: the thread is ending, and what it still
+    /// allocates does not get a chunk.
+    exiting: bool,
 }
 
 thread_local! {
-    static POOL: std::cell::UnsafeCell<Pool> = const {
-        std::cell::UnsafeCell::new(Pool {
+    // No destructor, so access has no state check and works at any time,
+    // also while the thread's other thread-locals are being destroyed.
+    static POOL: UnsafeCell<Pool> = const {
+        UnsafeCell::new(Pool {
             free: [std::ptr::null_mut(); NCLASS],
             bump: std::ptr::null_mut(),
             end: std::ptr::null_mut(),
+            guarded: false,
+            exiting: false,
         })
     };
+    static EXIT_GUARD: ExitGuard = const { ExitGuard };
+}
+
+/// Hands the thread's pool back when the thread ends.
+struct ExitGuard;
+
+impl Drop for ExitGuard {
+    fn drop(&mut self) {
+        POOL.with(|p| {
+            // SAFETY: the pool is this thread's; no allocation is in progress
+            // on it while a thread-local destructor runs.
+            let p = unsafe { &mut *p.get() };
+            ORPHANS.park(p);
+            p.free = [std::ptr::null_mut(); NCLASS];
+            p.bump = std::ptr::null_mut();
+            p.end = std::ptr::null_mut();
+            p.exiting = true;
+        });
+    }
+}
+
+/// What an ended thread's pool consists of.
+#[derive(Clone, Copy)]
+struct Parked {
+    free: [*mut u8; NCLASS],
+    bump: *mut u8,
+    end: *mut u8,
+}
+
+const MAX_PARKED: usize = 128;
+
+/// Pools of ended threads, waiting for new threads. Fixed storage: this runs
+/// inside the allocator. Its size only needs to exceed the threads alive at
+/// once: a pool that finds it full stays unused.
+struct Orphans {
+    locked: AtomicBool,
+    table: UnsafeCell<(usize, [Parked; MAX_PARKED])>,
+}
+
+// SAFETY: `table` is only touched while holding `locked`; the blocks the
+// pointers lead to belong to whichever thread takes the pool.
+unsafe impl Sync for Orphans {}
+
+static ORPHANS: Orphans = Orphans {
+    locked: AtomicBool::new(false),
+    table: UnsafeCell::new((
+        0,
+        [Parked {
+            free: [std::ptr::null_mut(); NCLASS],
+            bump: std::ptr::null_mut(),
+            end: std::ptr::null_mut(),
+        }; MAX_PARKED],
+    )),
+};
+
+impl Orphans {
+    fn try_lock(&self) -> bool {
+        self.locked
+            .compare_exchange(false, true, Acquire, Relaxed)
+            .is_ok()
+    }
+
+    /// Keeps a pool (it stays unused if the table stays locked: never wait
+    /// for long here, the holder may not exist in a forked child).
+    fn park(&self, p: &Pool) {
+        if p.bump.is_null() {
+            return;
+        }
+        for _ in 0..1000 {
+            if self.try_lock() {
+                // SAFETY: locked.
+                let t = unsafe { &mut *self.table.get() };
+                if t.0 < MAX_PARKED {
+                    t.1[t.0] = Parked {
+                        free: p.free,
+                        bump: p.bump,
+                        end: p.end,
+                    };
+                    t.0 += 1;
+                }
+                self.locked.store(false, Release);
+                return;
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Takes a pool over (a fresh thread's: its own is empty), if one is
+    /// waiting and the table is free right now.
+    fn adopt(&self, p: &mut Pool) {
+        if !self.try_lock() {
+            return;
+        }
+        // SAFETY: locked.
+        let t = unsafe { &mut *self.table.get() };
+        if t.0 > 0 {
+            t.0 -= 1;
+            let q = t.1[t.0];
+            p.free = q.free;
+            p.bump = q.bump;
+            p.end = q.end;
+        }
+        self.locked.store(false, Release);
+    }
 }
 
 #[inline(always)]
@@ -152,13 +315,35 @@ fn small_alloc(size: usize) -> *mut u8 {
             p.free[c] = unsafe { *(head as *mut *mut u8) };
             return head;
         }
-        carve(p, CLASS_SIZE[c])
+        carve(p, c)
     })
 }
 
 #[cold]
 #[inline(never)]
-fn carve(p: &mut Pool, sz: usize) -> *mut u8 {
+fn carve(p: &mut Pool, c: usize) -> *mut u8 {
+    let sz = CLASS_SIZE[c];
+    if !p.guarded {
+        p.guarded = true;
+        // Registering the destructor does not use this allocator (the
+        // standard library's list of destructors uses the system's). An
+        // error means thread-locals are going away already.
+        let _ = EXIT_GUARD.try_with(|_| {});
+        if !p.exiting && p.bump.is_null() {
+            ORPHANS.adopt(p);
+            let head = p.free[c];
+            if !head.is_null() {
+                // SAFETY: as in small_alloc.
+                p.free[c] = unsafe { *(head as *mut *mut u8) };
+                return head;
+            }
+        }
+    }
+    if p.exiting {
+        // SAFETY: a non-zero, valid layout. The block is never returned to
+        // the system (a free puts it on a list), like a chunk's.
+        return unsafe { System.alloc(Layout::from_size_align_unchecked(sz, 16)) };
+    }
     if (p.end as usize) - (p.bump as usize) < sz {
         // SAFETY: a non-zero, valid layout.
         let chunk = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, 16)) };
@@ -196,6 +381,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
             unsafe { System.alloc(layout) }
         };
         if p.is_null() {
+            refused(layout.size());
             credit(layout.size());
         }
         p
@@ -214,6 +400,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
             unsafe { System.alloc_zeroed(layout) }
         };
         if p.is_null() {
+            refused(layout.size());
             credit(layout.size());
         }
         p
@@ -259,6 +446,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
             }
         };
         if p.is_null() {
+            refused(new_size);
             if new_size > old {
                 credit(new_size - old);
             }
@@ -295,11 +483,13 @@ pub fn set_limit(limit: Option<usize>) {
 
 /// Raises the armed limit by `bytes` while alive: for work whose memory
 /// PHP takes outside its own heap (libargon2, libsodium), which
-/// memory_limit does not count.
+/// memory_limit does not count. That work reports allocation failures
+/// itself, so a refusal by the system is not fatal meanwhile.
 pub struct Allowance(usize);
 
 impl Allowance {
     pub fn new(bytes: usize) -> Allowance {
+        ALLOWANCES.fetch_add(1, Relaxed);
         let l = LIMIT.load(Relaxed);
         if l == usize::MAX {
             return Allowance(0);
@@ -311,6 +501,7 @@ impl Allowance {
 
 impl Drop for Allowance {
     fn drop(&mut self) {
+        ALLOWANCES.fetch_sub(1, Relaxed);
         if self.0 != 0 {
             let l = LIMIT.load(Relaxed);
             LIMIT.store(l.saturating_sub(self.0), Relaxed);

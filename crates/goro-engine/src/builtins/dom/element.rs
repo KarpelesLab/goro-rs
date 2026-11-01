@@ -1582,6 +1582,22 @@ fn convert_nodes(
     let mut holds = Vec::new();
     let doc = with_arena(|ar| ar.doc_of(ctx));
     let modern = modern_fn(a);
+    // Before anything is made (test
+    // ext/dom/tests/parentnode_childnode_too_long_text).
+    for i in 0..a.len() {
+        if let Value::Str(s) = a.val(i)
+            && s.len() > i32::MAX as usize
+        {
+            return vm.fthrow(
+                a,
+                "ValueError",
+                &format!(
+                    "Argument #{} must be less than or equal to 2147483647 bytes long",
+                    i + 1
+                ),
+            );
+        }
+    }
     for i in 0..a.len() {
         match a.val(i) {
             Value::Object(o) => {

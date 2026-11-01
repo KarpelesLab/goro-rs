@@ -457,6 +457,15 @@ impl Vm {
                     }
                 };
                 let Some((k, er)) = next else {
+                    // The variable stopped being an array during the loop
+                    // (test Zend/tests/bug79792).
+                    let cur = r.get();
+                    if !matches!(cur, Value::Array(_) | Value::Object(_)) {
+                        self.warn(&format!(
+                            "foreach() argument must be of type array|object, {} given",
+                            Vm::type_name_given(&cur)
+                        ))?;
+                    }
                     return Ok(false);
                 };
                 let p = self.slot_ptr(val);

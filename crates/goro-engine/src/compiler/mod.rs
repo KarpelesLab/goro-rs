@@ -798,7 +798,9 @@ impl<'a> Compiler<'a> {
             }
             match &s.kind {
                 StmtKind::InlineHtml(t) if first && is_shebang_or_empty(t) => {}
-                StmtKind::Declare(_) => {}
+                // A closing tag is an empty statement (test
+                // Zend/tests/gh19719).
+                StmtKind::Declare(_) | StmtKind::Nop => {}
                 _ => first = false,
             }
         }

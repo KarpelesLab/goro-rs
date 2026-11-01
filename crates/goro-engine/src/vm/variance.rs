@@ -335,6 +335,10 @@ impl Vm {
         obs: Vec<Obligation>,
         decl: &Rc<crate::class::ClassDecl>,
     ) -> R<()> {
+        // A method reports its tentative return type once, not again for the
+        // interface behind the parent class (tests Zend/tests/record_errors_001,
+        // tentative_type_early_binding).
+        let mut deprecated: Vec<*const Func> = Vec::new();
         for ob in obs {
             if ob.child.scope.get().is_null() || ob.parent.scope.get().is_null() {
                 continue;
@@ -355,7 +359,12 @@ impl Vm {
                         .any(|a| a.name.eq_ignore_ascii_case(b"ReturnTypeWillChange")),
                     _ => false,
                 };
-                if !will_change && !matches!(ret, Sub::Unresolved(_)) {
+                let child_ptr = Rc::as_ptr(&ob.child);
+                if !will_change
+                    && !matches!(ret, Sub::Unresolved(_))
+                    && !deprecated.contains(&child_ptr)
+                {
+                    deprecated.push(child_ptr);
                     let fs = self.variance_sig(&ob.child);
                     let ps = self.variance_sig(&ob.parent);
                     let (file, line) = self.obligation_loc(&ob, decl);
@@ -455,7 +464,12 @@ impl Vm {
                 f.name.dname()
             ));
         } else {
-            s.push_str(&f.display_name());
+            // Up to the NUL of an anonymous class's name (test
+            // Zend/tests/record_errors_001).
+            match f.scope() {
+                Some(c) => s.push_str(&format!("{}::{}", c.name.dname(), f.name.dname())),
+                None => s.push_str(&f.display_name()),
+            }
         }
         s.push('(');
         for (i, p) in params.iter().enumerate() {
