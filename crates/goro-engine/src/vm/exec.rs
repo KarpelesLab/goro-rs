@@ -30,9 +30,28 @@ fn needs_drop_value(v: &Value) -> bool {
 /// ints with the sign of the dividend.
 #[inline(always)]
 pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
+    fast_arith_slots(op, value_as_slot(x), value_as_slot(y))
+}
+
+// A value and the slot holding it have the same layout: `None` is a spare
+// tag of `Value`, which `peek_slot` and `value_as_slot` rely on (a slot
+// never reads as a value unless it is `Some`).
+const _: () = assert!(std::mem::size_of::<Slot>() == std::mem::size_of::<Value>());
+
+/// A value viewed as a defined slot.
+#[inline(always)]
+fn value_as_slot(v: &Value) -> &Slot {
+    // SAFETY: see the assertion above.
+    unsafe { &*(v as *const Value as *const Slot) }
+}
+
+/// [`fast_arith`] on operands read as slots (`None` for an undefined
+/// variable takes the general path, like any other non-number).
+#[inline(always)]
+pub(crate) fn fast_arith_slots(op: Bin, x: &Slot, y: &Slot) -> Option<Value> {
     use Value::{Bool, Float, Int};
     match (x, y) {
-        (Int(a), Int(b)) => {
+        (Some(Int(a)), Some(Int(b))) => {
             let (a, b) = (*a, *b);
             Some(match op {
                 // (a match, not `unwrap_or`: the unused default would go
@@ -82,15 +101,17 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
                 _ => return None,
             })
         }
-        (Float(_), Float(_)) | (Int(_), Float(_)) | (Float(_), Int(_)) => {
+        (Some(Float(_)), Some(Float(_)))
+        | (Some(Int(_)), Some(Float(_)))
+        | (Some(Float(_)), Some(Int(_))) => {
             let fa = match x {
-                Int(i) => *i as f64,
-                Float(f) => *f,
+                Some(Int(i)) => *i as f64,
+                Some(Float(f)) => *f,
                 _ => unreachable!(),
             };
             let fb = match y {
-                Int(i) => *i as f64,
-                Float(f) => *f,
+                Some(Int(i)) => *i as f64,
+                Some(Float(f)) => *f,
                 _ => unreachable!(),
             };
             Some(match op {
@@ -102,8 +123,12 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
                 Bin::Le => Bool(fa <= fb),
                 Bin::Eq => Bool(fa == fb),
                 Bin::Ne => Bool(fa != fb),
-                Bin::Identical if matches!((x, y), (Float(_), Float(_))) => Bool(fa == fb),
-                Bin::NotIdentical if matches!((x, y), (Float(_), Float(_))) => Bool(fa != fb),
+                Bin::Identical if matches!((x, y), (Some(Float(_)), Some(Float(_)))) => {
+                    Bool(fa == fb)
+                }
+                Bin::NotIdentical if matches!((x, y), (Some(Float(_)), Some(Float(_)))) => {
+                    Bool(fa != fb)
+                }
                 _ => return None,
             })
         }
@@ -113,8 +138,8 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
 
 /// [`fast_arith`] for the comparison operators: the bool result.
 #[inline(always)]
-pub(crate) fn fast_cmp(op: Bin, x: &Value, y: &Value) -> Option<bool> {
-    let r = fast_arith(op, x, y);
+pub(crate) fn fast_cmp(op: Bin, x: &Slot, y: &Slot) -> Option<bool> {
+    let r = fast_arith_slots(op, x, y);
     let b = match &r {
         Some(Value::Bool(b)) => Some(*b),
         _ => None,
@@ -164,6 +189,18 @@ impl Vm {
             Some(unsafe { code.consts.get_unchecked((r & !CONST) as usize) })
         } else {
             unsafe { (*self.slot_ptr(r)).as_ref() }
+        }
+    }
+
+    /// Peeks at an operand as a slot (`None`: an undefined variable), the
+    /// cheapest look: no `Option<&Value>` to build and test.
+    #[inline(always)]
+    pub(crate) fn peek_slot(&self, r: Reg) -> &Slot {
+        if r & CONST != 0 {
+            let code = self.code_ref();
+            value_as_slot(unsafe { code.consts.get_unchecked((r & !CONST) as usize) })
+        } else {
+            unsafe { &*self.slot_ptr(r) }
         }
     }
 
@@ -505,7 +542,7 @@ impl Vm {
                 Op::Nop | Op::Ticks => {}
                 Op::Assign { dst, src } => {
                     // A scalar over a scalar: in place, nothing released.
-                    let scalar = match self.peek(src) {
+                    let scalar = match self.peek_slot(src) {
                         Some(Value::Int(i)) => Some(Value::Int(*i)),
                         Some(Value::Float(f)) => Some(Value::Float(*f)),
                         Some(Value::Bool(b)) => Some(Value::Bool(*b)),
@@ -563,8 +600,8 @@ impl Vm {
                     // One look at each operand; int and float operands own
                     // nothing, so a consumed temporary may keep its stale
                     // scalar.
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(Bin::Add, x, y)
+                    if let Some(r) =
+                        fast_arith_slots(Bin::Add, self.peek_slot(a), self.peek_slot(b))
                     {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
@@ -578,8 +615,8 @@ impl Vm {
                     // One look at each operand; int and float operands own
                     // nothing, so a consumed temporary may keep its stale
                     // scalar.
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(Bin::Sub, x, y)
+                    if let Some(r) =
+                        fast_arith_slots(Bin::Sub, self.peek_slot(a), self.peek_slot(b))
                     {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
@@ -593,8 +630,8 @@ impl Vm {
                     // One look at each operand; int and float operands own
                     // nothing, so a consumed temporary may keep its stale
                     // scalar.
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(Bin::Mul, x, y)
+                    if let Some(r) =
+                        fast_arith_slots(Bin::Mul, self.peek_slot(a), self.peek_slot(b))
                     {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
@@ -606,9 +643,7 @@ impl Vm {
                 }
                 Op::Concat { dst, a, b } => self.op_concat(dst, a, b)?,
                 Op::Lt { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
-                    {
+                    if let Some(r) = fast_cmp(Bin::Lt, self.peek_slot(a), self.peek_slot(b)) {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -618,9 +653,7 @@ impl Vm {
                     }
                 }
                 Op::Le { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Le, x, y)
-                    {
+                    if let Some(r) = fast_cmp(Bin::Le, self.peek_slot(a), self.peek_slot(b)) {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -630,9 +663,7 @@ impl Vm {
                     }
                 }
                 Op::Eq { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Eq, x, y)
-                    {
+                    if let Some(r) = fast_cmp(Bin::Eq, self.peek_slot(a), self.peek_slot(b)) {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -642,8 +673,7 @@ impl Vm {
                     }
                 }
                 Op::Identical { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Identical, x, y)
+                    if let Some(r) = fast_cmp(Bin::Identical, self.peek_slot(a), self.peek_slot(b))
                     {
                         if self.try_put_bool(dst, r) {
                             continue;
@@ -654,9 +684,7 @@ impl Vm {
                     }
                 }
                 Op::BinOp { op, dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(op, x, y)
-                    {
+                    if let Some(r) = fast_arith_slots(op, self.peek_slot(a), self.peek_slot(b)) {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
                             Err(r) => self.put(dst, r),
@@ -711,7 +739,7 @@ impl Vm {
                     continue;
                 }
                 Op::JmpZ { c, t } => {
-                    if let Some(Value::Bool(b)) = self.peek(c) {
+                    if let Some(Value::Bool(b)) = self.peek_slot(c) {
                         // A bool temporary holds nothing to release: it may
                         // keep its stale value.
                         let b = *b;
@@ -731,7 +759,7 @@ impl Vm {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
-                    if let Some(Value::Bool(b)) = self.peek(c) {
+                    if let Some(Value::Bool(b)) = self.peek_slot(c) {
                         // A bool temporary holds nothing to release: it may
                         // keep its stale value.
                         let b = *b;
@@ -756,8 +784,7 @@ impl Vm {
                             self.ex.ip = t as usize;
                         }
                         continue;
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
+                    } else if let Some(r) = fast_cmp(Bin::Lt, self.peek_slot(a), self.peek_slot(b))
                     {
                         if r {
                             self.ex.ip = t as usize;
