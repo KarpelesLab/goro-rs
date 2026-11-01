@@ -1050,6 +1050,13 @@ pub mod fflags {
     /// frame (observed on PHP 8.5; test Zend/tests/enum/
     /// update-class-constant-failure vs Zend/tests/bug47572).
     pub const BARE_CONST: u32 = 1 << 19;
+    /// Binding the arguments needs no per-argument work: no parameter
+    /// has a type that needs checking (none, or `mixed`), none is
+    /// variadic, and every default is a constant (of a by-value
+    /// parameter) or computed by the prologue. A positional call with
+    /// `num_required..=direct_params` arguments then binds by filling the
+    /// constant defaults of the parameters not passed.
+    pub const SIMPLE_PARAMS: u32 = 1 << 20;
 }
 
 /// Jump table for `switch` / `match`.

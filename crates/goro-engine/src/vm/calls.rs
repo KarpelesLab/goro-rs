@@ -349,7 +349,7 @@ impl Vm {
 
     /// [`push_callee`](Self::push_callee) of a user function or method
     /// (not a closure, not a magic trampoline).
-    #[inline]
+    #[inline(always)]
     fn push_user(
         &mut self,
         func: Rc<Func>,
@@ -2638,6 +2638,7 @@ impl Vm {
     /// arguments matching the parameters, types matching exactly, no
     /// attributes to act on) builds the frame in place; anything else goes
     /// through [`activate_slow`](Self::activate_slow).
+    #[inline(always)]
     pub(crate) fn activate(&mut self, ret: *mut Slot, ret_var: bool, entry: bool) -> R<()> {
         let len = self.ex.pending.len();
         // SAFETY: there is a pending call on top; it stays there (and keeps
@@ -2647,15 +2648,15 @@ impl Vm {
             unreachable!()
         };
         let code: &FuncCode = unsafe { &*Rc::as_ptr(code) };
+        let argc = p.argc;
         // Extra arguments make argc exceed np; named ones set has_named;
         // magic trampolines take values (not here: do_call checks).
         if p.flags & pending_flags::SLOW != 0
             || p.has_named
-            || p.argc > p.np
-            || !args_bind_simply(self, code, p.base, p.argc)
+            || argc > p.np
+            || !binds_simply(self, code, p.base, argc)
         {
-            let p = self.ex.pending.pop().unwrap();
-            return self.activate_slow(p, ret, ret_var, entry);
+            return self.activate_general(ret, ret_var, entry);
         }
         let mut flags = 0;
         if entry {
@@ -2703,6 +2704,14 @@ impl Vm {
             self.ex.pending.set_len(len - 1);
         }
         Ok(())
+    }
+
+    /// [`activate`](Self::activate) of the pending call on top when the
+    /// fast path doesn't apply.
+    #[inline(never)]
+    fn activate_general(&mut self, ret: *mut Slot, ret_var: bool, entry: bool) -> R<()> {
+        let p = self.ex.pending.pop().unwrap();
+        self.activate_slow(p, ret, ret_var, entry)
     }
 
     /// [`activate`](Self::activate) in general: argument count errors,
@@ -3267,49 +3276,73 @@ impl Vm {
 
     /// `return`: pops the frame and delivers the value. `Some(v)` when the
     /// frame was an entry frame (the Rust caller gets `v`).
+    #[inline(always)]
     pub(crate) fn do_return(&mut self, v: Value, by_ref: bool) -> R<Option<Value>> {
         let len = self.ex.frames.len();
         // SAFETY: a frame is running.
         let f = unsafe { &mut *self.ex.frames.as_mut_ptr().add(len - 1) };
         let flags = f.flags;
-        if flags & frame_flags::GENERATOR != 0 {
-            return self.generator_return(v);
+        if flags & (frame_flags::GENERATOR | frame_flags::ATTACHED | frame_flags::OWN_SLOTS) != 0 {
+            return self.do_return_general(v, by_ref);
         }
         let ret = f.ret;
         // Deliver before releasing locals (as PHP copies the value first).
         let v = if by_ref { v } else { v.into_deref() };
-        if flags & (frame_flags::ATTACHED | frame_flags::OWN_SLOTS) == 0 {
-            // Released in place: the locals, then the frame's handles.
-            let n = f.code().num_slots as usize;
-            let base = f.base;
-            let mark = f.mark;
-            for i in 0..n {
-                // SAFETY: the frame's slots.
-                let s = unsafe { &mut *base.add(i) };
-                if super::exec::holds_no_resources(s) {
-                    unsafe { std::ptr::write(s, None) };
-                } else {
-                    let old = s.take();
-                    drop(old);
-                }
+        // Released in place: the locals, then the frame's handles.
+        let n = f.code().num_slots as usize;
+        let base = f.base;
+        let mark = f.mark;
+        for i in 0..n {
+            // SAFETY: the frame's slots.
+            let s = unsafe { &mut *base.add(i) };
+            if super::exec::holds_no_resources(s) {
+                unsafe { std::ptr::write(s, None) };
+            } else {
+                let old = s.take();
+                drop(old);
             }
-            self.ex.stack.release(mark);
-            self.ex.frames.truncate(len - 1);
-            match self.ex.frames.last() {
-                Some(top) => {
-                    self.ex.top = super::TopFrame::of(top.base, top.code);
-                    self.ex.ip = top.ip as usize;
-                }
-                None => self.ex.top = super::TopFrame::default(),
-            }
-        } else {
-            let f = self.ex.frames.pop().unwrap();
-            self.ex.sync_top();
-            if let Some(top) = self.ex.frames.last() {
+        }
+        self.ex.stack.release(mark);
+        // SAFETY: the frame on top is read out field by field (its owning
+        // fields in declaration order, as its drop would) once the length
+        // no longer covers it.
+        unsafe {
+            let fp: *mut Frame = f;
+            self.ex.frames.set_len(len - 1);
+            drop_frame_in_place(fp);
+        }
+        match self.ex.frames.last() {
+            Some(top) => {
+                self.ex.top = super::TopFrame::of(top.base, top.code);
                 self.ex.ip = top.ip as usize;
             }
-            self.release_frame(f);
+            None => self.ex.top = super::TopFrame::default(),
         }
+        self.deliver_return(v, flags, ret)
+    }
+
+    /// [`do_return`](Self::do_return) from generator bodies and frames
+    /// whose slots are not their own.
+    #[inline(never)]
+    fn do_return_general(&mut self, v: Value, by_ref: bool) -> R<Option<Value>> {
+        let flags = self.frame().flags;
+        if flags & frame_flags::GENERATOR != 0 {
+            return self.generator_return(v);
+        }
+        let ret = self.frame().ret;
+        let v = if by_ref { v } else { v.into_deref() };
+        let f = self.ex.frames.pop().unwrap();
+        self.ex.sync_top();
+        if let Some(top) = self.ex.frames.last() {
+            self.ex.ip = top.ip as usize;
+        }
+        self.release_frame(f);
+        self.deliver_return(v, flags, ret)
+    }
+
+    /// Hands the value returned by a frame with `flags` to its caller.
+    #[inline(always)]
+    fn deliver_return(&mut self, v: Value, flags: u32, ret: *mut Slot) -> R<Option<Value>> {
         if flags & frame_flags::ENTRY != 0 {
             return Ok(Some(v));
         }
@@ -3634,7 +3667,7 @@ impl Vm {
             }
             &cd.statics
         };
-        if !args_bind_simply(self, code, base, argc) {
+        if !binds_simply(self, code, base, argc) {
             let mut v = Vec::with_capacity(argc as usize);
             for i in 0..n {
                 // SAFETY: the slots allocated above.
@@ -4280,6 +4313,50 @@ fn names_class_of(vm: &Vm, ty: &TypeHint, o: &ObjRef) -> bool {
         }
     }
     false
+}
+
+/// Drops the frame at `f` as its drop glue would (owning fields in
+/// declaration order), inline and skipping empty containers.
+///
+/// # Safety
+/// `f` must point to a valid frame that is not used (nor dropped) again.
+#[inline(always)]
+unsafe fn drop_frame_in_place(f: *mut Frame) {
+    use std::ptr::read;
+    // SAFETY: per the contract, each owning field is moved out once.
+    unsafe {
+        drop(read(&(*f).func));
+        if let Some(t) = read(&(*f).this) {
+            drop(t);
+        }
+        let extra = read(&(*f).extra_args);
+        if extra.capacity() != 0 {
+            drop(extra);
+        } else {
+            std::mem::forget(extra);
+        }
+        if let Some(d) = read(&(*f).dyn_vars) {
+            drop(d);
+        }
+        if let Some(c) = read(&(*f).closure) {
+            drop(c);
+        }
+        if let Some(g) = read(&(*f).generator) {
+            drop(g);
+        }
+    }
+}
+
+/// Whether `argc` positional arguments (at most the parameters with a
+/// slot) in the slots at `base` bind simply (see `args_bind_simply`), with
+/// the per-parameter look only for functions that need it.
+#[inline(always)]
+fn binds_simply(vm: &Vm, code: &FuncCode, base: *mut Slot, argc: u32) -> bool {
+    if code.flags & fflags::SIMPLE_PARAMS != 0 {
+        argc >= code.num_required
+    } else {
+        args_bind_simply(vm, code, base, argc)
+    }
 }
 
 #[inline(always)]

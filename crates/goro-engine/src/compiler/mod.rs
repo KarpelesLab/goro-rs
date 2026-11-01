@@ -650,6 +650,17 @@ impl<'a> Compiler<'a> {
         if params.iter().any(|p| p.ty.is_some()) {
             flags |= fflags::TYPED_PARAMS;
         }
+        if params.iter().all(|p| {
+            !p.variadic
+                && p.ty.as_ref().is_none_or(|t| t.mask & tmask::MIXED != 0)
+                && match &p.default {
+                    ParamDefault::None | ParamDefault::Code => true,
+                    ParamDefault::Const(_) => !p.by_ref,
+                    ParamDefault::Lazy(_) => false,
+                }
+        }) {
+            flags |= fflags::SIMPLE_PARAMS;
+        }
         let byref_mask = crate::bytecode::byref_mask(&params);
         let direct_params = params.iter().filter(|p| !p.variadic).count() as u32;
         Ok(FuncCode {
