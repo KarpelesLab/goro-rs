@@ -13,7 +13,13 @@ fn deep_nesting_does_not_overflow() {
     );
     let arena = Arena::new();
     let e = parse(&arena, src.as_bytes()).unwrap_err();
-    assert_eq!(e.message, "memory exhausted");
+    // Which limit comes first depends on the frame size, so on the build. The
+    // release binary's exact message is covered by that .phpt.
+    assert!(
+        e.message == "memory exhausted" || e.message == goro_syntax::parser::STACK_EXHAUSTED,
+        "{}",
+        e.message
+    );
 
     for open in ["(", "f(", "$a[", "-(", "function() { return "] {
         let close = match open {
