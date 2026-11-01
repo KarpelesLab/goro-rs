@@ -190,6 +190,11 @@ pub(crate) enum Expr {
     Fn(CoreFn, Vec<Expr>),
     /// An extension function `prefix:local(args)`.
     ExtFn(String, String, Vec<Expr>),
+    /// A function of the host language without prefix (XSLT's `key()`,
+    /// `document()`, `current()`...; only in host mode).
+    HostFn(String, Vec<Expr>),
+    /// A variable reference `$prefix:local` (only in host mode).
+    Var(Option<String>, String),
     Path(Box<PathExpr>),
 }
 
@@ -574,6 +579,8 @@ fn lex_number(chars: &[char], mut i: usize) -> (f64, usize) {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Host-language mode (see [`parse_host`]).
+    host: bool,
 }
 
 type R<T> = Result<T, XPathError>;
@@ -584,8 +591,19 @@ fn err<T>() -> R<T> {
 
 /// Compiles an expression.
 pub(crate) fn parse(s: &str) -> R<Expr> {
+    Ok(optimize(parse_raw(s, false)?))
+}
+
+/// Parses for a host language (XSLT): variable references and functions
+/// without prefix the core library lacks are left to the host.
+pub(crate) fn parse_host(s: &str) -> R<Expr> {
+    Ok(optimize(parse_raw(s, true)?))
+}
+
+/// The expression as written (XSLT patterns are read from this form).
+pub(crate) fn parse_raw(s: &str, host: bool) -> R<Expr> {
     let toks = lex(s)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, host };
     if p.toks.is_empty() {
         return err();
     }
@@ -593,7 +611,7 @@ pub(crate) fn parse(s: &str) -> R<Expr> {
     if p.pos != p.toks.len() {
         return err();
     }
-    Ok(optimize(e))
+    Ok(e)
 }
 
 impl Parser {
@@ -897,7 +915,16 @@ impl Parser {
 
     fn primary(&mut self) -> R<Expr> {
         match self.peek().cloned() {
-            Some(Tok::Var(v)) => Err(XPathError::with_name(K::UndefVariable, &v)),
+            Some(Tok::Var(v)) => {
+                if !self.host {
+                    return Err(XPathError::with_name(K::UndefVariable, &v));
+                }
+                self.pos += 1;
+                Ok(match v.split_once(':') {
+                    Some((pr, l)) => Expr::Var(Some(pr.to_string()), l.to_string()),
+                    None => Expr::Var(None, v),
+                })
+            }
             Some(Tok::LParen) => {
                 self.pos += 1;
                 let e = self.or_expr()?;
@@ -936,6 +963,9 @@ impl Parser {
                     Some(p) => Ok(Expr::ExtFn(p, local, args)),
                     None => {
                         let Some(f) = CoreFn::from_name(&local) else {
+                            if self.host {
+                                return Ok(Expr::HostFn(local, args));
+                            }
                             return Err(XPathError::with_name(K::UnknownFunction, &local));
                         };
                         let (min, max) = f.arity();
@@ -978,7 +1008,7 @@ fn positional(e: &Expr) -> bool {
                     | CoreFn::StringLength
             ) || args.iter().any(positional_inside)
         }
-        Expr::ExtFn(..) => true,
+        Expr::ExtFn(..) | Expr::HostFn(..) | Expr::Var(..) => true,
         Expr::Or(a, b) | Expr::And(a, b) | Expr::Cmp(_, a, b) | Expr::Union(a, b) => {
             positional_inside(a) || positional_inside(b)
         }
@@ -994,7 +1024,10 @@ fn positional(e: &Expr) -> bool {
 fn positional_inside(e: &Expr) -> bool {
     match e {
         Expr::Fn(CoreFn::Last | CoreFn::Position, _) => true,
-        Expr::Fn(_, args) | Expr::ExtFn(_, _, args) => args.iter().any(positional_inside),
+        Expr::Fn(_, args) | Expr::ExtFn(_, _, args) | Expr::HostFn(_, args) => {
+            args.iter().any(positional_inside)
+        }
+        Expr::Var(..) => false,
         Expr::Or(a, b)
         | Expr::And(a, b)
         | Expr::Cmp(_, a, b)
@@ -1047,6 +1080,7 @@ fn optimize(e: Expr) -> Expr {
         Expr::Neg(a) => Expr::Neg(Box::new(optimize(*a))),
         Expr::Fn(f, args) => Expr::Fn(f, args.into_iter().map(optimize).collect()),
         Expr::ExtFn(p, l, args) => Expr::ExtFn(p, l, args.into_iter().map(optimize).collect()),
+        Expr::HostFn(n, args) => Expr::HostFn(n, args.into_iter().map(optimize).collect()),
         e => e,
     }
 }

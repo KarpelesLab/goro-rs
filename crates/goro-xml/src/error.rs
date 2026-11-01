@@ -45,6 +45,8 @@ pub enum Domain {
     RelaxNgV = 19,
     /// XML_FROM_C14N
     C14n = 21,
+    /// XML_FROM_XSLT
+    Xslt = 22,
     /// XML_FROM_VALID
     Valid = 23,
 }
