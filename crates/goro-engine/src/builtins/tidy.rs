@@ -144,7 +144,10 @@ pub static MODULE: Module = Module {
         ("function tidy_is_xhtml(tidy $tidy): bool", is_xhtml),
         ("function tidy_is_xml(tidy $tidy): bool", is_xml),
         ("function tidy_error_count(tidy $tidy): int", error_count),
-        ("function tidy_warning_count(tidy $tidy): int", warning_count),
+        (
+            "function tidy_warning_count(tidy $tidy): int",
+            warning_count,
+        ),
         ("function tidy_access_count(tidy $tidy): int", access_count),
         ("function tidy_config_count(tidy $tidy): int", config_count),
         (
@@ -928,11 +931,7 @@ fn node_object(vm: &mut Vm, doc: &Rc<RefCell<Document>>, id: NodeId) -> R<Value>
     Ok(Value::Object(o))
 }
 
-fn node_or_null(
-    vm: &mut Vm,
-    a: &Args,
-    pick: impl FnOnce(&Document) -> Option<NodeId>,
-) -> R<Value> {
+fn node_or_null(vm: &mut Vm, a: &Args, pick: impl FnOnce(&Document) -> Option<NodeId>) -> R<Value> {
     let Some(doc) = this_doc(a) else {
         return Ok(Value::Null);
     };
@@ -1100,8 +1099,21 @@ fn cast_result(text: impl FnOnce() -> Vec<u8>, to: CastTo) -> Option<R<Value>> {
     }))
 }
 
+/// `clone` is refused (from memory of PHP's behaviour; no test shows it).
+fn refuse_clone(vm: &mut Vm, o: &ObjRef, _new: &ObjRef) {
+    let cls = vm.class_of(o);
+    let msg = format!(
+        "Trying to clone an uncloneable object of class {}",
+        cls.name.to_string_lossy()
+    );
+    if vm.err.deferred.is_none() {
+        vm.err.deferred = Some(vm.throw_error_msg("Error", &msg));
+    }
+}
+
 fn tidy_hooks() -> NativeHooks {
     NativeHooks {
+        clone: Some(refuse_clone),
         // The default configuration file is read as the object is created,
         // so its diagnostics name the caller: test gh10636.phpt shows
         // "main()" for `new tidy`.
@@ -1126,6 +1138,7 @@ fn tidy_hooks() -> NativeHooks {
 
 fn node_hooks() -> NativeHooks {
     NativeHooks {
+        clone: Some(refuse_clone),
         cast: Some(|_, o, to| {
             cast_result(
                 || {

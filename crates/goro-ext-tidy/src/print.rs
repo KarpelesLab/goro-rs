@@ -4,7 +4,7 @@
 //! ends on a line boundary, and a pending line is only ended when something
 //! needs a new one, so a node's markup can end without a line break (tests
 //! 010.phpt, 012.phpt: `<b>Hi</b>` and `</html>` have no line break,
-//! `</head>` and `</body>` do). Saving the document ends the last line.
+//! `</head>` and `</body>` do), and that holds for the whole document too.
 
 use crate::config::Encoding;
 use crate::lexer::{KEPT_AMP, OPAQUE_BASE, encode_output, representable};
@@ -96,6 +96,10 @@ pub fn document(d: &Document) -> Vec<u8> {
     if !d.config.bool("markup") {
         return Vec::new();
     }
+    // The force-output option's meaning: errors stop the output without it.
+    if d.error_count() > 0 && !d.config.bool("force-output") {
+        return Vec::new();
+    }
     let mut p = Printer::new(d);
     let show_body = d.config.int("show-body-only");
     let body = d.body();
@@ -112,7 +116,9 @@ pub fn document(d: &Document) -> Vec<u8> {
         }
         None => p.node(d.root, 0),
     }
-    p.cond_flush(0);
+    // Tests gh12980.phpt and gh20374.phpt: no line break after </html>; an
+    // earlier block's end tag has written its own (test 018.phpt).
+    p.flush_pending();
     p.finish()
 }
 
@@ -604,7 +610,10 @@ impl<'a> Printer<'a> {
     fn xml_flags(&self, id: NodeId) -> u32 {
         let d = self.d;
         let n = &d.nodes[id];
-        let has_text = n.children.iter().any(|&c| d.nodes[c].kind == NodeType::Text);
+        let has_text = n
+            .children
+            .iter()
+            .any(|&c| d.nodes[c].kind == NodeType::Text);
         if has_text || n.children.is_empty() {
             tags::BLOCK | tags::NO_INDENT
         } else {

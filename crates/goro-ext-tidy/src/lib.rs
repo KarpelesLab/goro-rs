@@ -162,9 +162,17 @@ impl Document {
                 }
             };
             let (w, e) = (self.warnings, self.errors);
-            let mut line = format!("Tidy found {} and {}", plural(w, "warning"), plural(e, "error"));
+            let mut line = format!(
+                "Tidy found {} and {}",
+                plural(w, "warning"),
+                plural(e, "error")
+            );
             if self.access > 0 {
-                let _ = write!(line, " and {}", plural(self.access, "accessibility warning"));
+                let _ = write!(
+                    line,
+                    " and {}",
+                    plural(self.access, "accessibility warning")
+                );
             }
             line.push_str("!\n");
             self.errbuf.push_str(&line);
@@ -370,7 +378,10 @@ impl Document {
             }
             Level::Error => {
                 self.errors += 1;
-                ("Error", self.errors as i64 <= self.config.int("show-errors"))
+                (
+                    "Error",
+                    self.errors as i64 <= self.config.int("show-errors"),
+                )
             }
             Level::Access => {
                 self.access += 1;

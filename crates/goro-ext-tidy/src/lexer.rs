@@ -125,11 +125,11 @@ pub fn decode_input(input: &[u8], enc: Encoding) -> (Vec<char>, bool) {
                 (_, [0xFE, 0xFF, r @ ..]) => (r, false),
                 _ => (input, false),
             };
-            let units = bytes.chunks_exact(2).map(|p| {
+            let units = bytes.as_chunks::<2>().0.iter().map(|&p| {
                 if le {
-                    u16::from_le_bytes([p[0], p[1]])
+                    u16::from_le_bytes(p)
                 } else {
-                    u16::from_be_bytes([p[0], p[1]])
+                    u16::from_be_bytes(p)
                 }
             });
             for r in char::decode_utf16(units) {
@@ -142,7 +142,11 @@ pub fn decode_input(input: &[u8], enc: Encoding) -> (Vec<char>, bool) {
                 }
             }
         }
-        Encoding::Raw | Encoding::Iso2022 | Encoding::Mac | Encoding::Ibm858 | Encoding::Big5
+        Encoding::Raw
+        | Encoding::Iso2022
+        | Encoding::Mac
+        | Encoding::Ibm858
+        | Encoding::Big5
         | Encoding::ShiftJis => out.extend(input.iter().map(|&b| {
             if b < 0x80 {
                 b as char
@@ -368,10 +372,10 @@ impl Lexer {
         if self.at_eof() {
             return self.token(TokKind::Eof, line, col);
         }
-        if self.peek(0) == Some('<') {
-            if let Some(t) = self.markup(line, col) {
-                return t;
-            }
+        if self.peek(0) == Some('<')
+            && let Some(t) = self.markup(line, col)
+        {
+            return t;
         }
         self.text_token(line, col)
     }
@@ -652,7 +656,11 @@ impl Lexer {
                         self.bump();
                     }
                     None => {
-                        self.warn(line, col, &format!("attribute \"{name}\" lacks closing quote"));
+                        self.warn(
+                            line,
+                            col,
+                            &format!("attribute \"{name}\" lacks closing quote"),
+                        );
                         while let Some(c) = self.peek(0) {
                             if c == '>' {
                                 break;
@@ -732,7 +740,10 @@ impl Lexer {
                 Some(h) => (16, h, 2),
                 None => (10, num, 1),
             };
-            let n = digits.bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
+            let n = digits
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric())
+                .count();
             let semi = digits[n..].starts_with(';');
             if let Ok(v) = u32::from_str_radix(&digits[..n], radix) {
                 // Numeric references to C1 controls mean Windows-1252's
@@ -748,7 +759,10 @@ impl Lexer {
                         self.warn(
                             line,
                             col,
-                            &format!("numeric character reference \"&{}\" doesn't end in ';'", &s[..skip + n]),
+                            &format!(
+                                "numeric character reference \"&{}\" doesn't end in ';'",
+                                &s[..skip + n]
+                            ),
                         );
                     }
                     let used = skip + n + semi as usize;

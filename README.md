@@ -296,6 +296,12 @@ the XML extensions each pass 87-100% of their tests that run.
   `setProfiling()` writes only the profile's header.
 - ext/dba: the `cdb`, `cdb_make`, `flatfile` and `inifile` handlers. Handlers
   that need libraries (db4, gdbm, qdbm, lmdb, tcadb) are not built.
+- ext/tidy: `tidy`, `tidyNode` and the `tidy_*` functions on `goro-ext-tidy`,
+  a from-scratch HTML cleaner and pretty printer. Its repairs, layout and
+  messages follow the ext/tidy tests but aren't HTML Tidy's in every detail
+  on other documents. Some options are accepted without effect, accessibility
+  checks are a small subset, and the mac, ibm858, iso2022, big5 and shiftjis
+  encodings pass bytes through unconverted.
 - `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
   xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
   error codes, messages and positions, DTDs, entities, LIBXML_* options and

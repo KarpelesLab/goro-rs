@@ -434,10 +434,7 @@ impl Config {
                 }
                 Some(i) if OPTIONS[i].readonly || !self.set_parsed(i, &v) => {
                     self.errors += 1;
-                    let _ = writeln!(
-                        self.messages,
-                        "Warning: invalid value for option {n}: {v}"
-                    );
+                    let _ = writeln!(self.messages, "Warning: invalid value for option {n}: {v}");
                 }
                 Some(_) => {}
             }

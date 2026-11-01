@@ -431,9 +431,7 @@ impl Parser<'_> {
                 self.warn(&t, "discarding unexpected <html>");
                 None
             }
-            TokKind::Start
-                if tags::lookup(&t.name).is_some_and(|g| g.flags & tags::HEAD != 0) =>
-            {
+            TokKind::Start if tags::lookup(&t.name).is_some_and(|g| g.flags & tags::HEAD != 0) => {
                 self.start_head(t.line, t.col);
                 self.phase = Phase::InHead;
                 Some(t)
@@ -468,8 +466,7 @@ impl Parser<'_> {
                 self.warn(&t, &format!("discarding unexpected </{}>", t.name));
                 None
             }
-            TokKind::Start
-                if t.name == "head" => {
+            TokKind::Start if t.name == "head" => {
                 self.warn(&t, "discarding unexpected <head>");
                 None
             }
@@ -612,7 +609,10 @@ impl Parser<'_> {
                 None
             }
             TokKind::Start if tags::moves_to_head(&t.name) => {
-                self.warn(&t, &format!("<{}> isn't allowed in <html> elements", t.name));
+                self.warn(
+                    &t,
+                    &format!("<{}> isn't allowed in <html> elements", t.name),
+                );
                 self.head_element(&t);
                 None
             }
@@ -672,7 +672,10 @@ impl Parser<'_> {
             }
             TokKind::Start if self.drop_unknown(&t) => None,
             TokKind::Start => {
-                self.warn(&t, &format!("<{}> isn't allowed in <frameset> elements", t.name));
+                self.warn(
+                    &t,
+                    &format!("<{}> isn't allowed in <frameset> elements", t.name),
+                );
                 self.warn(&t, &format!("discarding unexpected <{}>", t.name));
                 None
             }
@@ -835,7 +838,10 @@ impl Parser<'_> {
             }
             "tr" => Some(self.infer_child(top, "td", t)),
             "select" | "optgroup" | "datalist" => {
-                self.warn(t, &format!("discarding content that isn't allowed in <{name}>"));
+                self.warn(
+                    t,
+                    &format!("discarding content that isn't allowed in <{name}>"),
+                );
                 None
             }
             _ => Some(top),
@@ -863,14 +869,21 @@ impl Parser<'_> {
         let Some(table) = table else {
             return self.top().unwrap_or(self.d.root);
         };
-        self.warn(t, "content isn't allowed in <table> elements, moving it before the table");
+        self.warn(
+            t,
+            "content isn't allowed in <table> elements, moving it before the table",
+        );
         let id = self.inferred("div", t.line, t.col);
         self.d.insert_before(table, id);
         self.open.push(id);
         id
     }
 
-    fn scope_find(&self, want: impl Fn(&Document, NodeId) -> bool, barrier: &[&str]) -> Option<usize> {
+    fn scope_find(
+        &self,
+        want: impl Fn(&Document, NodeId) -> bool,
+        barrier: &[&str],
+    ) -> Option<usize> {
         for (i, &o) in self.open.iter().enumerate().rev() {
             if want(self.d, o) {
                 return Some(i);
@@ -899,7 +912,10 @@ impl Parser<'_> {
             return;
         }
         if self.open.len() >= MAX_DEPTH {
-            self.warn(t, &format!("discarding <{}>: elements nested too deeply", t.name));
+            self.warn(
+                t,
+                &format!("discarding <{}>: elements nested too deeply", t.name),
+            );
             return;
         }
         let name = t.name.as_str();
@@ -922,12 +938,15 @@ impl Parser<'_> {
                 self.warn(t, &format!("discarding unexpected <{name}>"));
                 return;
             }
-            "body" => {
-                // Inside noframes a body is that element's content.
-                if !self.open.iter().any(|&o| self.d.nodes[o].name == "noframes") {
-                    self.warn(t, "discarding unexpected <body>");
-                    return;
-                }
+            // Inside noframes a body is that element's content.
+            "body"
+                if !self
+                    .open
+                    .iter()
+                    .any(|&o| self.d.nodes[o].name == "noframes") =>
+            {
+                self.warn(t, "discarding unexpected <body>");
+                return;
             }
             _ => {}
         }
@@ -986,7 +1005,10 @@ impl Parser<'_> {
             }
             "tr" => {
                 let want = |d: &Document, o: NodeId| {
-                    matches!(d.nodes[o].name.as_str(), "table" | "tbody" | "thead" | "tfoot")
+                    matches!(
+                        d.nodes[o].name.as_str(),
+                        "table" | "tbody" | "thead" | "tfoot"
+                    )
                 };
                 match self.scope_find(want, &table_barrier) {
                     Some(i) => {
@@ -1043,7 +1065,9 @@ impl Parser<'_> {
             _ if flags & tags::INLINE != 0 => {
                 if name == "a" {
                     let is_a = |d: &Document, o: NodeId| d.nodes[o].name == "a";
-                    if let Some(i) = self.scope_find(is_a, &["td", "th", "table", "body", "div", "p"]) {
+                    if let Some(i) =
+                        self.scope_find(is_a, &["td", "th", "table", "body", "div", "p"])
+                    {
                         self.pop_to(i, "<a>", t);
                     }
                 }
@@ -1058,7 +1082,9 @@ impl Parser<'_> {
     }
 
     fn not_allowed(&mut self, t: &Token, name: &str) -> bool {
-        let top = self.top().map_or("body".to_string(), |o| self.d.nodes[o].name.clone());
+        let top = self
+            .top()
+            .map_or("body".to_string(), |o| self.d.nodes[o].name.clone());
         self.warn(t, &format!("<{name}> isn't allowed in <{top}> elements"));
         self.warn(t, &format!("discarding unexpected <{name}>"));
         false
@@ -1120,7 +1146,7 @@ impl Parser<'_> {
         }
         let (tag, user) = self.resolve(name);
         let inline = tag.map_or(user == Some(UserKind::Inline), |g| {
-            g.flags & tags::INLINE != 0 && g.flags & tags::MIXED == 0
+            g.flags & tags::INLINE != 0 && g.flags & (tags::MIXED | tags::STRUCT) == 0
         });
         let found = self.find_open_for_end(name, inline);
         match found {
@@ -1185,9 +1211,8 @@ impl Parser<'_> {
                 return None;
             }
             if matches!(n.name.as_str(), "td" | "th" | "table" | "caption" | "body") {
-                let table_part = tags::lookup(name).is_some_and(|g| {
-                    g.flags & tags::TABLE_PART != 0 || g.name == "table"
-                });
+                let table_part = tags::lookup(name)
+                    .is_some_and(|g| g.flags & tags::TABLE_PART != 0 || g.name == "table");
                 if !table_part || n.name == "table" && name != "table" {
                     return None;
                 }
@@ -1350,17 +1375,13 @@ fn walk_run(d: &mut Document, id: NodeId, run: &mut Run) {
                     if d.is_element(c, "br") {
                         trim_run_end(d, run);
                         run.space_before = true;
-                    } else if f & tags::EMPTY != 0 {
-                        run.space_before = false;
-                        run.last_text = None;
-                    } else if f & (tags::RAW | tags::RCDATA | tags::PRE) != 0 {
+                    } else if f & (tags::EMPTY | tags::RAW | tags::RCDATA | tags::PRE) != 0 {
                         run.space_before = false;
                         run.last_text = None;
                     } else if f & tags::MIXED != 0
-                        && d.nodes[c]
-                            .children
-                            .iter()
-                            .any(|&k| matches!(d.nodes[k].kind, NodeType::Start) && !is_inline_element(d, k))
+                        && d.nodes[c].children.iter().any(|&k| {
+                            matches!(d.nodes[k].kind, NodeType::Start) && !is_inline_element(d, k)
+                        })
                     {
                         trim_run_end(d, run);
                         normalize_block(d, c);
@@ -1435,9 +1456,15 @@ fn add_space(d: &mut Document, id: NodeId, after: bool) {
     let sp = d.new_node(NodeType::Text, "", line, col);
     d.nodes[sp].text.push(' ');
     let Some(p) = d.nodes[id].parent else { return };
-    let i = d.nodes[p].children.iter().position(|&c| c == id).unwrap_or(0);
+    let i = d.nodes[p]
+        .children
+        .iter()
+        .position(|&c| c == id)
+        .unwrap_or(0);
     d.nodes[sp].parent = Some(p);
-    d.nodes[p].children.insert(if after { i + 1 } else { i }, sp);
+    d.nodes[p]
+        .children
+        .insert(if after { i + 1 } else { i }, sp);
 }
 
 fn remove_empty_text(d: &mut Document, id: NodeId) {

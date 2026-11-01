@@ -67,6 +67,8 @@ fn fix_doctype(d: &mut Document) {
                 // Without output-xhtml a declared doctype stands as written.
                 Some(c) if !xhtml || c.contains("XHTML") => Some(c),
                 _ if xhtml => Some(transitional_xhtml().to_string()),
+                // Plain XML output declares nothing of its own.
+                _ if d.config.bool("output-xml") => None,
                 // Test 003.phpt.
                 _ => Some("html".to_string()),
             }
@@ -105,9 +107,8 @@ fn first_after_decl(d: &Document) -> usize {
 /// naming the encoding. The option asks for it in any encoding; without it,
 /// encodings XML assumes by default don't need one.
 fn fix_xml_decl(d: &mut Document) {
-    let xmlish = d.config.bool("output-xhtml")
-        || d.config.bool("output-xml")
-        || d.config.bool("input-xml");
+    let xmlish =
+        d.config.bool("output-xhtml") || d.config.bool("output-xml") || d.config.bool("input-xml");
     let root = d.root;
     let existing = d.nodes[root]
         .children
@@ -367,7 +368,10 @@ fn font_size(v: &str) -> Option<String> {
         return r.parse::<i32>().ok().map(|n| format!("{}%", 100 + n * 20));
     }
     if let Some(r) = v.strip_prefix('-') {
-        return r.parse::<i32>().ok().map(|n| format!("{}%", (100 - n * 20).max(20)));
+        return r
+            .parse::<i32>()
+            .ok()
+            .map(|n| format!("{}%", (100 - n * 20).max(20)));
     }
     v.parse::<i32>().ok().map(|n| abs(n).to_string())
 }
@@ -625,7 +629,12 @@ pub fn accessibility_checks(d: &mut Document) {
                 d.report(Level::Access, line, col, "<area> missing 'alt' text.");
             }
             "html" if !has("lang") && !has("xml:lang") => {
-                d.report(Level::Access, line, col, "document has no language declared.");
+                d.report(
+                    Level::Access,
+                    line,
+                    col,
+                    "document has no language declared.",
+                );
             }
             _ => {}
         }
