@@ -288,6 +288,7 @@ impl Vm {
     /// Runs a script with PHP's end-of-request sequence; returns the exit
     /// status.
     pub fn run_script(&mut self, src: &[u8], path: &[u8]) -> i32 {
+        self.arm_stack_limit();
         self.arm_memory_limit();
         // a script a wrapper runs another way (a tar/zip phar: its stub)
         let filtered = crate::builtins::streams::include_filter(self, path, src);
@@ -518,6 +519,23 @@ pub fn set_unlimited_memory(on: bool) {
     MEM_UNLIMITED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// (top of the stack, size) of the current thread.
+pub(crate) fn thread_stack() -> Option<(usize, usize)> {
+    // SAFETY: attr is initialized by pthread_getattr_np before it is read,
+    // and destroyed once.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let mut addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let ok = libc::pthread_attr_getstack(&attr, &mut addr, &mut size) == 0;
+        libc::pthread_attr_destroy(&mut attr);
+        ok.then(|| (addr as usize + size, size))
+    }
+}
+
 /// The allocator hook: remembers the request; when the headroom is gone
 /// too, reports the fatal error and ends the process at once.
 fn memory_hook(size: usize, hard: bool) {
@@ -558,6 +576,51 @@ fn memory_hook(size: usize, hard: bool) {
 }
 
 impl Vm {
+    /// Sets the native stack limit from zend.max_allowed_stack_size (0: all
+    /// of this thread's stack, -1: none) and zend.reserved_stack_size (what
+    /// is kept for the error's own handling).
+    pub fn arm_stack_limit(&mut self) {
+        // Native frames are much larger without optimization.
+        const AUTO_RESERVED: usize = if cfg!(debug_assertions) {
+            16 << 20
+        } else {
+            1 << 20
+        };
+        let ini = |vm: &Vm, k: &[u8]| vm.get_ini(k).map(|v| parse_size(&v)).unwrap_or(0);
+        let allowed = ini(self, b"zend.max_allowed_stack_size");
+        let reserved = ini(self, b"zend.reserved_stack_size").max(0) as usize;
+        if allowed < 0 {
+            goro_runtime::stack::set(0, 0);
+            return;
+        }
+        let Some((top, size)) = thread_stack() else {
+            return;
+        };
+        let bottom = top - size;
+        let hard_low = bottom + AUTO_RESERVED.min(size / 2);
+        let (low, shown) = if allowed == 0 {
+            let reserved = reserved.max(AUTO_RESERVED.min(size / 2));
+            (bottom + reserved, size - reserved)
+        } else {
+            let allowed = (allowed as usize).min(size);
+            let reserved = reserved.min(allowed);
+            ((top - allowed + reserved).max(hard_low), allowed - reserved)
+        };
+        goro_runtime::stack::set(low, shown);
+    }
+
+    /// Past the native stack limit: an Error, as PHP throws.
+    pub(crate) fn stack_exhausted(&mut self) -> Unwind {
+        let (_, size) = goro_runtime::stack::current();
+        let msg = format!(
+            "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
+        );
+        match self.throw::<()>("Error", &msg) {
+            Err(e) => e,
+            Ok(()) => unreachable!(),
+        }
+    }
+
     /// Starts enforcing memory_limit for this script (PHP manual:
     /// memory_limit).
     pub fn arm_memory_limit(&mut self) {

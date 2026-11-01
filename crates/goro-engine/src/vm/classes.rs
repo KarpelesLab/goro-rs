@@ -2729,7 +2729,13 @@ impl Vm {
             }
             return Ok(());
         }
-        let unit = match self.compile_source(src.as_bytes(), b"", false) {
+        // Stubs compile on first use, maybe near the stack limit (the Error
+        // class for the limit's own error): the limit is not for them.
+        let limit = goro_runtime::stack::current();
+        goro_runtime::stack::set(0, 0);
+        let unit = self.compile_source(src.as_bytes(), b"", false);
+        goro_runtime::stack::set(limit.0, limit.1);
+        let unit = match unit {
             Ok(u) => u,
             Err(e) => panic!(
                 "internal class stub {}: {:?}",

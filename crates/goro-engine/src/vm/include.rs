@@ -84,10 +84,13 @@ impl Vm {
         let opts = goro_syntax::ParseOptions {
             short_open_tag: self.ini_bool(b"short_open_tag", true),
             in_scripting: eval,
-            stack_limit: PARSER_STACK,
+            stack_limit: PARSER_STACK.min(goro_runtime::stack::remaining()),
             encoding_checks: false,
         };
         let prog = goro_syntax::parse_with(&arena, src, opts).map_err(|e| {
+            if e.message == goro_syntax::parser::STACK_EXHAUSTED {
+                return crate::compiler::stack_exhausted_error(e.line);
+            }
             crate::compiler::CompileError {
                 message: format!(
                     "{}{}",

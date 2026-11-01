@@ -501,6 +501,13 @@ impl Vm {
     pub fn run(&mut self) -> R<Value> {
         let entry = self.ex.frames.len();
         self.run_depth += 1;
+        // Each nested run is native recursion: the call does not start, and
+        // the caller's handlers see the error (tests Zend/tests/stack_limit/*).
+        if goro_runtime::stack::exceeded() {
+            self.unwind_frames(entry - 1);
+            self.run_depth -= 1;
+            return Err(self.stack_exhausted());
+        }
         let r = loop {
             match self.exec(entry) {
                 Ok(v) => break Ok(v),

@@ -82,6 +82,9 @@ impl std::error::Error for ParseError {}
 
 pub type PResult<T> = Result<T, ParseError>;
 
+/// The message of the parse error for running out of the stack budget.
+pub const STACK_EXHAUSTED: &str = "stack limit reached during parsing";
+
 /// Parser configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct ParseOptions {
@@ -359,10 +362,16 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn enter(&mut self) -> PResult<()> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH
-            || (self.stack_base != 0
-                && self.stack_base.abs_diff(stack_position()) > self.stack_limit)
-        {
+        if self.stack_base != 0 && self.stack_base.abs_diff(stack_position()) > self.stack_limit {
+            let t = *self.peek();
+            return Err(ParseError {
+                kind: ErrorKind::Compile,
+                message: STACK_EXHAUSTED.into(),
+                line: t.line,
+                offset: t.start,
+            });
+        }
+        if self.depth > MAX_DEPTH {
             let t = *self.peek();
             return Err(ParseError {
                 kind: ErrorKind::Parse,

@@ -78,6 +78,7 @@ impl RunOptions {
 
 /// Runs the -B/-R/-F/-E line mode.
 fn run_lines(vm: &mut Vm, lm: &LineMode) -> i32 {
+    vm.arm_stack_limit();
     vm.arm_memory_limit();
     use goro_runtime::{Key, Value};
     let code = |c: &[u8]| {

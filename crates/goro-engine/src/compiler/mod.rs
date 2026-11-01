@@ -2144,3 +2144,16 @@ thread_local! {
 pub(crate) fn debug_markers() -> bool {
     DEBUG_MARKERS.with(|c| c.get())
 }
+
+/// The fatal error for running out of native stack while compiling (tests
+/// Zend/tests/stack_limit/stack_limit_012, 013).
+pub(crate) fn stack_exhausted_error(line: u32) -> CompileError {
+    let (_, size) = goro_runtime::stack::current();
+    CompileError {
+        notices: Vec::new(),
+        message: format!(
+            "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression"
+        ),
+        line,
+    }
+}

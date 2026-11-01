@@ -51,6 +51,8 @@ pub struct FiberData {
     constructed: bool,
     /// error_reporting and `@` nesting of the fiber while it is suspended.
     er: Option<(i64, Vec<i64>)>,
+    /// The fiber's native stack limit (see `goro_runtime::stack`).
+    stack_limit: (usize, usize),
 }
 
 impl goro_runtime::NativeData for FiberData {
@@ -110,6 +112,7 @@ fn fiber_hooks() -> NativeHooks {
                 threw: false,
                 force_closing: false,
                 constructed: false,
+                stack_limit: (0, 0),
                 er: None,
             }));
         }),
@@ -178,8 +181,15 @@ impl Vm {
             }
         }
         self.fiber_stack.push(f.clone());
-        with_fiber(f, |d| d.status = FiberStatus::Running);
+        let limit = with_fiber(f, |d| {
+            d.status = FiberStatus::Running;
+            d.stack_limit
+        })
+        .unwrap();
+        let caller_limit = goro_runtime::stack::current();
+        goro_runtime::stack::set(limit.0, limit.1);
         let r = co.resume(input);
+        goro_runtime::stack::set(caller_limit.0, caller_limit.1);
         let fiber_er = (
             self.ini.error_reporting,
             std::mem::take(&mut self.err.silence),
@@ -252,6 +262,20 @@ fn fiber_start(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Ok(s) => s,
         Err(_) => return fiber_error(vm, "Fiber stack allocate failed"),
     };
+    // Room for the error's own handling, within what a small stack allows.
+    let limit = {
+        const RESERVED: usize = if cfg!(debug_assertions) {
+            4 << 20
+        } else {
+            256 << 10
+        };
+        use corosensei::stack::Stack;
+        let (top, bottom) = (stack.base().get(), stack.limit().get());
+        let size = top - bottom;
+        let reserved = RESERVED.min(size / 4);
+        (bottom + reserved, size - reserved)
+    };
+    with_fiber(&o, |d| d.stack_limit = limit);
     let vm_ptr = vm as *mut Vm;
     let weak = o.downgrade();
     let co: FiberCo = Coroutine::with_stack(
