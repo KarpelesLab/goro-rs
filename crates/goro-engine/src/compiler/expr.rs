@@ -2019,6 +2019,23 @@ impl<'a> Compiler<'a> {
                     self.free(v);
                     self.emit(Op::Send { src: v, arg: i });
                 }
+                // `f($a = &$b)`: a by-reference parameter gets the reference
+                // (test Zend/tests/bug72038).
+                ExprKind::AssignRef { target, .. } if matches!(target.kind, ExprKind::Variable(n) if n != b"this" && !is_superglobal(n)) =>
+                {
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
+                    self.emit(Op::Send { src: v, arg: i });
+                    let j2 = self.emit(Op::Jmp { t: 0 });
+                    self.patch_here(j);
+                    let ExprKind::Variable(n) = target.kind else {
+                        unreachable!()
+                    };
+                    let var = self.cv(n);
+                    self.emit(Op::SendVar { var, arg: i });
+                    self.patch_here(j2);
+                }
                 // A place through a temporary (`C[0]`, `func_get_args()[0]`):
                 // a value, or an error for a by-reference parameter (test
                 // Zend/tests/gh12102_*).
