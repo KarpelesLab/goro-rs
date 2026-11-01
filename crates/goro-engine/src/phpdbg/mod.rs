@@ -708,7 +708,7 @@ pub(crate) fn on_marker(vm: &mut Vm) -> R<()> {
     if code.file.is_empty() || code.flags & fflags::CONST_EXPR != 0 {
         return Ok(());
     }
-    let ip = vm.ex.ip.saturating_sub(1);
+    let ip = vm.ex.ip().saturating_sub(1);
     let line = code.line_of(ip);
     let cid = codep as usize;
     let next = code.ops.get(ip + 1).copied();
@@ -859,9 +859,9 @@ fn will_be_caught(vm: &Vm, ex: &ObjRef) -> bool {
             (0..n).rev().any(|i| {
                 let f = &state.frames[i];
                 let ip = if i == n - 1 {
-                    state.ip.saturating_sub(1)
+                    state.ip().saturating_sub(1)
                 } else {
-                    (f.ip as usize).saturating_sub(1)
+                    (f.ip() as usize).saturating_sub(1)
                 } as u32;
                 frame_catches(vm, f.code(), ip, &cls)
             })
@@ -915,7 +915,7 @@ pub(crate) fn on_exception(vm: &mut Vm, ex: &ObjRef) -> R<()> {
     }
     // SAFETY: the running frame's code.
     let code: &FuncCode = unsafe { &*codep };
-    let ip = vm.ex.ip.saturating_sub(1);
+    let ip = vm.ex.ip().saturating_sub(1);
     let line = code.line_of(ip);
     let file = code.file.to_vec();
     let origin = with(|d| {

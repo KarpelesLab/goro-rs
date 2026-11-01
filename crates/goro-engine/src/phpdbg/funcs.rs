@@ -62,7 +62,7 @@ fn nothing(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 /// A breakpoint at the next statement (test
 /// sapi/phpdbg/tests/phpdbg_break_next.phpt).
 fn break_next(vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    let addr = vm.ex.top.ops as usize + vm.ex.ip * std::mem::size_of::<Op>();
+    let addr = vm.ex.top.ops as usize + vm.ex.ip() * std::mem::size_of::<Op>();
     add_bp(vm, BpKind::Next { addr, done: false });
     Ok(Value::Null)
 }
