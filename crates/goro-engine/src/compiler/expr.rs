@@ -489,6 +489,34 @@ impl<'a> Compiler<'a> {
                     });
                     return Ok(d);
                 }
+                // `$a[$i][$j]` with operands that can't change anything.
+                if let ExprKind::Index {
+                    base: inner,
+                    index: Some(k1),
+                } = &base.kind
+                    && let ExprKind::Variable(n) = inner.kind
+                    && !is_superglobal(n)
+                    && n != b"this"
+                    && super::is_simple_operand(k1)
+                    && super::is_simple_operand(index)
+                    && !super::debug_markers()
+                {
+                    let b = self.expr(inner)?;
+                    let k1 = self.expr(k1)?;
+                    let k2 = self.expr(index)?;
+                    self.free(k2);
+                    self.free(k1);
+                    self.free(b);
+                    let d = self.tmp();
+                    self.f.line = line;
+                    self.emit(Op::FetchDim2 {
+                        dst: d,
+                        base: b,
+                        k1,
+                        k2,
+                    });
+                    return Ok(d);
+                }
                 let b = self.chain_base(base)?;
                 let k = self.expr(index)?;
                 self.free(b);

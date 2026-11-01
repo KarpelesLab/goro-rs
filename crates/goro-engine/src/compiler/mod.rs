@@ -2108,7 +2108,7 @@ fn is_shebang_or_empty(t: &[u8]) -> bool {
 }
 
 /// Operands that compile to a variable or constant (no instruction).
-fn is_simple_operand(e: &Expr<'_>) -> bool {
+pub(crate) fn is_simple_operand(e: &Expr<'_>) -> bool {
     match &e.kind {
         ExprKind::Variable(n) => *n != b"this",
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::String(..) => true,

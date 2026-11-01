@@ -660,7 +660,7 @@ fn zend_name(op: &Op) -> &'static str {
         Op::Yield { .. } => "ZEND_YIELD",
         Op::YieldFrom { .. } => "ZEND_YIELD_FROM",
         Op::Catch { .. } => "ZEND_CATCH",
-        Op::FetchDim { .. } => "ZEND_FETCH_DIM_R",
+        Op::FetchDim { .. } | Op::FetchDim2 { .. } => "ZEND_FETCH_DIM_R",
         Op::FetchProp { .. } => "ZEND_FETCH_OBJ_R",
         Op::Clone { .. } => "ZEND_CLONE",
         Op::UnsetVar { .. } => "ZEND_UNSET_CV",

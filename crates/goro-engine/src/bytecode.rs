@@ -457,6 +457,14 @@ pub enum Op {
         src: Reg,
     },
     /// `dst = base[key]` (read).
+    /// `base[k1][k2]` for reading, without copying the inner array's handle
+    /// to a temporary (`dst` is a temporary).
+    FetchDim2 {
+        dst: Reg,
+        base: Reg,
+        k1: Reg,
+        k2: Reg,
+    },
     FetchDim {
         dst: Reg,
         base: Reg,

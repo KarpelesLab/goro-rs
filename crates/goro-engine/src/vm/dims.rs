@@ -60,6 +60,56 @@ pub(crate) fn key_desc(k: &Key) -> String {
 impl Vm {
     // ------------------------------------------------------------ reads
 
+    /// `base[k1][k2]` for reading; anything but found elements of arrays
+    /// goes as two fetches.
+    pub(crate) fn op_fetch_dim2(&mut self, dst: Reg, base: Reg, k1: Reg, k2: Reg) -> R<()> {
+        #[inline(always)]
+        fn lookup<'a>(a: &'a PhpArray, k: Option<&Value>) -> Option<&'a Value> {
+            match k {
+                Some(Value::Int(i)) => a.get_int(*i),
+                Some(Value::Str(s)) => a.get_str(s),
+                _ => None,
+            }
+        }
+        #[inline(always)]
+        fn read(c: &Value, k1: Option<&Value>, k2: Option<&Value>) -> Option<Value> {
+            let Value::Array(a) = c else { return None };
+            match lookup(a, k1)? {
+                Value::Array(b) => lookup(b, k2).map(Value::deref),
+                Value::Ref(r) => match &*r.borrow() {
+                    Value::Array(b) => lookup(b, k2).map(Value::deref),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let found = match self.peek(base) {
+            Some(Value::Ref(r)) => read(&r.borrow(), self.peek(k1), self.peek(k2)),
+            Some(c) => read(c, self.peek(k1), self.peek(k2)),
+            None => None,
+        };
+        match found {
+            Some(Value::Int(i)) => {
+                self.put_int(dst, i);
+                Ok(())
+            }
+            Some(Value::Float(f)) => {
+                if let Err(v) = self.try_put_scalar(dst, Value::Float(f)) {
+                    self.put(dst, v);
+                }
+                Ok(())
+            }
+            Some(v) => {
+                self.put(dst, v);
+                Ok(())
+            }
+            None => {
+                self.op_fetch_dim(dst, base, k1, DimMode::Read)?;
+                self.op_fetch_dim(dst, dst, k2, DimMode::Read)
+            }
+        }
+    }
+
     pub(crate) fn op_fetch_dim(&mut self, dst: Reg, base: Reg, key: Reg, mode: DimMode) -> R<()> {
         // Fast path: array[int|string], the array possibly behind a
         // reference (a by-reference parameter).

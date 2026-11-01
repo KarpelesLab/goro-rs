@@ -918,6 +918,7 @@ impl Vm {
                 Op::AddElem { arr, key, val } => self.op_add_elem(arr, key, val, false)?,
                 Op::AddElemRef { arr, key, val } => self.op_add_elem(arr, key, val, true)?,
                 Op::AddSpread { arr, src } => self.op_add_spread(arr, src)?,
+                Op::FetchDim2 { dst, base, k1, k2 } => self.op_fetch_dim2(dst, base, k1, k2)?,
                 Op::FetchDim { dst, base, key } => {
                     self.op_fetch_dim(dst, base, key, super::dims::DimMode::Read)?
                 }
