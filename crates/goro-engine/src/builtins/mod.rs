@@ -11,6 +11,7 @@ pub mod core_funcs;
 pub mod ctype;
 pub mod curl;
 pub mod date;
+pub mod dba;
 pub mod dir;
 pub mod dom;
 pub mod enums;
@@ -79,6 +80,7 @@ pub mod xml;
 pub mod xmlreader;
 pub mod xmlstore;
 pub mod xmlwriter;
+pub mod xsl;
 pub mod zend_test;
 pub mod zip;
 pub mod zlib;
@@ -155,6 +157,8 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlwriter::MODULE,
         &xmlreader::MODULE,
         &simplexml::MODULE,
+        &xsl::MODULE,
+        &dba::MODULE,
         &soap::MODULE,
         &openssl::MODULE,
         &opcache::MODULE,
