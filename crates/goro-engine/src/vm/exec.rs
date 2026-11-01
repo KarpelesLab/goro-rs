@@ -502,7 +502,12 @@ impl Vm {
             let op = unsafe { &*self.ex.top.ops.add(ip) };
             self.ex.ip = ip + 1;
             match *op {
-                Op::Nop | Op::Ticks => {}
+                Op::Nop => {}
+                Op::Ticks => {
+                    if let Some(h) = self.debugger {
+                        (h.marker)(self)?;
+                    }
+                }
                 Op::Assign { dst, src } => {
                     // A scalar over a scalar: in place, nothing released.
                     let scalar = match self.peek(src) {

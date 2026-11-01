@@ -24,6 +24,9 @@ options:
   --php-cgi PATH      CGI binary for tests with request sections (GET, POST,
                       COOKIE, EXPECTHEADERS...); default: `goro --cgi` with
                       the default --php, else php-cgi next to --php
+  --phpdbg PATH       phpdbg binary for tests with a PHPDBG section; default:
+                      `goro --phpdbg` with the default --php, else phpdbg
+                      next to --php
   --timeout SECS      per-run timeout (default 60)
   -d KEY=VALUE        extra ini setting for every run (after the defaults)
   --root DIR          test-suite root: working directory of the runs and
@@ -54,6 +57,7 @@ struct Options {
     jobs: usize,
     php: Option<PathBuf>,
     php_cgi: Option<PathBuf>,
+    phpdbg: Option<PathBuf>,
     timeout: u64,
     ini: Vec<(String, String)>,
     root: Option<PathBuf>,
@@ -80,6 +84,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         jobs: default_jobs(),
         php: None,
         php_cgi: None,
+        phpdbg: None,
         timeout: 60,
         ini: Vec::new(),
         root: None,
@@ -131,6 +136,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
             }
             "--php" => o.php = Some(value(&mut it, "--php")?.into()),
             "--php-cgi" => o.php_cgi = Some(value(&mut it, "--php-cgi")?.into()),
+            "--phpdbg" => o.phpdbg = Some(value(&mut it, "--phpdbg")?.into()),
             "--timeout" => {
                 let v = value(&mut it, "--timeout")?;
                 o.timeout = v
@@ -280,6 +286,46 @@ fn cgi_link(php: &Path) -> Option<PathBuf> {
             let _ = std::fs::remove_dir(&dir);
             None
         }
+    }
+}
+
+fn phpdbg_link_dir_name() -> String {
+    format!("goro-phpt-phpdbg-{}", std::process::id())
+}
+
+/// A `phpdbg` symbolic link to `php` (goro is phpdbg when run under that
+/// name), in a directory of its own under the temporary directory.
+fn phpdbg_link(php: &Path) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join(phpdbg_link_dir_name());
+    std::fs::create_dir(&dir).ok()?;
+    let link = dir.join("phpdbg");
+    match std::os::unix::fs::symlink(php, &link) {
+        Ok(()) => Some(link),
+        Err(_) => {
+            let _ = std::fs::remove_dir(&dir);
+            None
+        }
+    }
+}
+
+/// How to run phpdbg: `--phpdbg PATH`, else goro itself (as a `phpdbg`
+/// link, or `goro --phpdbg`), else a phpdbg next to `--php`.
+fn phpdbg_command(o: &Options, php: &Path) -> Option<runner::CgiCommand> {
+    let one = |program: PathBuf| runner::CgiCommand {
+        program,
+        args: Vec::new(),
+    };
+    match (&o.phpdbg, &o.php) {
+        (Some(p), _) => Some(one(find_program(p))),
+        (None, None) => Some(phpdbg_link(php).map(one).unwrap_or(runner::CgiCommand {
+            program: php.to_path_buf(),
+            args: vec!["--phpdbg".into()],
+        })),
+        (None, Some(_)) => php
+            .parent()
+            .map(|d| d.join("phpdbg"))
+            .filter(|c| c.is_file())
+            .map(one),
     }
 }
 
@@ -441,6 +487,7 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         heavy: o.heavy,
         online: o.online,
         cgi,
+        phpdbg: phpdbg_command(o, &php),
     };
     let jobs = schedule::jobs(&files);
     let all: Mutex<(Vec<TestResult>, Counts)> =
@@ -480,6 +527,15 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         && dir
             .file_name()
             .is_some_and(|n| n.to_string_lossy() == cgi_link_dir_name())
+    {
+        let _ = std::fs::remove_file(&c.program);
+        let _ = std::fs::remove_dir(dir);
+    }
+    if let Some(c) = &cfg.phpdbg
+        && let Some(dir) = c.program.parent()
+        && dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == phpdbg_link_dir_name())
     {
         let _ = std::fs::remove_file(&c.program);
         let _ = std::fs::remove_dir(dir);

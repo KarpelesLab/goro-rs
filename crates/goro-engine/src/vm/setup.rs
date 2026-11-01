@@ -125,6 +125,7 @@ impl Vm {
             compiling_eval: false,
             ex_parents: Vec::new(),
             fiber_stack: Vec::new(),
+            debugger: None,
         };
         for m in modules {
             vm.register_module(m);

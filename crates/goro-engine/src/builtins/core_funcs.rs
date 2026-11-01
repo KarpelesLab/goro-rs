@@ -2146,6 +2146,8 @@ fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         "cli-server"
     } else if vm.out.sapi.cgi {
         "cgi-fcgi"
+    } else if vm.out.sapi.phpdbg {
+        "phpdbg"
     } else {
         "cli"
     })))

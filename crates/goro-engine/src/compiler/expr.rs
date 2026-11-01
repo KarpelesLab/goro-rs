@@ -1462,6 +1462,11 @@ impl<'a> Compiler<'a> {
         for (i, arm) in arms.iter().enumerate() {
             starts[i] = self.here();
             self.f.line = arm.body.span.line;
+            if super::debug_markers() {
+                // A debugger can stop at an arm (tests
+                // sapi/phpdbg/tests/match_breakpoints_*.phpt).
+                self.emit(Op::Ticks);
+            }
             let v = self.expr(&arm.body)?;
             self.free(v);
             self.emit(Op::Copy { dst: d, src: v });

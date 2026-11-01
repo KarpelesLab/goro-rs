@@ -837,7 +837,8 @@ pub enum Op {
         src: Reg,
         ty: u32,
     },
-    /// Line marker for ticks / statements (unused for now).
+    /// Statement marker for a debugger (emitted only with
+    /// `compiler::DEBUG_MARKERS`): calls `Vm::debugger`'s hook.
     Ticks,
 }
 

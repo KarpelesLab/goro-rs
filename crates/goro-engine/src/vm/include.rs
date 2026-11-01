@@ -605,6 +605,31 @@ impl Vm {
         self.run_attached(src, file, false, "front controller")
     }
 
+    /// Runs code in the scope of the running frame, as eval() does (a
+    /// debugger's `ev` command); its frame shows as `unknown()` in traces.
+    pub fn eval_in_frame(&mut self, src: &[u8], file: &[u8]) -> R<Value> {
+        self.run_attached(src, file, true, "debugger")
+    }
+
+    /// Compiles a script before running it, as phpdbg does: compile errors
+    /// are reported as a run reports them, and the hoisted functions and
+    /// early-bound classes are declared. `None` after an error.
+    pub fn precompile(&mut self, src: &[u8], file: &[u8]) -> Option<crate::compiler::Unit> {
+        match self.compile_source(src, file, false) {
+            Ok(u) => {
+                self.units.push(u.main.clone());
+                match self.load_unit(&u) {
+                    Ok(()) => Some(u),
+                    Err(_) => None,
+                }
+            }
+            Err(e) => {
+                self.compile_error(e, file, false);
+                None
+            }
+        }
+    }
+
     /// Compiles and runs code in the current scope (include, eval).
     fn run_attached(&mut self, src: &[u8], file: &[u8], eval: bool, what: &str) -> R<Value> {
         let unit = match self.compile_source(src, file, eval) {
@@ -625,6 +650,7 @@ impl Vm {
             "require" => 3,
             "require_once" => 4,
             "front controller" => 6,
+            "debugger" => 7,
             _ => 5,
         };
         // The owner of the variables.

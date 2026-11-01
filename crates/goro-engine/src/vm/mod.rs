@@ -604,6 +604,20 @@ pub struct Vm {
     pub ex_parents: Vec<ExecState>,
     /// Running fibers, innermost last.
     pub fiber_stack: Vec<ObjRef>,
+    /// A debugger's hooks (phpdbg); code compiled with statement markers
+    /// calls them.
+    pub debugger: Option<&'static DebugHooks>,
+}
+
+/// Debugger callbacks (the phpdbg SAPI). `marker` runs at each statement
+/// marker (`Op::Ticks`, emitted only when
+/// [`crate::compiler::DEBUG_MARKERS`] is set), with the instruction pointer
+/// past the marker; `exception` runs each time the dispatcher looks for a
+/// handler of an exception in a frame. An error they return unwinds the
+/// script.
+pub struct DebugHooks {
+    pub marker: fn(&mut Vm) -> R<()>,
+    pub exception: fn(&mut Vm, &ObjRef) -> R<()>,
 }
 
 pub mod resources {

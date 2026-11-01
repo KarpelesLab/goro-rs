@@ -53,6 +53,8 @@ fn usage() -> &'static str {
 
   --cgi            Run as the CGI SAPI (as when invoked as php-cgi); see
                    `goro --cgi -h`.
+  --phpdbg         Run as the phpdbg debugger (as when invoked as phpdbg);
+                   see `goro --phpdbg -h`.
 
 "
 }
@@ -177,6 +179,22 @@ fn cgi(args: Vec<OsString>) -> i32 {
     goro_engine::cgi::run(opts)
 }
 
+/// The phpdbg SAPI's command line (PHP manual: phpdbg, Command line
+/// options).
+fn phpdbg(args: Vec<OsString>) -> i32 {
+    let args: Vec<Vec<u8>> = args.into_iter().map(|a| a.into_vec()).collect();
+    match goro_engine::phpdbg::parse_args(&args) {
+        Ok(o) => goro_engine::phpdbg::main(o),
+        Err(e) => {
+            if !e.is_empty() {
+                eprintln!("phpdbg: {e}");
+            }
+            print!("{}", goro_engine::phpdbg::USAGE);
+            if e.is_empty() { 0 } else { 1 }
+        }
+    }
+}
+
 /// The build date, for `-v` (from SOURCE_DATE_EPOCH-free compile time is not
 /// available without a build script: a fixed text).
 const BUILT: &str = "Jan  1 2026 00:00:00";
@@ -207,12 +225,29 @@ fn main() {
     } else {
         (as_cgi, args)
     };
+    // The phpdbg SAPI: `goro --phpdbg ...`, or goro run as phpdbg.
+    let as_phpdbg = std::env::args_os().next().is_some_and(|a0| {
+        std::path::Path::new(&a0)
+            .file_name()
+            .is_some_and(|n| n.as_bytes().starts_with(b"phpdbg"))
+    });
+    let (phpdbg_mode, args) = if !cgi_mode && args.first().is_some_and(|a| a == "--phpdbg") {
+        (true, args[1..].to_vec())
+    } else {
+        (as_phpdbg && !cgi_mode, args)
+    };
     let code = std::thread::Builder::new()
         .name("php".into())
         .stack_size(STACK_SIZE)
         .spawn(move || {
             let pid = std::process::id();
-            let code = if cgi_mode { cgi(args) } else { cli(args) };
+            let code = if phpdbg_mode {
+                phpdbg(args)
+            } else if cgi_mode {
+                cgi(args)
+            } else {
+                cli(args)
+            };
             // A child of pcntl_fork() has no main thread to return to.
             if std::process::id() != pid {
                 std::process::exit(code);
