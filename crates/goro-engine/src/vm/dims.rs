@@ -188,8 +188,9 @@ impl Vm {
                         if let goro_runtime::Number::Int(i) = p.num {
                             i
                         } else {
-                            self.warn("String offset cast occurred")?;
-                            p.num.to_f64() as i64
+                            // "14.5" (test Zend/tests/offset_string).
+                            return self
+                                .type_error("Cannot access offset of type string on string");
                         }
                     } else if p.kind == goro_runtime::numeric::Numericness::Leading {
                         self.warn(&format!(
@@ -210,10 +211,10 @@ impl Vm {
                             goro_runtime::convert::float_repr(*f)
                         ))?;
                     }
-                    return Ok(Some(*f as i64));
+                    return Ok(Some(goro_runtime::convert::float_to_int_wrapping(*f)));
                 }
                 self.warn("String offset cast occurred")?;
-                *f as i64
+                goro_runtime::convert::float_to_int_wrapping(*f)
             }
             Value::Bool(b) => {
                 if !quiet {
@@ -1260,7 +1261,11 @@ impl Vm {
                 let obj = match unsafe { &*cur } {
                     Value::Object(o) => o.clone(),
                     other => {
-                        if last && matches!(action, PathAction::Unset) {
+                        // unset() of something under null does nothing (test
+                        // Zend/tests/bug78644).
+                        if matches!(action, PathAction::Unset)
+                            && (last || matches!(other, Value::Null))
+                        {
                             return Ok(Value::Null);
                         }
                         let t = match other {
@@ -1475,6 +1480,16 @@ impl Vm {
                 return self.throw("Error", "Cannot use a scalar value as an array");
             }
         }
+        // Test Zend/tests/illegal_offset_unset_isset_empty.
+        if is_unset
+            && let Some(k) = &key
+            && matches!(k.deref(), Value::Array(_) | Value::Object(_))
+        {
+            return self.type_error(&format!(
+                "Cannot unset offset of type {} on array",
+                k.deref().type_name_for_error()
+            ));
+        }
         let k = match key {
             None => None,
             Some(k) => Some(self.to_key(&k, "array")?),
@@ -1657,9 +1672,11 @@ impl Vm {
                 None => {
                     let p = goro_runtime::numeric::parse_numeric(s);
                     match p.kind {
+                        // "1.0E+121" is no integer offset (test
+                        // Zend/tests/bug80972).
                         goro_runtime::numeric::Numericness::Numeric => {
-                            self.warn("String offset cast occurred")?;
-                            p.num.to_f64() as i64
+                            return self
+                                .type_error("Cannot access offset of type string on string");
                         }
                         // A leading-numeric offset (observed on PHP 8.5;
                         // test tests/lang/bug19943).
@@ -1679,7 +1696,7 @@ impl Vm {
             },
             Value::Float(f) => {
                 self.warn("String offset cast occurred")?;
-                *f as i64
+                goro_runtime::convert::float_to_int_wrapping(*f)
             }
             Value::Bool(b) => {
                 self.warn("String offset cast occurred")?;

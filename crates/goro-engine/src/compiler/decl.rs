@@ -831,8 +831,10 @@ impl<'a> Compiler<'a> {
                         );
                     }
                     if lname == b"self" {
+                        // An anonymous class's type stays "self" in messages
+                        // (test Zend/tests/gh19304).
                         match &self.class {
-                            Some(c) if !c.is_trait => c.name.to_vec(),
+                            Some(c) if !c.is_trait && !c.name.contains(&0) => c.name.to_vec(),
                             _ => b"self".to_vec(),
                         }
                     } else {
@@ -3105,6 +3107,8 @@ pub fn parse_native_sig(
     let ret_text = ret.as_ref().map(|t| t.display());
     let variadic = params.last().is_some_and(|p| p.variadic);
     Ok(crate::func::NativeSig {
+        byref: byref_mask(&params),
+        quick: false,
         params,
         ret,
         num_required,

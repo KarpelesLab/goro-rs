@@ -26,7 +26,9 @@
 //! - Tests with request sections (GET, POST, COOKIE, CGI...) or
 //!   EXPECTHEADERS run through the CGI SAPI (see [`crate::cgi`]), with
 //!   `-C` so the working directory stays the root; the SKIPIF and CLEAN
-//!   code still runs with the CLI. Tests needing phpdbg are skipped.
+//!   code still runs with the CLI.
+//! - Tests with a PHPDBG section run under phpdbg with the section's
+//!   commands on stdin (see `exec_phpdbg`); SKIPIF and CLEAN use the CLI.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -107,6 +109,8 @@ pub struct Config {
     pub online: bool,
     /// How to run the CGI SAPI; none: tests needing it are skipped.
     pub cgi: Option<CgiCommand>,
+    /// How to run phpdbg; none: tests with a PHPDBG section are skipped.
+    pub phpdbg: Option<CgiCommand>,
     /// For the FPM tests: a `bin/php` path whose `../sbin/php-fpm` is the
     /// FPM binary, given to them as TEST_PHP_EXECUTABLE (where
     /// sapi/fpm/tests/tester.inc looks for php-fpm).
@@ -148,6 +152,10 @@ pub const HEAVY_TESTS: &[&str] = &[
     "gh15613.phpt",
     // a 2 GB string with memory_limit=6144M
     "soap_qname_crash.phpt",
+    // a 4.3 GB string: more than the 4 GB per-process cap
+    "gh20620.phpt",
+    // "requires about 8G RAM" (its SKIPIF looks at free memory)
+    "gmp_setbit_long.phpt",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -407,6 +415,18 @@ pub fn base_env(cfg: &Config) -> Env {
             c.program.clone().into_os_string(),
         ));
     }
+    // run-tests' names for the phpdbg binary (sapi/phpdbg/tests/
+    // bug73615.phpt runs `$phpdbg -qn` through a shell).
+    if let Some(c) = &cfg.phpdbg {
+        let mut words = vec![c.program.to_string_lossy().into_owned()];
+        words.extend(c.args.iter().map(|a| a.to_string_lossy().into_owned()));
+        let quoted: Vec<String> = words.iter().map(|w| shell_quote(w)).collect();
+        env.push(("TEST_PHPDBG_EXECUTABLE".into(), words.join(" ").into()));
+        env.push((
+            "TEST_PHPDBG_EXECUTABLE_ESCAPED".into(),
+            quoted.join(" ").into(),
+        ));
+    }
     env
 }
 
@@ -535,6 +555,41 @@ fn exec_cgi(
         cwd: &cfg.root,
         env: &env,
         stdin: req.body.as_deref(),
+        capture,
+        timeout: cfg.timeout,
+        mem_limit: cfg.mem_limit,
+    })
+}
+
+/// Runs the test under phpdbg: the PHPDBG section's commands on stdin,
+/// `-q` (no banner), `-b` (no colours) and `-I` (no .phpdbginit), the
+/// test's ini settings, then the script and its arguments (`--` and the
+/// ARGS stay in `$argv`: test sapi/phpdbg/tests/run_001.phpt).
+fn exec_phpdbg(
+    cfg: &Config,
+    dbg: &CgiCommand,
+    prep: &Prepared,
+    script: Option<&Path>,
+    args: &[String],
+    commands: &[u8],
+    capture: Capture,
+) -> std::io::Result<RunOutput> {
+    let mut argv = dbg.args.clone();
+    argv.extend(["-q".into(), "-b".into(), "-I".into()]);
+    argv.extend(prep.ini_args.iter().cloned());
+    if let Some(s) = script {
+        argv.push(s.into());
+        if !args.is_empty() {
+            argv.push("--".into());
+            argv.extend(args.iter().map(OsString::from));
+        }
+    }
+    run(&Run {
+        program: &dbg.program,
+        args: &argv,
+        cwd: &cfg.root,
+        env: &prep.env,
+        stdin: Some(commands),
         capture,
         timeout: cfg.timeout,
         mem_limit: cfg.mem_limit,
@@ -699,9 +754,18 @@ fn run_single_inner(
             );
         }
     };
-    if phpt.has("PHPDBG") {
-        return result(name, &title, Status::Skip, "needs phpdbg (--PHPDBG--)");
-    }
+    let phpdbg = match (phpt.get("PHPDBG"), &cfg.phpdbg) {
+        (None, _) => None,
+        (Some(cmds), Some(c)) => Some((c, cmds)),
+        (Some(_), None) => {
+            return result(
+                name,
+                &title,
+                Status::Skip,
+                "needs phpdbg (--PHPDBG--), and no phpdbg binary was found",
+            );
+        }
+    };
     let prep = match prepare(cfg, path, phpt, extra_env) {
         Ok(p) => p,
         Err((st, why)) => return result(name, &title, st, why),
@@ -725,12 +789,15 @@ fn run_single_inner(
         Ok(m) => m,
         Err(e) => return result(name, &title, Status::Bork, e),
     };
+    // A PHPDBG test may give only commands (no script to load).
+    let no_script = phpdbg.is_some() && phpt.file_section().is_none();
     let script = match script_body(phpt, &prep.dir) {
         Ok(s) => s,
+        Err(_) if no_script => Vec::new(),
         Err(e) => return result(name, &title, Status::Bork, e),
     };
     let script_path = prep.file(".php");
-    if let Err(e) = std::fs::write(&script_path, &script) {
+    if !no_script && let Err(e) = std::fs::write(&script_path, &script) {
         return result(
             name,
             &title,
@@ -759,8 +826,12 @@ fn run_single_inner(
     let mut attempts = if flaky { 2 } else { 1 };
     let outcome = loop {
         attempts -= 1;
-        let out = match (cgi, &request) {
-            (Some(c), Some(req)) => exec_cgi(cfg, c, &prep, &script_path, &args, req, capture),
+        let out = match (cgi, &request, phpdbg) {
+            (_, _, Some((d, cmds))) => {
+                let script = (!no_script).then_some(script_path.as_path());
+                exec_phpdbg(cfg, d, &prep, script, &args, cmds, capture)
+            }
+            (Some(c), Some(req), _) => exec_cgi(cfg, c, &prep, &script_path, &args, req, capture),
             _ => exec(cfg, &prep, &script_path, &args, stdin, capture),
         };
         let out = match out {

@@ -350,7 +350,7 @@ pub fn open_named(
             Value::Str(PhpStr::new(path)),
             Value::Str(PhpStr::new(mode)),
             Value::Int(options),
-            Value::Ref(opened),
+            Value::Ref(opened.clone()),
         ],
     )?;
     let ok = match r {
@@ -378,6 +378,9 @@ pub fn open_named(
             ))?;
         }
         return Ok(None);
+    }
+    if let Value::Str(p) = opened.get() {
+        OPENED_PATH.with(|c| *c.borrow_mut() = Some(p));
     }
     let mut s = Stream::new(
         Backing::User { obj: o },
@@ -702,9 +705,11 @@ pub fn read_all(vm: &mut Vm, fname: &str, class: &PhpStr, path: &[u8]) -> R<Opti
     // (PHP manual: allow_url_include; test file/include_userstream_002.phpt)
     // opens made for an include, also from the wrapper's own code (test
     // file/include_userstream_002.phpt)
+    OPENED_PATH.with(|c| c.borrow_mut().take());
     INCLUDING.with(|c| c.set(c.get() + 1));
     let opened = open_named(vm, fname, class, path, b"rb", false);
     INCLUDING.with(|c| c.set(c.get() - 1));
+    let opened_path = OPENED_PATH.with(|c| c.borrow_mut().take());
     let Some(mut s) = opened? else {
         return Ok(None);
     };
@@ -721,5 +726,18 @@ pub fn read_all(vm: &mut Vm, fname: &str, class: &PhpStr, path: &[u8]) -> R<Opti
         let o = obj.clone();
         call(vm, &o, b"stream_close", Vec::new())?;
     }
+    OPENED_PATH.with(|c| *c.borrow_mut() = opened_path);
     Ok(Some(out))
+}
+
+thread_local! {
+    /// The path a wrapper's stream_open() gave in `$opened_path`.
+    static OPENED_PATH: std::cell::RefCell<Option<PhpStr>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The `$opened_path` of the code [`read_all`] just read: the included
+/// file's name, as `__FILE__` shows it (test
+/// sapi/phpdbg/tests/phpdbg_get_executable_stream_wrapper.phpt).
+pub fn take_opened_path() -> Option<PhpStr> {
+    OPENED_PATH.with(|c| c.borrow_mut().take())
 }

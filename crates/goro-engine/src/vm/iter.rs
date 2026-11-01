@@ -457,6 +457,15 @@ impl Vm {
                     }
                 };
                 let Some((k, er)) = next else {
+                    // The variable stopped being an array during the loop
+                    // (test Zend/tests/bug79792).
+                    let cur = r.get();
+                    if !matches!(cur, Value::Array(_) | Value::Object(_)) {
+                        self.warn(&format!(
+                            "foreach() argument must be of type array|object, {} given",
+                            Vm::type_name_given(&cur)
+                        ))?;
+                    }
                     return Ok(false);
                 };
                 let p = self.slot_ptr(val);
@@ -770,7 +779,7 @@ impl Vm {
         self.with_gen(g, |d| {
             let f = d.frame.as_ref()?;
             let code = f.code();
-            let ip = f.ip.saturating_sub(1) as usize;
+            let ip = f.ip().saturating_sub(1);
             Some((code.file.clone(), code.line_of(ip)))
         })
         .flatten()
@@ -824,7 +833,7 @@ impl Vm {
             (frame.flags | frame_flags::GENERATOR | frame_flags::OWN_SLOTS | frame_flags::ENTRY)
                 & !super::calls::RET_VAR;
         frame.ret = std::ptr::null_mut();
-        frame.ip = 0;
+        frame.pc = frame.code().ops.as_ptr();
         let cls = self.core.generator.clone().expect("Generator class");
         let o = ObjRef::new(cls, Vec::new());
         let func_info = Some((frame.func.clone(), frame.closure.clone(), frame.scope));
@@ -897,9 +906,9 @@ impl Vm {
             frame.generator = Some(g.clone());
             frame.pending_base = self.ex.pending.len() as u32;
             frame.native_base = self.ex.native_calls.len() as u32;
-            let ip = frame.ip as usize;
+            let pc = frame.pc;
             self.push_frame(frame);
-            self.ex.ip = ip;
+            self.ex.top.pc = pc;
             // Restore calls that were open across the yield.
             for (mut p, vals) in saved {
                 if !vals.is_empty() {
@@ -1206,7 +1215,7 @@ impl Vm {
     }
 
     fn suspend_generator(&mut self, g: &ObjRef, dst: Reg, kv: Option<(Value, Value)>) {
-        let ip = self.ex.ip;
+        let pc = self.ex.top.pc;
         // Calls open across the yield.
         let pb = self.frame().pending_base as usize;
         let mut saved = Vec::new();
@@ -1232,9 +1241,9 @@ impl Vm {
         let mut f = self.ex.frames.pop().unwrap();
         self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
-            self.ex.ip = top.ip as usize;
+            self.ex.top.pc = top.pc;
         }
-        f.ip = ip as u32;
+        f.pc = pc;
         f.generator = None;
         self.ex.native_calls.truncate(f.native_base as usize);
         self.with_gen(g, |d| {
@@ -1334,7 +1343,7 @@ impl Vm {
         let f = self.ex.frames.pop().unwrap();
         self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
-            self.ex.ip = top.ip as usize;
+            self.ex.top.pc = top.pc;
         }
         while self.ex.pending.len() > f.pending_base as usize {
             let p = self.ex.pending.pop().unwrap();

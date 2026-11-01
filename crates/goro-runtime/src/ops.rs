@@ -76,9 +76,8 @@ thread_local! {
     static COMMUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Marks the binary operation evaluated next as an expression `a op b`
-/// (not a compound assignment): commutative operators then report an
-/// object or resource operand first, as PHP's operator does.
+/// Marks the binary operation evaluated next as `literal op non-literal`:
+/// a commutative operator's error then names its operands the other way.
 pub fn set_expression_operands(on: bool) {
     COMMUTED.with(|c| c.set(on));
 }
@@ -91,18 +90,11 @@ fn commuted(op: BinOp) -> bool {
 }
 
 fn unsupported(op: BinOp, a: &Value, b: &Value) -> PhpError {
-    // The commutative operators name an object, else a resource, first
-    // (observed on PHP 8.5: `1 * new stdClass` is "stdClass * int"; test
-    // Zend/tests/operator_unsupported_types).
-    // (a resource only comes before an array: `10 * STDERR` stays "int *
-    // resource"; test ext/standard/tests/array/array_product_variation5)
-    let swap = match (a.deref(), b.deref()) {
-        (Value::Object(_), _) => false,
-        (_, Value::Object(_)) => true,
-        (Value::Array(_), Value::Resource(_)) => true,
-        _ => false,
-    };
-    let (a, b) = if commuted(op) && swap { (b, a) } else { (a, b) };
+    // A literal on the left of a commutative operator moves to the right
+    // (observed on PHP 8.5: `1 * new stdClass` is "stdClass * int", while
+    // `$a * $b` keeps its order; tests Zend/tests/operator_unsupported_types,
+    // ext/standard/tests/array/array_product_variation5).
+    let (a, b) = if commuted(op) { (b, a) } else { (a, b) };
     PhpError::type_error(format!(
         "Unsupported operand types: {} {} {}",
         a.type_name_for_error(),

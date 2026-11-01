@@ -531,7 +531,15 @@ fn memory_hook(size: usize, hard: bool) {
         // SAFETY: the VM outlives the script run that armed the hook; the
         // process ends here, so nothing observes the state afterwards.
         let vm = unsafe { &mut *p };
-        let msg = vm.memory_exhausted_msg(size);
+        let msg = if goro_runtime::mem::system_refused() {
+            format!(
+                "Out of memory (allocated {} bytes) (tried to allocate {} bytes)",
+                goro_runtime::mem::used().saturating_sub(size),
+                size
+            )
+        } else {
+            vm.memory_exhausted_msg(size)
+        };
         let file = vm.cur_file();
         let line = vm.cur_line();
         vm.display_error(super::errors::E_ERROR, &msg, &file, line);

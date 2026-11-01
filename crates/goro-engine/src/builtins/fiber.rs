@@ -444,7 +444,7 @@ impl Vm {
         let code = f.code();
         let line = match ex.native_calls.last() {
             Some(nc) if nc.depth as usize == ex.frames.len() => nc.line,
-            _ => code.line_of(ex.ip.saturating_sub(1)),
+            _ => code.line_of(ex.ip().saturating_sub(1)),
         };
         Some((code.file.clone(), line))
     }

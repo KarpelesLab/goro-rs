@@ -89,7 +89,11 @@ impl<'a> Compiler<'a> {
         }
         // Test Zend/tests/class_name/class_name_as_scalar_error_002.
         if word == "parent"
+            // (`parent::C` in a constant expression fails at run time, test
+            // Zend/tests/invalid_parent_const_ref_leak; `parent::class`
+            // here, test class_name_as_scalar_error_002)
             && self.f.flags & fflags::CLOSURE == 0
+            && (with_static || self.f.flags & fflags::CONST_EXPR == 0)
             && self
                 .class
                 .as_ref()
@@ -669,6 +673,14 @@ impl<'a> Compiler<'a> {
                 let f = c.chain_base(callee)?;
                 c.free(f);
                 let nargs = args.as_slice().len() as u32;
+                // A closure called where it is written: the call stands on
+                // the closure's last line (tests
+                // sapi/phpdbg/tests/exceptions_001.phpt, exceptions_002.phpt).
+                let line = if matches!(callee.kind, ExprKind::Closure(_) | ExprKind::ArrowFn(_)) {
+                    callee.span.end_line
+                } else {
+                    line
+                };
                 c.f.line = line;
                 c.emit(Op::InitDynCall { callee: f, nargs });
                 c.finish_call(args, hint, line)
@@ -1364,10 +1376,14 @@ impl<'a> Compiler<'a> {
             dst: d,
             cap: items.len() as u32,
         });
+        let mut last_line = line;
         for it in items {
+            // Reported on the line of the element before it (test
+            // Zend/tests/bug75426).
             let Some(it) = it else {
-                return self.err("Cannot use empty array elements in arrays", line);
+                return self.err("Cannot use empty array elements in arrays", last_line);
             };
+            last_line = it.span.line;
             self.f.line = it.span.line;
             if it.unpack {
                 let s = self.expr(&it.value)?;
@@ -1462,6 +1478,11 @@ impl<'a> Compiler<'a> {
         for (i, arm) in arms.iter().enumerate() {
             starts[i] = self.here();
             self.f.line = arm.body.span.line;
+            if super::debug_markers() {
+                // A debugger can stop at an arm (tests
+                // sapi/phpdbg/tests/match_breakpoints_*.phpt).
+                self.emit(Op::Ticks);
+            }
             let v = self.expr(&arm.body)?;
             self.free(v);
             self.emit(Op::Copy { dst: d, src: v });

@@ -31,7 +31,8 @@ The development machine is the maintainer's desktop, shared with other work.
   `flock ... timeout 900 cargo test ...`), or build under the lock with
   `--no-run` and run the test binaries outside it.
 - Memory: every process is limited to 4 GB, all the time (maintainer's rule).
-  `goro --test` caps each test at 4 GB (RLIMIT_AS, `--mem-limit 4096`) and goro
+  `goro --test` caps each test at 4 GB (RLIMIT_AS, `--mem-limit 4096`), the
+  runner itself runs under `prlimit --as=4294967296` too, and goro
   enforces `memory_limit` (4 GB backstop when unlimited). Run any goro or php85
   script outside the runner under `prlimit --as=4294967296 timeout 120 ...`.
   Cargo commands too, so rustc and the linker are capped:

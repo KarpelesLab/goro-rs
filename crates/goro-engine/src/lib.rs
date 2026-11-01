@@ -26,6 +26,7 @@ pub mod cli_server;
 pub mod compiler;
 pub mod fpm;
 pub mod func;
+pub mod phpdbg;
 pub mod registry;
 pub mod request_vars;
 pub mod vm;

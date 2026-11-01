@@ -2798,6 +2798,8 @@ impl Vm {
             let code = f.code().unwrap().clone();
             let info = std::cell::OnceCell::new();
             let _ = info.set(Rc::new(crate::func::NativeSig {
+                byref: byref_mask(&code.params),
+                quick: false,
                 params: code.params.clone(),
                 ret: code.ret_type.clone(),
                 num_required: code.num_required,
@@ -2869,6 +2871,8 @@ fn native_twin(f: &Rc<Func>, h: crate::func::NativeFn, cp: *const Class) -> Rc<F
     let code = f.code().unwrap().clone();
     let info = std::cell::OnceCell::new();
     let _ = info.set(Rc::new(crate::func::NativeSig {
+        byref: byref_mask(&code.params),
+        quick: false,
         params: code.params.clone(),
         ret: code.ret_type.clone(),
         num_required: code.num_required,

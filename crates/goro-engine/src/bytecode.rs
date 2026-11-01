@@ -837,7 +837,8 @@ pub enum Op {
         src: Reg,
         ty: u32,
     },
-    /// Line marker for ticks / statements (unused for now).
+    /// Statement marker for a debugger (emitted only with
+    /// `compiler::DEBUG_MARKERS`): calls `phpdbg::on_marker`.
     Ticks,
 }
 
@@ -1050,6 +1051,16 @@ pub mod fflags {
     /// frame (observed on PHP 8.5; test Zend/tests/enum/
     /// update-class-constant-failure vs Zend/tests/bug47572).
     pub const BARE_CONST: u32 = 1 << 19;
+    /// Binding the arguments needs no per-argument work: no parameter
+    /// has a type that needs checking (none, or `mixed`), none is
+    /// variadic, and every default is a constant (of a by-value
+    /// parameter) or computed by the prologue. A positional call with
+    /// `num_required..=direct_params` arguments then binds by filling the
+    /// constant defaults of the parameters not passed.
+    pub const SIMPLE_PARAMS: u32 = 1 << 20;
+    /// Code of an internal class written in PHP (no file): its calls bind
+    /// the way internal functions do.
+    pub const INTERNAL_CODE: u32 = 1 << 21;
 }
 
 /// Jump table for `switch` / `match`.
