@@ -166,6 +166,11 @@ pub fn perform(
     {
         let m = format!("{}\n", f.message);
         t.host.debug(TEXT, m.as_bytes());
+        // A file:// transfer that failed still ends its connection (test
+        // ext/standard/tests/file/bug52820).
+        if f.message.starts_with("Could not open file") {
+            t.host.debug(TEXT, b"Closing connection\n");
+        }
     }
     (t.info, r)
 }

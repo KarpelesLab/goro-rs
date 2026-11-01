@@ -478,6 +478,8 @@ pub(crate) fn scan_into(
     first_var: usize,
 ) -> R<Value> {
     let items = parse_format(vm, fmt)?;
+    // The input ends at a NUL byte (test file/fscanf_variation14).
+    let s = s.split(|&c| c == 0).next().unwrap_or(s);
     // Result slots, by argument number.
     let mut nslots = 0usize;
     let mut auto = 0usize;

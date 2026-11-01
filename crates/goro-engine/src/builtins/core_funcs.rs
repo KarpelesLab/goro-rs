@@ -1324,6 +1324,7 @@ fn get_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // (SimpleXMLElement; observed on PHP 8.5).
     let cls = vm.class_of(&o);
     if cls.native.prop.is_some()
+        && !super::spl::is_array_object(&o)
         && let Some(h) = cls.native.props_for
         && let Some(arr) = h(vm, &o)
     {

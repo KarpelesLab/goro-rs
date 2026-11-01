@@ -36,6 +36,11 @@ class SplFileInfo implements Stringable {
     protected function __h_stat($name, $fn) {
         $this->__h_chk();
         $p = $this->getPathname();
+        // A glob without a match stats nothing (test
+        // GlobIterator_internal_null_pointer).
+        if ($p === '' && $this instanceof GlobIterator) {
+            return false;
+        }
         $r = @$fn($p);
         if ($r === false) {
             throw new RuntimeException("SplFileInfo::$name(): stat failed for $p");

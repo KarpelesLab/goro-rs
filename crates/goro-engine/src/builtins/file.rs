@@ -1808,12 +1808,6 @@ pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> boo
         *pos = 0;
         return true;
     }
-    // Pending writes go first (test filters/gh20370_dynamic_stream_property).
-    if let Err(e) = super::streams::flush_write_filters(vm, s)
-        && vm.err.deferred.is_none()
-    {
-        vm.err.deferred = Some(e);
-    }
     s.eof = false;
     s.pending.clear();
     s.chunk_end = 0;

@@ -278,7 +278,9 @@ impl Vm {
                         }
                         return Ok(true);
                     }
+                    let extra = crate::builtins::spl::ao_foreach_handle(self, &o)?;
                     let it = self.get_iterator_of(&o)?;
+                    crate::builtins::spl::ao_keep_foreach_handle(&it, extra);
                     if self.is_generator_obj(&it) {
                         self.gen_rewind_traverse(&it)?;
                         unsafe {

@@ -325,6 +325,14 @@ impl Vm {
                 let v = o.obj().slots.borrow()[p.slot as usize].clone();
                 if self.is_uninit(&v) {
                     let was_unset = self.is_unset_mark(&v);
+                    // ARRAY_AS_PROPS: an unset property gives way to the
+                    // element (test ext/spl/tests/bug45622).
+                    if was_unset
+                        && let Some(h) = cls.native.prop
+                        && let Some(r) = h(self, o, name, crate::class::ObjAccess::Read)
+                    {
+                        return r;
+                    }
                     if (was_unset || p.ty.is_none())
                         && self.has_magic_get(&cls)
                         && !self.guarded(o, name, 0)
@@ -385,6 +393,14 @@ impl Vm {
                 Ok(v.into_deref())
             }
             PropLookup::Hidden(p) => {
+                // ArrayObject::ARRAY_AS_PROPS reaches its elements through
+                // what the scope can't see (test ext/spl/tests/ArrayObject/
+                // arrayObject_setFlags_basic2).
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Read)
+                {
+                    return r;
+                }
                 if self.has_magic_get(&cls) && !self.guarded(o, name, 0) {
                     return self.magic_get_quiet(o, &cls, name, quiet);
                 }
@@ -731,6 +747,18 @@ impl Vm {
                 } else {
                     let v = o.obj().slots.borrow()[p.slot as usize].clone();
                     if self.is_uninit(&v) {
+                        if self.is_unset_mark(&v)
+                            && let Some(h) = cls.native.prop
+                        {
+                            let op = if empty {
+                                crate::class::ObjAccess::Empty
+                            } else {
+                                crate::class::ObjAccess::Isset
+                            };
+                            if let Some(r) = h(self, o, name, op) {
+                                return Ok(self.to_bool(&r?));
+                            }
+                        }
                         if self.is_unset_mark(&v) || p.ty.is_none() {
                             return self.magic_isset(o, &cls, name, empty);
                         }
@@ -740,7 +768,19 @@ impl Vm {
                     }
                 }
             }
-            PropLookup::Hidden(_) => return self.magic_isset(o, &cls, name, empty),
+            PropLookup::Hidden(_) => {
+                let op = if empty {
+                    crate::class::ObjAccess::Empty
+                } else {
+                    crate::class::ObjAccess::Isset
+                };
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, op)
+                {
+                    return Ok(self.to_bool(&r?));
+                }
+                return self.magic_isset(o, &cls, name, empty);
+            }
             PropLookup::Dynamic => {
                 if let Some(h) = cls.native.prop {
                     let op = if empty {
@@ -1044,6 +1084,12 @@ impl Vm {
                 // (observed on PHP 8.5; test
                 // ext/spl/tests/ArrayObject/arrayObject_setFlags_basic1).
                 if was_unset
+                    && let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Write(v.clone()))
+                {
+                    return r.map(|_| ());
+                }
+                if was_unset
                     && let Some(f) = cls.magic.borrow().set.clone()
                     && !self.guarded(o, name, 1)
                 {
@@ -1113,6 +1159,11 @@ impl Vm {
                 Ok(())
             }
             PropLookup::Hidden(p) => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Write(v.clone()))
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(f) = cls.magic.borrow().set.clone()
                     && !self.guarded(o, name, 1)
                 {
@@ -1460,6 +1511,13 @@ impl Vm {
                     PropLookup::Dynamic
                 ) {
                     self.static_as_instance(&cls, name)?;
+                }
+                // Test ext/standard/tests/serialize/serialization_objects_005.
+                if cls.lname.as_bytes() == b"__php_incomplete_class" {
+                    return self.throw(
+                        "Error",
+                        &crate::builtins::serialize::incomplete_msg("modify a property", o),
+                    );
                 }
                 // A hooked property: its write fetch (a `&get` call or the
                 // indirect-modification error) comes first (observed on
@@ -1839,7 +1897,14 @@ impl Vm {
                 }
                 // An unset declared property takes __unset like a missing
                 // one (observed on PHP 8.5; test ext/spl/tests/bug45622).
-                if self.is_unset_mark(&o.obj().slots.borrow()[p.slot as usize])
+                let was_unset = self.is_unset_mark(&o.obj().slots.borrow()[p.slot as usize]);
+                if was_unset
+                    && let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Unset)
+                {
+                    return r.map(|_| ());
+                }
+                if was_unset
                     && let Some(f) = cls.magic.borrow().unset.clone()
                     && !self.guarded(o, name, 3)
                 {
@@ -1880,6 +1945,11 @@ impl Vm {
                 Ok(())
             }
             PropLookup::Hidden(p) => {
+                if let Some(h) = cls.native.prop
+                    && let Some(r) = h(self, o, name, crate::class::ObjAccess::Unset)
+                {
+                    return r.map(|_| ());
+                }
                 if let Some(f) = cls.magic.borrow().unset.clone()
                     && !self.guarded(o, name, 3)
                 {

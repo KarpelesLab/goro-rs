@@ -639,6 +639,11 @@ impl ArrayData {
         self.flags.set(self.flags.get() | A_LITERAL);
     }
 
+    /// This array is held by another literal, not a literal of its own.
+    pub fn unmark_literal(&self) {
+        self.flags.set(self.flags.get() & !A_LITERAL);
+    }
+
     /// Whether this array is a compile-time literal ([`Self::mark_literal`]).
     pub fn is_literal(&self) -> bool {
         self.flags.get() & A_LITERAL != 0
