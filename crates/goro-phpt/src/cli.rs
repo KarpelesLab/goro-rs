@@ -37,7 +37,7 @@ options:
   --results FILE      write a result file (one STATUS<TAB>test line per test)
   --guard BASELINE    compare with a baseline result file and exit 1 if a test
                       that passed there does not pass now
-  --mem-limit MB      address-space limit of each test process (default 6144;
+  --mem-limit MB      address-space limit of each test process (default 4096;
                       0: none)
   --heavy             also run tests needing several GB of memory or disk
   --online            also run tests reaching hosts on the Internet
@@ -87,7 +87,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         keep: false,
         results: None,
         guard: None,
-        mem_limit_mb: 6144,
+        mem_limit_mb: 4096,
         min_free_gb: 30,
         heavy: false,
         online: false,
