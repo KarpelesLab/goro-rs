@@ -208,12 +208,20 @@ fn php_strip_whitespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let toks = goro_syntax::lexer::tokenize(&src, false);
     let mut out = Vec::with_capacity(src.len());
     let mut last_ws = false;
+    // Tokens still to go before the line break a heredoc's end needs: the end
+    // marker keeps a following token and then a newline (test ext/standard/
+    // tests/strings/bug63874).
+    let mut heredoc_end = 0u8;
     for t in &toks {
         let text = &src[t.start as usize..(t.end as usize).min(src.len())];
         match t.kind {
             T::Comment | T::DocComment => {}
             T::Whitespace => {
-                if !last_ws {
+                if heredoc_end > 0 {
+                    out.push(b'\n');
+                    heredoc_end = 0;
+                    last_ws = true;
+                } else if !last_ws {
                     out.push(b' ');
                     last_ws = true;
                 }
@@ -221,6 +229,11 @@ fn php_strip_whitespace(vm: &mut Vm, a: &mut Args) -> R<Value> {
             _ => {
                 out.extend_from_slice(text);
                 last_ws = false;
+                heredoc_end = if t.kind == T::EndHeredoc {
+                    2
+                } else {
+                    heredoc_end.saturating_sub(1)
+                };
             }
         }
     }

@@ -878,7 +878,14 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
             continue;
         };
-        let exists = vm.var_exists(name);
+        // $this exists for the modes that keep or prefix an existing name,
+        // and is never overwritten by the "if exists" ones (test ext/standard/
+        // tests/array/bug77135).
+        let is_this = name.as_bytes() == b"this";
+        if is_this && matches!(mode, 1 | 5 | 6) {
+            continue;
+        }
+        let exists = is_this || vm.var_exists(name);
         let target: Option<PhpStr> = match mode {
             0 => Some(name.clone()),
             1 => (!exists).then(|| name.clone()),
@@ -890,7 +897,7 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
             // Observed on PHP 8.5: EXTR_PREFIX_ALL skips an empty key
             // (EXTR_PREFIX_INVALID makes it "prefix_").
             3 => (!name.is_empty()).then(|| prefixed(&prefix, name)),
-            4 => Some(if valid_var_name(name) {
+            4 => Some(if valid_var_name(name) && !is_this {
                 name.clone()
             } else {
                 prefixed(&prefix, name)
@@ -906,7 +913,10 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
         if t.as_bytes() == b"this" {
             return vm.throw("Error", "Cannot re-assign $this");
         }
+        // Counted like any name, but $GLOBALS itself stays out of reach (test
+        // ext/standard/tests/array/extract_safety).
         if t.as_bytes() == b"GLOBALS" {
+            count += 1;
             continue;
         }
         if refs {
@@ -928,7 +938,15 @@ fn extract(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
             }
         }
-        vm.assign_var_var(&Value::Str(t), v.deref())?;
+        // A typed reference keeps its type (test ext/standard/tests/array/
+        // extract_typed_ref).
+        let p = vm.var_var_place(&t)?;
+        let mut nv = v.deref();
+        if let Value::Ref(r) = unsafe { &*p } {
+            let r = r.clone();
+            nv = vm.typed_ref_value(&r, nv)?;
+        }
+        vm.assign_var_var(&Value::Str(t), nv)?;
         count += 1;
     }
     Ok(Value::Int(count))
@@ -1024,7 +1042,12 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 None => {
                     return vm.throw(
                         "Error",
-                        &format!("Class \"{}\" not found", String::from_utf8_lossy(cls)),
+                        // Without the leading backslash (test ext/standard/
+                        // tests/general_functions/gh9905).
+                        &format!(
+                            "Class \"{}\" not found",
+                            String::from_utf8_lossy(cls.strip_prefix(b"\\").unwrap_or(cls))
+                        ),
                     );
                 }
             },
@@ -1094,10 +1117,22 @@ fn get_defined_constants(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         return Ok(Value::Array(out));
     }
+    // Module constants in declaration order (test ext/standard/tests/url/
+    // parse_url_basic_010), then the rest sorted.
+    for m in vm.modules.iter() {
+        for (k, _) in m.constants {
+            let name = PhpStr::new(k.as_bytes());
+            if let Some(v) = vm.constants.get(&name)
+                && !vm.user_constants.contains(&name)
+            {
+                out.insert(Key::Str(name), v.clone());
+            }
+        }
+    }
     let mut keys: Vec<PhpStr> = vm
         .constants
         .keys()
-        .filter(|k| !vm.user_constants.contains(k))
+        .filter(|k| !vm.user_constants.contains(k) && out.get_str(k).is_none())
         .cloned()
         .collect();
     keys.sort();
@@ -1214,12 +1249,13 @@ fn method_exists(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let m = lower(&a.str(1));
     Ok(Value::Bool(match c {
         Some(c) => {
-            // A parent's private static method is not the child's (tests
-            // Zend/tests/method_exists_002, inheritance/bug50810).
+            // A parent's private method counts for an object but not for a
+            // class name (tests Zend/tests/method_exists_002, ext/standard/
+            // tests/class_object/method_exists_basic_001).
+            let by_object = matches!(v, Value::Object(_));
             c.find_method_str(&m).is_some_and(|f| {
-                use crate::class::mflags::{PRIVATE, STATIC};
-                f.flags & (PRIVATE | STATIC) != (PRIVATE | STATIC)
-                    || std::ptr::eq(f.scope.get(), &*c)
+                use crate::class::mflags::PRIVATE;
+                by_object || f.flags & PRIVATE == 0 || std::ptr::eq(f.scope.get(), &*c)
             }) || (c.lname.as_bytes() == b"closure" && m.as_bytes() == b"__invoke")
         }
         None => false,

@@ -400,6 +400,15 @@ pub struct Stream {
     /// Filtered bytes not read yet; whether the read filters were closed.
     pub filtered: Vec<u8>,
     pub filters_closed: bool,
+    /// stream_set_chunk_size(): the size of reads and writes.
+    pub chunk_size: usize,
+    /// The last stream_read() of a user stream returned false.
+    pub read_failed: bool,
+    /// Plain files and memory: the end of the chunk PHP would hold in its
+    /// read buffer, which `unread_bytes` and stream_filter_append() report
+    /// or process (tests streams/stream_get_meta_data_file_variation2,
+    /// filters/filter_errors_*).
+    pub chunk_end: u64,
 }
 
 impl Stream {
@@ -430,6 +439,29 @@ impl Stream {
             filtered: Vec::new(),
             filters_closed: false,
             data_meta: None,
+            chunk_size: 8192,
+            read_failed: false,
+            chunk_end: 0,
+        }
+    }
+
+    /// Bytes of the read chunk not handed out yet (`unread_bytes`).
+    pub fn unread_in_chunk(&mut self) -> u64 {
+        match &mut self.backing {
+            Backing::File(f) if !self.wrapper.is_empty() => f
+                .stream_position()
+                .map_or(0, |p| self.chunk_end.saturating_sub(p)),
+            Backing::Memory { pos, .. } => self.chunk_end.saturating_sub(*pos as u64),
+            _ => 0,
+        }
+    }
+
+    /// Notes a read that ended at `end`, in a stream of `len` bytes.
+    fn note_chunk(chunk: usize, chunk_end: &mut u64, start: u64, end: u64, len: u64) {
+        if end > *chunk_end {
+            let c = chunk.max(1) as u64;
+            let span = (end - start).div_ceil(c).max(1) * c;
+            *chunk_end = (start + span).min(len).max(end);
         }
     }
 
@@ -495,9 +527,16 @@ impl Stream {
 
     /// Reads from the backing, before the read filters.
     pub fn read_raw(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
+        // A chunk size of 1 skips the read buffer: the read asks for what the
+        // caller wants (test streams/stream_set_chunk_size).
+        let want = if self.chunk_size == 1 {
+            buf.len()
+        } else {
+            self.chunk_size
+        };
         if self.pending.is_empty()
             && matches!(self.backing, Backing::User { .. })
-            && let Err(e) = super::userstream::fill(vm, self)
+            && let Err(e) = super::userstream::fill(vm, self, want)
         {
             if vm.err.deferred.is_none() {
                 vm.err.deferred = Some(e);
@@ -519,9 +558,26 @@ impl Stream {
         }
         match &mut self.backing {
             Backing::File(f) => {
+                let start = if self.wrapper.is_empty() {
+                    None
+                } else {
+                    f.stream_position().ok()
+                };
                 let n = f.read(buf)?;
                 if self.append {
                     self.upos += n as i64;
+                }
+                if let Some(start) = start
+                    && start + n as u64 > self.chunk_end
+                {
+                    let len = f.metadata().map_or(0, |m| m.len());
+                    Stream::note_chunk(
+                        self.chunk_size,
+                        &mut self.chunk_end,
+                        start,
+                        start + n as u64,
+                        len,
+                    );
                 }
                 Ok(n)
             }
@@ -532,6 +588,13 @@ impl Stream {
                 if n > 0 {
                     buf[..n].copy_from_slice(&data[*pos..*pos + n]);
                 }
+                Stream::note_chunk(
+                    self.chunk_size,
+                    &mut self.chunk_end,
+                    *pos as u64,
+                    (*pos + n) as u64,
+                    data.len() as u64,
+                );
                 *pos += n;
                 // a short read sets EOF (test stream_rfc2397_007.phpt)
                 if n < buf.len() {
@@ -574,19 +637,34 @@ impl Stream {
     /// Writes to the backing, after the write filters.
     pub fn write_raw(&mut self, vm: &mut Vm, b: &[u8]) -> std::io::Result<usize> {
         if matches!(self.backing, Backing::User { .. }) {
-            return match super::userstream::write(vm, self, b) {
-                Ok(n) => {
-                    self.upos += n as i64;
-                    Ok(n)
-                }
-                Err(e) => {
-                    if vm.err.deferred.is_none() {
-                        vm.err.deferred = Some(e);
+            // In chunks (tests file/userstreams_006, streams/
+            // stream_set_chunk_size, file/gh13136); the wrapper returning
+            // false fails the write (test streams/bug78662).
+            let mut total = 0;
+            for part in b.chunks(self.chunk_size.max(1)) {
+                match super::userstream::write(vm, self, part) {
+                    Ok(Some(n)) => {
+                        self.upos += n as i64;
+                        total += n;
+                        if n < part.len() {
+                            break;
+                        }
                     }
-                    Err(std::io::Error::other("user stream error"))
+                    Ok(None) if total == 0 => {
+                        return Err(std::io::Error::other("user stream write failed"));
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        if vm.err.deferred.is_none() {
+                            vm.err.deferred = Some(e);
+                        }
+                        return Err(std::io::Error::other("user stream error"));
+                    }
                 }
-            };
+            }
+            return Ok(total);
         }
+        self.chunk_end = 0;
         match &mut self.backing {
             Backing::File(f) => {
                 if self.append {
@@ -626,7 +704,15 @@ impl Stream {
                 vm.echo(b);
                 Ok(b.len())
             }
-            Backing::Native(n) => n.write(vm, b),
+            Backing::Native(n) => {
+                let w = n.write(vm, b);
+                // The position of a stream that can't seek still follows
+                // its writes (test streams/bug81346).
+                if let Ok(k) = &w {
+                    self.upos += *k as i64;
+                }
+                w
+            }
             _ => Ok(0),
         }
     }
@@ -690,23 +776,30 @@ pub fn close_open_streams(vm: &mut Vm) {
         let Some(r) = w.upgrade() else {
             continue;
         };
-        let data = r.res().data.borrow();
-        let Some(d) = data.as_ref() else {
+        let filtered = {
+            let data = r.res().data.borrow();
+            data.as_ref()
+                .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+                .and_then(|c| c.try_borrow().ok())
+                .is_some_and(|s| !s.write_filters.is_empty())
+        };
+        if !filtered {
+            continue;
+        }
+        // The resource is gone by now for code the filters run: it reads as
+        // closed (tests filters/bug54350, filters/gh20370_dynamic_stream_property).
+        let Some(data) = r.close() else {
             continue;
         };
-        let Some(cell) = d.downcast_ref::<std::cell::RefCell<Stream>>() else {
+        let Some(cell) = data.downcast_ref::<std::cell::RefCell<Stream>>() else {
             continue;
         };
         let Ok(mut s) = cell.try_borrow_mut() else {
             continue;
         };
-        if s.write_filters.is_empty() {
-            continue;
-        }
-        let r = super::streams::close_stream(vm, &mut s);
-        if let Err(e) = r {
-            drop(s);
-            drop(data);
+        let res = super::streams::close_stream(vm, &mut s);
+        drop(s);
+        if let Err(e) = res {
             vm.handle_unwind(Err(e));
         }
     }
@@ -813,6 +906,11 @@ impl Vm {
     /// A path for filesystem calls: relative paths resolve against the
     /// current directory (chdir changes it).
     pub fn fs_path(&self, p: &[u8]) -> PathBuf {
+        // The plain files wrapper's own URL form (test file/bug68335).
+        let p = match p.strip_prefix(b"file://") {
+            Some(rest) if rest.starts_with(b"/") => rest,
+            _ => p,
+        };
         let p = os(p);
         // An empty path names nothing (ENOENT), not the working directory.
         if p.as_os_str().is_empty() || p.is_absolute() {
@@ -1301,7 +1399,9 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
                 Ok(k) => {
                     got += k;
-                    if matches!(s.backing, Backing::Stdin) || s.is_pipe() {
+                    // One read of a user stream, up to its chunk size (test
+                    // streams/stream_set_chunk_size).
+                    if matches!(s.backing, Backing::Stdin | Backing::User { .. }) || s.is_pipe() {
                         break;
                     }
                 }
@@ -1326,6 +1426,10 @@ fn fread(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 }
                 Err(_) => break,
             }
+        }
+        // stream_read() returned false (test streams/bug78662).
+        if got == 0 && std::mem::take(&mut s.read_failed) {
+            return Ok(Value::Bool(false));
         }
         buf.truncate(got);
         Ok(Value::Str(PhpStr::from(buf)))
@@ -1406,6 +1510,12 @@ fn read_line(vm: &mut Vm, s: &mut Stream, max: Option<usize>) -> Option<Vec<u8>>
                 ) =>
             {
                 break;
+            }
+            // A filter's fatal error: the partial line is lost and the read
+            // fails (test filters/gh13264).
+            Err(e) if e.to_string() == "stream filter failed" => {
+                s.eof = true;
+                return None;
             }
             _ => {
                 s.eof = true;
@@ -1574,6 +1684,7 @@ fn ftell(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }),
             Backing::Native(n) => match n.tell() {
                 Some(p) => Value::Int(p as i64),
+                None if s.upos > 0 => Value::Int(s.upos),
                 None => Value::Bool(false),
             },
             _ => Value::Bool(false),
@@ -1596,11 +1707,13 @@ pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> boo
         if n < 0 {
             return false;
         }
-        if !plain {
-            *pos = (n as usize).min(entries.len());
-        } else if n == 0 {
-            *pos = 0;
-        }
+        // Whatever the offset, a plain directory rewinds (test
+        // file/fseek_dir_basic).
+        *pos = if plain {
+            0
+        } else {
+            (n as usize).min(entries.len())
+        };
         return true;
     }
     if matches!(s.backing, Backing::User { .. }) {
@@ -1625,6 +1738,7 @@ pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> boo
     }
     s.eof = false;
     s.pending.clear();
+    s.chunk_end = 0;
     // read filters start over after a seek (test streams/bug64166.phpt)
     s.filters_closed = false;
     s.filtered.clear();
@@ -1968,7 +2082,16 @@ pub(crate) fn read_rest(vm: &mut Vm, s: &mut Stream) -> Vec<u8> {
 }
 
 fn fpassthru(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let data = with_stream(vm, a, 0, |vm, s| Ok(read_rest(vm, s)))?;
+    let data = with_stream(vm, a, 0, |vm, s| {
+        // A stream opened for writing only (test file/bug35781).
+        if !s.readable && matches!(s.backing, Backing::File(_)) {
+            vm.notice_msg(
+                "fpassthru(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+            )?;
+            return Ok(Vec::new());
+        }
+        Ok(read_rest(vm, s))
+    })?;
     vm.echo(&data);
     Ok(Value::Int(data.len() as i64))
 }
@@ -2082,7 +2205,8 @@ pub(crate) fn stream_get_meta_data(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         m.insert(Key::from("stream_type"), Value::from(s.stream_type));
         m.insert(Key::from("mode"), Value::Str(s.mode.clone()));
-        m.insert(Key::from("unread_bytes"), Value::Int(0));
+        let unread = s.unread_in_chunk() as i64;
+        m.insert(Key::from("unread_bytes"), Value::Int(unread));
         m.insert(
             Key::from("seekable"),
             Value::Bool(
@@ -2182,8 +2306,9 @@ pub fn stat_from_user(st: &PhpArray) -> PhpArray {
 
 fn file_get_contents(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = a.str(0);
+    // Test file/file_get_contents_variation8.
     if f.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($filename) cannot be empty");
+        return vm.throw("ValueError", "Path must not be empty");
     }
     let use_ip = a.bool_or(1, false);
     let f = match use_ip.then(|| wrapper_include_path(vm, &f)).flatten() {
@@ -2420,6 +2545,7 @@ pub(crate) fn nul_arg(vm: &mut Vm, a: &Args, i: usize, name: &str) -> R<bool> {
 }
 
 fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    realpath_cache_clear(None);
     if !nul_arg(vm, a, 0, "filename")? {
         return Ok(Value::Null);
     }
@@ -2446,6 +2572,7 @@ fn unlink(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn rename(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    realpath_cache_clear(None);
     if !nul_arg(vm, a, 0, "from")? {
         return Ok(Value::Null);
     }
@@ -2609,6 +2736,7 @@ fn current_umask() -> u32 {
 }
 
 fn rmdir(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    realpath_cache_clear(None);
     if !nul_arg(vm, a, 0, "directory")? {
         return Ok(Value::Null);
     }
@@ -3000,8 +3128,18 @@ fn lstat(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
 }
 
-fn clearstatcache(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+fn clearstatcache(vm: &mut Vm, a: &mut Args) -> R<Value> {
     super::userstream::clear_stat_cache();
+    // PHP manual: clearstatcache($clear_realpath_cache, $filename).
+    if a.bool_or(0, false) {
+        let f = a.str(1);
+        if f.is_empty() {
+            realpath_cache_clear(None);
+        } else {
+            let p = vm.fs_path(&f);
+            realpath_cache_clear(Some(p.as_os_str().as_bytes()));
+        }
+    }
     Ok(Value::Null)
 }
 
@@ -3030,8 +3168,7 @@ fn set_buffer(vm: &mut Vm, a: &mut Args) -> R<Value> {
     })
 }
 
-/// stream_set_chunk_size(): the previous chunk size (PHP manual; reads
-/// are not chunked here, so it is always the default 8192).
+/// stream_set_chunk_size(): the previous chunk size (PHP manual).
 fn stream_set_chunk_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if a.int(1) <= 0 {
         return vm.fthrow(
@@ -3040,7 +3177,10 @@ fn stream_set_chunk_size(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #2 ($size) must be greater than 0",
         );
     }
-    with_stream(vm, a, 0, |_vm, _s| Ok(Value::Int(8192)))
+    let size = a.int(1) as usize;
+    with_stream(vm, a, 0, |_vm, s| {
+        Ok(Value::Int(std::mem::replace(&mut s.chunk_size, size) as i64))
+    })
 }
 
 fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -3051,15 +3191,138 @@ fn realpath(vm: &mut Vm, a: &mut Args) -> R<Value> {
         return Ok(Value::Bool(false));
     }
     let f = a.str(0);
+    // With the working directory gone, only "." still resolves, to itself
+    // (test file/realpath_bug77484).
+    if !f.starts_with(b"/") && !vm.cwd.exists() {
+        let dot = !f.is_empty() && f.split(|&c| c == b'/').all(|c| c.is_empty() || c == b".");
+        return Ok(if dot {
+            Value::Str(PhpStr::new(b"."))
+        } else {
+            Value::Bool(false)
+        });
+    }
     let p = if f.is_empty() {
         vm.cwd.clone()
     } else {
         vm.fs_path(&f)
     };
-    match std::fs::canonicalize(&p) {
-        Ok(c) => Ok(Value::Str(PhpStr::new(c.as_os_str().as_bytes()))),
-        Err(_) => Ok(Value::Bool(false)),
+    Ok(realpath_cached(&p).map_or(Value::Bool(false), |c| {
+        Value::Str(PhpStr::new(c.as_os_str().as_bytes()))
+    }))
+}
+
+/// One entry of the realpath cache (PHP manual: realpath_cache_get()).
+#[derive(Clone)]
+struct RealpathEntry {
+    real: PathBuf,
+    is_dir: bool,
+    expires: i64,
+}
+
+thread_local! {
+    /// Resolved paths; only clearstatcache(true, ...) and the file functions
+    /// that change a path forget them, not the file system changing behind
+    /// PHP's back (test file/clearstatcache_001).
+    static REALPATHS: std::cell::RefCell<std::collections::BTreeMap<Vec<u8>, RealpathEntry>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// The default of realpath_cache_ttl (PHP manual: Filesystem configuration).
+const REALPATH_TTL: i64 = 120;
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// `p` resolved, through the cache; each directory on the way is cached too.
+fn realpath_cached(p: &Path) -> Option<PathBuf> {
+    let key = p.as_os_str().as_bytes().to_vec();
+    let now = now_secs();
+    let hit = REALPATHS.with(|m| m.borrow().get(&key).cloned());
+    if let Some(e) = hit
+        && e.expires > now
+    {
+        return Some(e.real);
     }
+    let real = std::fs::canonicalize(p).ok()?;
+    let is_dir = real.is_dir();
+    REALPATHS.with(|m| {
+        let mut m = m.borrow_mut();
+        let expires = now + REALPATH_TTL;
+        m.insert(
+            key,
+            RealpathEntry {
+                real: real.clone(),
+                is_dir,
+                expires,
+            },
+        );
+        let mut up = real.parent();
+        while let Some(d) = up {
+            if d.as_os_str().len() > 1 {
+                m.insert(
+                    d.as_os_str().as_bytes().to_vec(),
+                    RealpathEntry {
+                        real: d.to_path_buf(),
+                        is_dir: true,
+                        expires,
+                    },
+                );
+            }
+            up = d.parent();
+        }
+    });
+    Some(real)
+}
+
+/// Adds `p` to the cache.
+pub(crate) fn realpath_cache_note(p: &Path) {
+    let _ = realpath_cached(p);
+}
+
+/// Forgets every cached path, or the one given.
+pub(crate) fn realpath_cache_clear(path: Option<&[u8]>) {
+    REALPATHS.with(|m| match path {
+        Some(p) => {
+            m.borrow_mut().remove(p);
+        }
+        None => m.borrow_mut().clear(),
+    });
+}
+
+/// The bytes the cached entries take, as realpath_cache_size() counts them.
+pub(crate) fn realpath_cache_bytes() -> i64 {
+    REALPATHS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(k, e)| (k.len() + e.real.as_os_str().len() + 2 + 48) as i64)
+            .sum()
+    })
+}
+
+/// realpath_cache_get(): path => key, is_dir, realpath, expires.
+pub(crate) fn realpath_cache_entries() -> PhpArray {
+    REALPATHS.with(|m| {
+        let mut out = PhpArray::new();
+        for (k, e) in m.borrow().iter() {
+            let mut row = PhpArray::new();
+            // A hash of the path; PHP manual: only its presence is documented.
+            let h = k.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+            });
+            row.insert(Key::from("key"), Value::Float(h as f64));
+            row.insert(Key::from("is_dir"), Value::Bool(e.is_dir));
+            row.insert(
+                Key::from("realpath"),
+                Value::Str(PhpStr::new(e.real.as_os_str().as_bytes())),
+            );
+            row.insert(Key::from("expires"), Value::Int(e.expires));
+            out.insert(Key::Str(PhpStr::new(k)), Value::Array(row));
+        }
+        out
+    })
 }
 
 /// `dirname()` (PHP manual: dirname): parent directory, trailing slashes
@@ -3728,6 +3991,17 @@ fn tempnam(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if !d.is_empty() && !dir.is_dir() {
         vm.notice_msg("tempnam(): file created in the system's temporary directory")?;
         dir = PathBuf::from("/tmp");
+        // open_basedir applies to the fallback too (test file/bug52624).
+        if !vm.basedir_allows(b"/tmp") {
+            let allowed = vm
+                .get_ini(b"open_basedir")
+                .map(|v| v.to_string_lossy())
+                .unwrap_or_default();
+            vm.warn(&format!(
+                "tempnam(): open_basedir restriction in effect. File(/tmp) is not within the allowed path(s): ({allowed})"
+            ))?;
+            return Ok(Value::Bool(false));
+        }
     }
     // the name is made in the resolved directory (test
     // tempnam_variation2.phpt)
@@ -3809,6 +4083,10 @@ fn tmpfile(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 }
 
 fn getcwd(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    // false once the directory is gone (test file/realpath_bug77484).
+    if !vm.cwd.exists() {
+        return Ok(Value::Bool(false));
+    }
     Ok(Value::Str(PhpStr::new(vm.cwd.as_os_str().as_bytes())))
 }
 
@@ -4631,6 +4909,11 @@ fn stream_copy_to_stream(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 break;
             }
             match s.read_some(vm, &mut buf[..want]) {
+                // A filter's fatal error fails the copy (test streams/
+                // bug78506).
+                Err(e) if out.is_empty() && e.to_string() == "stream filter failed" => {
+                    return Ok(None);
+                }
                 Ok(0) | Err(_) => {
                     s.eof = true;
                     break;
@@ -4677,6 +4960,21 @@ fn stream_get_line(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     if ending.is_empty() && out.len() >= max {
                         break;
                     }
+                }
+                // A non-blocking stream with no ending yet keeps its data
+                // for the next call (test streams/stream_get_line_nb).
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && !ending.is_empty() => {
+                    s.upos -= out.len() as i64;
+                    let mut kept = std::mem::take(&mut out);
+                    kept.append(&mut s.pending);
+                    s.pending = kept;
+                    return Ok(None);
+                }
+                // A filter's fatal error loses the partial line (test
+                // filters/gh13264).
+                Err(e) if e.to_string() == "stream filter failed" => {
+                    s.eof = true;
+                    return Ok(None);
                 }
                 _ => {
                     s.eof = true;

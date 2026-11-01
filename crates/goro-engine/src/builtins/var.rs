@@ -939,6 +939,9 @@ fn settype(vm: &mut Vm, a: &mut Args) -> R<Value> {
             return vm.value_error("settype(): Argument #2 ($type) must be a valid type");
         }
     };
+    // A typed property keeps its type: the new value is coerced to it, or
+    // refused (test ext/standard/tests/general_functions/settype_typed_property).
+    let nv = vm.typed_ref_value(&r, nv)?;
     let old = r.set(nv);
     drop(old);
     Ok(Value::Bool(true))

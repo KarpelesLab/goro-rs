@@ -395,7 +395,7 @@ pub fn open_named(
 }
 
 /// Reads one chunk from a user stream into its buffer; false at EOF.
-pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
+pub fn fill(vm: &mut Vm, s: &mut Stream, want: usize) -> R<bool> {
     let Backing::User { obj } = &s.backing else {
         return Ok(false);
     };
@@ -403,7 +403,11 @@ pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
     if s.eof {
         return Ok(false);
     }
-    let r = call(vm, &o, b"stream_read", vec![Value::Int(8192)])?;
+    let r = call(vm, &o, b"stream_read", vec![Value::Int(want as i64)])?;
+    let failed = matches!(r, Some(Value::Bool(false)));
+    if failed {
+        s.read_failed = true;
+    }
     let data = match r {
         None => {
             vm.warn(&format!(
@@ -416,17 +420,21 @@ pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
         Some(Value::Bool(false)) | Some(Value::Null) => PhpStr::empty(),
         Some(v) => vm.to_php_str(&v)?,
     };
-    if data.len() > 8192 {
+    if data.len() > want {
         vm.warn(&format!(
-            "fread(): {}::stream_read - read {} bytes more data than requested ({} read, 8192 max) - excess data will be lost",
+            "fread(): {}::stream_read - read {} bytes more data than requested ({} read, {} max) - excess data will be lost",
             class_name(vm, &o),
-            data.len() - 8192,
-            data.len()
+            data.len() - want,
+            data.len(),
+            want
         ))?;
     }
-    let n = data.len().min(8192);
+    let n = data.len().min(want);
     s.pending.extend_from_slice(&data[..n]);
     match call(vm, &o, b"stream_eof", Vec::new())? {
+        // A failed read ends the stream without asking for stream_eof (test
+        // streams/bug78662).
+        None if failed => s.eof = true,
         None => {
             vm.warn(&format!(
                 "fread(): {}::stream_eof is not implemented! Assuming EOF",
@@ -443,9 +451,10 @@ pub fn fill(vm: &mut Vm, s: &mut Stream) -> R<bool> {
     Ok(n > 0)
 }
 
-pub fn write(vm: &mut Vm, s: &mut Stream, data: &[u8]) -> R<usize> {
+/// One stream_write() call; none when the wrapper returned false.
+pub fn write(vm: &mut Vm, s: &mut Stream, data: &[u8]) -> R<Option<usize>> {
     let Backing::User { obj } = &s.backing else {
-        return Ok(0);
+        return Ok(Some(0));
     };
     let o = obj.clone();
     let r = call(vm, &o, b"stream_write", vec![Value::Str(PhpStr::new(data))])?;
@@ -455,8 +464,9 @@ pub fn write(vm: &mut Vm, s: &mut Stream, data: &[u8]) -> R<usize> {
                 "fwrite(): {}::stream_write is not implemented!",
                 class_name(vm, &o)
             ))?;
-            Ok(0)
+            Ok(Some(0))
         }
+        Some(Value::Bool(false)) => Ok(None),
         Some(v) => {
             let n = vm.to_int(&v)?;
             if n > data.len() as i64 {
@@ -467,9 +477,9 @@ pub fn write(vm: &mut Vm, s: &mut Stream, data: &[u8]) -> R<usize> {
                     n,
                     data.len()
                 ))?;
-                return Ok(data.len());
+                return Ok(Some(data.len()));
             }
-            Ok(n.max(0) as usize)
+            Ok(Some(n.max(0) as usize))
         }
     }
 }

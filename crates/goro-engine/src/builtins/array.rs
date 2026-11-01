@@ -1318,6 +1318,36 @@ fn array_splice(vm: &mut Vm, a: &mut Args) -> R<Value> {
             let _ = out.push(x);
         }
     }
+    // With the result unused the removed elements go at once, and their
+    // destructors must leave the array alone (tests ext/standard/tests/
+    // array/gh16649/*).
+    let destroys = removed
+        .iter()
+        .any(|(_, v)| matches!(v, Value::Object(_) | Value::Array(_) | Value::Ref(_)));
+    if destroys && vm.caller_discards_result() {
+        let mut rest = PhpArray::with_capacity(arr.len() - cnt);
+        for (i, (k, v)) in arr.iter().enumerate() {
+            if i < start || i >= start + cnt {
+                rest.insert(k.to_owned(), v.clone());
+            }
+        }
+        drop(arr);
+        // A second holder: any write by a destructor separates the array.
+        let guard = rest.clone();
+        drop(r.set(Value::Array(rest)));
+        let gone: Vec<Value> = removed.iter().map(|(_, v)| v.clone()).collect();
+        drop(removed);
+        for v in gone {
+            drop(v);
+            vm.run_pending_destructors()?;
+        }
+        if array_identity(&r) != Some(guard.data() as *const _) {
+            return vm.throw("Error", "Array was modified during array_splice operation");
+        }
+        drop(guard);
+        drop(r.set(Value::Array(out)));
+        return Ok(Value::Array(PhpArray::new()));
+    }
     drop(arr);
     r.set(Value::Array(out));
     Ok(Value::Array(removed))
@@ -1567,6 +1597,14 @@ fn array_walk_common(vm: &mut Vm, a: &mut Args, recursive: bool) -> R<Value> {
             for (k, v) in entries(&props) {
                 let old = v.deref();
                 let pr = PhpRef::new(old.clone());
+                // Assignments in the callback obey a typed property (test
+                // array_walk/bug79839).
+                if let Key::Str(name) = &k
+                    && !name.starts_with(b"\0")
+                    && let Some(p) = vm.typed_prop_info(&o, name)
+                {
+                    vm.type_ref(&pr, &p, None);
+                }
                 let mut args = vec![Value::Ref(pr.clone()), k.to_value()];
                 if let Some(x) = &extra {
                     args.push(x.clone());
