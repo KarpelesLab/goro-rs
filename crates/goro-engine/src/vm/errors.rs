@@ -383,8 +383,8 @@ impl Vm {
     /// returns the exception.
     pub(crate) fn dispatch_exception(&mut self, mut ex: ObjRef, entry: usize) -> R<()> {
         loop {
-            if let Some(h) = self.debugger
-                && let Err(u) = (h.exception)(self, &ex)
+            if crate::compiler::debug_markers()
+                && let Err(u) = crate::phpdbg::on_exception(self, &ex)
             {
                 self.unwind_frames(entry - 1);
                 return Err(u);

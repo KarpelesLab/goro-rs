@@ -7,8 +7,9 @@
 //! three-line source listing at each stop).
 //!
 //! The engine compiles code with statement markers (`Op::Ticks`, see
-//! [`crate::compiler::DEBUG_MARKERS`]) and calls [`HOOKS`] at each marker
-//! and each time an exception looks for a handler in a frame. Breakpoints
+//! [`crate::compiler::DEBUG_MARKERS`]) and calls [`on_marker`] at each
+//! marker, [`on_exception`] each time an exception looks for a handler in a
+//! frame; both act only while a script runs under the debugger. Breakpoints
 //! and stepping work per statement, not per Zend opline: an opcode
 //! breakpoint (`b ZEND_ECHO`) stops at the statements containing an
 //! instruction of that kind. Opline listings (`print`) and the oplog's
@@ -29,15 +30,9 @@ use std::rc::Rc;
 use goro_runtime::{ObjRef, PhpStr, Value, WeakObj};
 
 use crate::bytecode::{FuncCode, Op, fflags};
-use crate::vm::{DebugHooks, R, Unwind, Vm};
+use crate::vm::{R, Unwind, Vm};
 
 pub use funcs::PHPDBG_MODULE;
-
-/// The debugger's hooks into the engine.
-pub static HOOKS: DebugHooks = DebugHooks {
-    marker: on_marker,
-    exception: on_exception,
-};
 
 /// A breakpoint.
 pub(crate) struct Bp {
@@ -385,7 +380,7 @@ pub(crate) fn command_loop(vm: &mut Vm) -> Flow {
 // ------------------------------------------------------------ engines
 
 fn make_vm(ini: &[(Vec<u8>, Vec<u8>)]) -> Vm {
-    let mut vm = crate::startup_with(ini, &[&PHPDBG_MODULE], |vm| vm.out.sapi.phpdbg = true);
+    let mut vm = crate::startup(ini, &[&PHPDBG_MODULE]);
     vm.constants.insert(
         PhpStr::intern(b"PHP_SAPI"),
         Value::Str(PhpStr::from("phpdbg")),
@@ -457,7 +452,6 @@ fn do_run(args: Option<Vec<Vec<u8>>>, stdin: Option<Vec<u8>>) -> RunEnd {
     };
     let ini = with(|d| d.ini.clone());
     let mut vm = make_vm(&ini);
-    vm.debugger = Some(&HOOKS);
     let args = args.unwrap_or_else(|| with(|d| d.args.clone()));
     let mut argv = vec![script.path.clone()];
     argv.extend(args);
@@ -696,8 +690,12 @@ fn file_matches(bp: &[u8], file: &[u8]) -> bool {
     false
 }
 
-fn on_marker(vm: &mut Vm) -> R<()> {
-    if with(|d| d.in_hook) {
+/// At a statement marker, the instruction pointer past it. An error
+/// unwinds the script.
+#[cold]
+#[inline(never)]
+pub(crate) fn on_marker(vm: &mut Vm) -> R<()> {
+    if with(|d| d.in_hook || !d.running) {
         return Ok(());
     }
     let depth = vm.ex.frames.len();
@@ -899,8 +897,12 @@ fn frame_catches(vm: &Vm, code: &FuncCode, ip: u32, cls: &crate::class::Class) -
     false
 }
 
-fn on_exception(vm: &mut Vm, ex: &ObjRef) -> R<()> {
-    if with(|d| d.in_hook) {
+/// Each time the dispatcher looks for a handler of an exception in a
+/// frame. An error unwinds the script.
+#[cold]
+#[inline(never)]
+pub(crate) fn on_exception(vm: &mut Vm, ex: &ObjRef) -> R<()> {
+    if with(|d| d.in_hook || !d.running) {
         return Ok(());
     }
     let depth = vm.ex.frames.len();

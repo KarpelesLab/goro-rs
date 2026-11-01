@@ -838,7 +838,7 @@ pub enum Op {
         ty: u32,
     },
     /// Statement marker for a debugger (emitted only with
-    /// `compiler::DEBUG_MARKERS`): calls `Vm::debugger`'s hook.
+    /// `compiler::DEBUG_MARKERS`): calls `phpdbg::on_marker`.
     Ticks,
 }
 
