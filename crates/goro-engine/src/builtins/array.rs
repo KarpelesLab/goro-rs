@@ -770,6 +770,12 @@ fn array_fill(vm: &mut Vm, a: &mut Args) -> R<Value> {
     if n >= (1 << 31) {
         return vm.fthrow(a, "ValueError", "Argument #2 ($count) is too large");
     }
+    // Test ext/standard/tests/array/array_fill_error2.
+    if n == i32::MAX as i64 {
+        return Err(vm.fatal(&format!(
+            "Possible integer overflow in memory allocation ({n} * 16 + 0)"
+        )));
+    }
     if n == 0 {
         return Ok(Value::Array(PhpArray::new()));
     }

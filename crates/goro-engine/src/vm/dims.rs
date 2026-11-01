@@ -211,10 +211,10 @@ impl Vm {
                             goro_runtime::convert::float_repr(*f)
                         ))?;
                     }
-                    return Ok(Some(*f as i64));
+                    return Ok(Some(goro_runtime::convert::float_to_int_wrapping(*f)));
                 }
                 self.warn("String offset cast occurred")?;
-                *f as i64
+                goro_runtime::convert::float_to_int_wrapping(*f)
             }
             Value::Bool(b) => {
                 if !quiet {
@@ -1672,9 +1672,11 @@ impl Vm {
                 None => {
                     let p = goro_runtime::numeric::parse_numeric(s);
                     match p.kind {
+                        // "1.0E+121" is no integer offset (test
+                        // Zend/tests/bug80972).
                         goro_runtime::numeric::Numericness::Numeric => {
-                            self.warn("String offset cast occurred")?;
-                            p.num.to_f64() as i64
+                            return self
+                                .type_error("Cannot access offset of type string on string");
                         }
                         // A leading-numeric offset (observed on PHP 8.5;
                         // test tests/lang/bug19943).
@@ -1694,7 +1696,7 @@ impl Vm {
             },
             Value::Float(f) => {
                 self.warn("String offset cast occurred")?;
-                *f as i64
+                goro_runtime::convert::float_to_int_wrapping(*f)
             }
             Value::Bool(b) => {
                 self.warn("String offset cast occurred")?;
