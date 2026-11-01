@@ -18,12 +18,8 @@ impl InDoc {
         let mut input = input;
         if let Some((name, off)) = goro_xml::encoding::declared_encoding(input)
             && goro_xml::encoding::lookup(&name).is_none()
-            && let Some(mut utf8) = goro_charset::iconv::iconv(
-                name.as_bytes(),
-                b"UTF-8",
-                input,
-                &mut Vec::new(),
-            )
+            && let Some(mut utf8) =
+                goro_charset::iconv::iconv(name.as_bytes(), b"UTF-8", input, &mut Vec::new())
             && utf8.len() >= off + name.len()
             && &utf8[off..off + name.len()] == name.as_bytes()
         {
@@ -68,10 +64,7 @@ impl InDoc {
     }
 
     pub fn is_text(&self, n: NodeId) -> bool {
-        matches!(
-            self.arena.node_type(n),
-            NodeType::Text | NodeType::CData
-        )
+        matches!(self.arena.node_type(n), NodeType::Text | NodeType::CData)
     }
 
     pub fn local<'a>(&'a self, n: NodeId) -> &'a str {
@@ -95,7 +88,10 @@ impl InDoc {
     }
 
     pub fn qualified(&self, n: NodeId) -> String {
-        self.arena.qname(n).map(|q| q.qualified()).unwrap_or_default()
+        self.arena
+            .qname(n)
+            .map(|q| q.qualified())
+            .unwrap_or_default()
     }
 
     /// Whether `n` is element `local` in namespace `ns`.

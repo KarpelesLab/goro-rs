@@ -125,7 +125,10 @@ pub fn from_xml(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Valu
         }
         let id = h.strip_prefix('#').unwrap_or(&h).to_string();
         let Some(&target) = dx.ids.get(&id) else {
-            return Err(soap_error(vm, &format!("Encoding: Unresolved reference '{h}'")));
+            return Err(soap_error(
+                vm,
+                &format!("Encoding: Unresolved reference '{h}'"),
+            ));
         };
         if let Some(v) = dx.done.get(&target) {
             return Ok(v.clone());
@@ -174,7 +177,10 @@ fn decode_node(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Value
         }
     }
     if let Some((ns, name)) = enc_qname(dx, enc)
-        && dx.typemap.iter().any(|t| t.ns == ns && t.name == name && t.from_xml.is_some())
+        && dx
+            .typemap
+            .iter()
+            .any(|t| t.ns == ns && t.name == name && t.from_xml.is_some())
     {
         return typemap_from_xml(vm, dx, &ns, &name, n);
     }
@@ -302,7 +308,13 @@ fn register_early(dx: &mut Dx, n: NodeId, obj: &goro_runtime::ObjRef) {
 }
 
 /// Adds a property; repeated names become arrays.
-fn add_prop(vm: &mut Vm, obj: &goro_runtime::ObjRef, name: &str, v: Value, seen: &mut Vec<(String, bool)>) {
+fn add_prop(
+    vm: &mut Vm,
+    obj: &goro_runtime::ObjRef,
+    name: &str,
+    v: Value,
+    seen: &mut Vec<(String, bool)>,
+) {
     // A property the object already has (a classmapped class's default)
     // becomes an array too (observed on PHP 8.5; test
     // bugs/segfault_assertion_props.phpt).
@@ -348,8 +360,7 @@ pub fn set_prop(vm: &mut Vm, obj: &goro_runtime::ObjRef, name: &str, v: Value) {
     // Undeclared properties of a class with __set() go through it
     // (observed on PHP 8.5; test classmap004.phpt).
     let cls = vm.class_of(obj);
-    if vm.find_prop_slot_any(&cls, name.as_bytes()).is_none()
-        && cls.find_method(b"__set").is_some()
+    if vm.find_prop_slot_any(&cls, name.as_bytes()).is_none() && cls.find_method(b"__set").is_some()
     {
         let _ = vm.write_prop(obj, &PhpStr::from(name), v, None);
         return;
@@ -386,10 +397,7 @@ fn new_object_ns(
                 return Ok(o);
             }
             None => {
-                return Err(soap_error(
-                    vm,
-                    &format!("Encoding: Class '{c}' not found"),
-                ));
+                return Err(soap_error(vm, &format!("Encoding: Class '{c}' not found")));
             }
         }
     }
@@ -436,7 +444,13 @@ fn builtin(vm: &mut Vm, dx: &mut Dx, conv: Conv, n: NodeId) -> R<Value> {
         Conv::Normalized => {
             let t: String = node_text(d, n)
                 .chars()
-                .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
+                .map(|c| {
+                    if matches!(c, '\t' | '\n' | '\r') {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
                 .collect();
             Ok(out_str(dx, &t))
         }
@@ -589,7 +603,10 @@ fn map(vm: &mut Vm, dx: &mut Dx, n: NodeId) -> R<Value> {
             }
         }
         let Some(k) = key else {
-            return Err(soap_error(vm, "Encoding: Can't decode apache map, missing key"));
+            return Err(soap_error(
+                vm,
+                "Encoding: Can't decode apache map, missing key",
+            ));
         };
         let k = match k {
             Value::Int(i) => Key::Int(i),
@@ -826,8 +843,10 @@ fn complex(vm: &mut Vm, dx: &mut Dx, sdl: &Rc<Sdl>, t: TId, n: NodeId) -> R<Valu
     if array_info(sdl, t).is_some() {
         return soap_array(vm, dx, Some(t), n);
     }
-    if matches!(ty.deriv, Deriv::ComplexExtension | Deriv::ComplexRestriction)
-        && let Some(Enc::Builtin(b)) = ty.base.as_ref().and_then(|b| sdl.resolve(b))
+    if matches!(
+        ty.deriv,
+        Deriv::ComplexExtension | Deriv::ComplexRestriction
+    ) && let Some(Enc::Builtin(b)) = ty.base.as_ref().and_then(|b| sdl.resolve(b))
     {
         match b.conv {
             Conv::Map => return map(vm, dx, n),
@@ -1011,15 +1030,18 @@ fn any_rest(
     used: &mut Vec<NodeId>,
 ) -> R<()> {
     let d = dx.d;
-    let rest: Vec<NodeId> = d.kids(n).into_iter().filter(|c| !used.contains(c)).collect();
+    let rest: Vec<NodeId> = d
+        .kids(n)
+        .into_iter()
+        .filter(|c| !used.contains(c))
+        .collect();
     let mut arr = PhpArray::new();
     let mut pending = String::new();
     let mut typed_any = false;
     for c in rest {
         used.push(c);
-        let typed = xsi_type(d, c).is_some_and(|(ns, nm)| {
-            super::encode::enc_for(dx.sdl.as_deref(), &ns, &nm).is_some()
-        });
+        let typed = xsi_type(d, c)
+            .is_some_and(|(ns, nm)| super::encode::enc_for(dx.sdl.as_deref(), &ns, &nm).is_some());
         if typed {
             if !pending.is_empty() {
                 let _ = arr.push(Value::Str(PhpStr::from(std::mem::take(&mut pending))));

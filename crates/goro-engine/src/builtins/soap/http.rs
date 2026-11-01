@@ -200,7 +200,8 @@ pub fn send(
         if resp.status == 401
             && !tried_digest
             && matches!(vm.get_prop_raw(client, b"_use_digest"), Value::Bool(true))
-            && let Some(ch) = header(&resp.headers, "www-authenticate").and_then(|v| parse_challenge(&v))
+            && let Some(ch) =
+                header(&resp.headers, "www-authenticate").and_then(|v| parse_challenge(&v))
         {
             tried_digest = true;
             challenge = Some(ch);
@@ -223,10 +224,7 @@ pub fn send(
                 "gzip" | "x-gzip" => compcol_gunzip(&body),
                 "deflate" => compcol_inflate(&body),
                 _ => {
-                    return Ok(Err((
-                        "HTTP",
-                        format!("Unknown Content-Encoding '{enc}'"),
-                    )));
+                    return Ok(Err(("HTTP", format!("Unknown Content-Encoding '{enc}'"))));
                 }
             };
             match dec {
@@ -424,8 +422,7 @@ fn request_head(
     } else {
         h.push_str("Connection: close\r\n");
     }
-    let ua = str_prop(vm, client, "_user_agent")
-        .unwrap_or_else(|| "PHP-SOAP/8.5.4".to_string());
+    let ua = str_prop(vm, client, "_user_agent").unwrap_or_else(|| "PHP-SOAP/8.5.4".to_string());
     h.push_str(&format!("User-Agent: {ua}\r\n"));
     if let Value::Int(c) = vm.get_prop_raw(client, b"compression")
         && c & 32 != 0
@@ -479,7 +476,12 @@ fn request_head(
             if l.is_empty() {
                 continue;
             }
-            let name = l.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+            let name = l
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
             if matches!(
                 name.as_str(),
                 "host"
@@ -614,7 +616,9 @@ fn read_response(vm: &mut Vm, s: &mut Sock) -> Option<Resp> {
             }
             rest.extend_from_slice(&tmp[..n]);
         }
-    } else if let Some(len) = header(&headers, "content-length").and_then(|v| v.parse::<usize>().ok()) {
+    } else if let Some(len) =
+        header(&headers, "content-length").and_then(|v| v.parse::<usize>().ok())
+    {
         while rest.len() < len {
             let n = s.read(vm, &mut tmp).ok()?;
             if n == 0 {

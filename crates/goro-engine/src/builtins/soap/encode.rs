@@ -14,10 +14,8 @@ use goro_runtime::{Key, KeyRef, ObjRef, PhpArray, PhpStr, Value};
 
 use super::sdl::{Deriv, Enc, Kind, MKind, Model, SType, Sdl, TId, TRef};
 use super::types::{self, Bi, Conv};
-use super::xmlout::{
-    El, Kid, NS_APACHE, NS_SOAP11_ENC, NS_SOAP12_ENC, NS_XSD, NS_XSI, OutDoc,
-};
-use super::{soap_error, SoapState};
+use super::xmlout::{El, Kid, NS_APACHE, NS_SOAP11_ENC, NS_SOAP12_ENC, NS_XSD, NS_XSI, OutDoc};
+use super::{SoapState, soap_error};
 use crate::vm::{R, Vm};
 
 /// A typemap entry (PHP manual: SoapClient::__construct, `typemap`).
@@ -291,7 +289,11 @@ pub fn to_xml(
             && let Some(Enc::Builtin(b)) = enc
             && matches!(b.conv, Conv::Array | Conv::Struct | Conv::Map)
         {
-            let ns = if b.ns == NS_SOAP11_ENC { cx.enc_ns() } else { b.ns };
+            let ns = if b.ns == NS_SOAP11_ENC {
+                cx.enc_ns()
+            } else {
+                b.ns
+            };
             cx.set_type(el, ns, b.name);
         }
         if !literal
@@ -534,7 +536,11 @@ fn apply_typemap(
             None => cx.doc.ensure_ns(Some(el), NS_XSI),
         };
         let t = cx.doc.qname(Some(el), ns, name);
-        let at = if s[..end].ends_with('/') { end - 1 } else { end };
+        let at = if s[..end].ends_with('/') {
+            end - 1
+        } else {
+            end
+        };
         s.insert_str(at, &format!(" {prefix}:type=\"{t}\""));
     }
     replace_raw(cx, el, &s);
@@ -680,7 +686,10 @@ pub fn builtin_text(vm: &mut Vm, cx: &Cx, b: Bi, v: &Value) -> R<Option<String>>
     // gh15711.phpt).
     if let Value::Object(o) = &v
         && instance_of(vm, o, "UnitEnum")
-        && !matches!(b.conv, Conv::AnyType | Conv::Struct | Conv::Map | Conv::Array | Conv::AnyXml)
+        && !matches!(
+            b.conv,
+            Conv::AnyType | Conv::Struct | Conv::Map | Conv::Array | Conv::AnyXml
+        )
     {
         // Errors are kept while the rest is written; the last one is
         // thrown (observed on PHP 8.5; test gh15711.phpt).
@@ -770,7 +779,10 @@ fn builtin_to_xml(vm: &mut Vm, cx: &mut Cx, b: Bi, v: &Value, el: El, literal: b
     }
     // The list types NMTOKENS, IDREFS, ENTITIES carry no xsi:type
     // (observed on PHP 8.5; test gh15711.phpt).
-    let list = matches!(b.code, types::XSD_NMTOKENS | types::XSD_IDREFS | types::XSD_ENTITIES);
+    let list = matches!(
+        b.code,
+        types::XSD_NMTOKENS | types::XSD_IDREFS | types::XSD_ENTITIES
+    );
     if !literal && !list {
         let ns = if b.ns == NS_SOAP11_ENC && cx.version == 2 {
             NS_SOAP12_ENC
@@ -849,7 +861,11 @@ fn date_text(vm: &mut Vm, cx: &Cx, conv: Conv, v: &Value) -> R<String> {
                 Value::Int(n) => n,
                 _ => 0,
             };
-            Ok(format!("{}{}", vm.to_php_str(&r)?.to_string_lossy(), tz_suffix(off)))
+            Ok(format!(
+                "{}{}",
+                vm.to_php_str(&r)?.to_string_lossy(),
+                tz_suffix(off)
+            ))
         }
         _ => {
             let b = value_to_bytes(vm, v)?;
@@ -871,9 +887,7 @@ fn tz_suffix(off: i64) -> String {
 pub fn iter_values(vm: &mut Vm, v: &Value) -> R<Option<Vec<(Value, Value)>>> {
     match v {
         Value::Array(a) => Ok(Some(
-            a.iter()
-                .map(|(k, v)| (k.to_value(), v.deref()))
-                .collect(),
+            a.iter().map(|(k, v)| (k.to_value(), v.deref())).collect(),
         )),
         Value::Object(o) if instance_of(vm, o, "Traversable") => {
             let items = vm.iterate_to_vec(v, true)?;
@@ -1140,7 +1154,10 @@ pub fn array_info(sdl: &Sdl, t: TId) -> Option<ArrayInfo> {
         match ty.base.as_ref().and_then(|b| sdl.resolve(b)) {
             Some(Enc::Type(b))
                 if b != id
-                    && matches!(ty.deriv, Deriv::ComplexRestriction | Deriv::ComplexExtension) =>
+                    && matches!(
+                        ty.deriv,
+                        Deriv::ComplexRestriction | Deriv::ComplexExtension
+                    ) =>
             {
                 id = b
             }
@@ -1153,7 +1170,9 @@ pub fn array_info(sdl: &Sdl, t: TId) -> Option<ArrayInfo> {
 fn single_element(sdl: &Sdl, m: &Model) -> Option<TId> {
     match m.kind {
         MKind::Element => m.elem,
-        MKind::Group => sdl.group(m.group.as_ref()?).and_then(|g| single_element(sdl, g)),
+        MKind::Group => sdl
+            .group(m.group.as_ref()?)
+            .and_then(|g| single_element(sdl, g)),
         _ => {
             if m.items.len() == 1 {
                 single_element(sdl, &m.items[0])
@@ -1196,9 +1215,7 @@ pub fn fields(vm: &mut Vm, v: &Value) -> Vec<(PhpStr, Value)> {
     match v {
         Value::Object(o) => {
             let a = vm.plain_props_array(o, false);
-            a.iter()
-                .map(|(k, v)| (key_str(k), v.deref()))
-                .collect()
+            a.iter().map(|(k, v)| (key_str(k), v.deref())).collect()
         }
         Value::Array(a) => a.iter().map(|(k, v)| (key_str(k), v.deref())).collect(),
         _ => Vec::new(),
@@ -1410,8 +1427,10 @@ fn complex_to_xml(
         return array_to_xml(vm, cx, Some(t), v, el, literal);
     }
     // Derivations from built-in complex encodings (Apache Map, Struct).
-    if matches!(ty.deriv, Deriv::ComplexExtension | Deriv::ComplexRestriction)
-        && let Some(Enc::Builtin(b)) = ty.base.as_ref().and_then(|b| sdl.resolve(b))
+    if matches!(
+        ty.deriv,
+        Deriv::ComplexExtension | Deriv::ComplexRestriction
+    ) && let Some(Enc::Builtin(b)) = ty.base.as_ref().and_then(|b| sdl.resolve(b))
     {
         match b.conv {
             Conv::Map => return map_to_xml(vm, cx, v, el, literal),
@@ -1466,9 +1485,7 @@ fn complex_body(
 ) -> R<()> {
     let ty = &sdl.types[t];
     let base_complex = match ty.base.as_ref().and_then(|b| sdl.resolve(b)) {
-        Some(Enc::Type(b)) if b != t && sdl.types[b].kind == Kind::Complex && depth < 16 => {
-            Some(b)
-        }
+        Some(Enc::Type(b)) if b != t && sdl.types[b].kind == Kind::Complex && depth < 16 => Some(b),
         _ => None,
     };
     let is_ext = matches!(ty.deriv, Deriv::SimpleExtension | Deriv::ComplexExtension);
@@ -1508,14 +1525,7 @@ fn complex_body(
 }
 
 /// The attributes type `t` declares.
-fn own_attrs_to_xml(
-    vm: &mut Vm,
-    cx: &mut Cx,
-    sdl: &Rc<Sdl>,
-    t: TId,
-    v: &Value,
-    el: El,
-) -> R<()> {
+fn own_attrs_to_xml(vm: &mut Vm, cx: &mut Cx, sdl: &Rc<Sdl>, t: TId, v: &Value, el: El) -> R<()> {
     if !matches!(v, Value::Object(_) | Value::Array(_)) {
         return Ok(());
     }
@@ -1690,9 +1700,7 @@ fn declare_raw_prefixes(cx: &mut Cx, el: El, raw: &str) {
     ] {
         let tag = format!("<{p}:");
         let attr = format!(" {p}:");
-        if (raw.contains(&tag) || raw.contains(&attr))
-            && !raw.contains(&format!("xmlns:{p}="))
-        {
+        if (raw.contains(&tag) || raw.contains(&attr)) && !raw.contains(&format!("xmlns:{p}=")) {
             cx.doc.ensure_ns(Some(el), uri);
         }
     }

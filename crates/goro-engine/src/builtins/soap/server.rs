@@ -317,7 +317,9 @@ fn write_detail(
             to_xml(vm, cx, None, detail, el, true)?;
             // The value's fields become the detail's children.
             let kids = std::mem::take(&mut cx.doc.els[el].kids);
-            cx.doc.els[d].kids.retain(|k| !matches!(k, super::xmlout::Kid::El(e) if *e == el));
+            cx.doc.els[d]
+                .kids
+                .retain(|k| !matches!(k, super::xmlout::Kid::El(e) if *e == el));
             for k in kids {
                 if let super::xmlout::Kid::El(e) = &k {
                     cx.doc.els[*e].parent = Some(d);
@@ -686,12 +688,10 @@ pub fn add_soap_header(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 pub fn get_last_response(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     let this = a.this_obj().clone();
-    Ok(
-        match with(&this, |d| d.last_response.clone()).flatten() {
-            Some(r) => Value::Str(PhpStr::from(r)),
-            None => Value::Null,
-        },
-    )
+    Ok(match with(&this, |d| d.last_response.clone()).flatten() {
+        Some(r) => Value::Str(PhpStr::from(r)),
+        None => Value::Null,
+    })
 }
 
 /// SoapServer::fault(): sends a fault and ends the script.
@@ -700,9 +700,15 @@ pub fn fault(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let code = a.str(0).to_string_lossy();
     let raw_string = a.str(1);
     let string = raw_string.to_string_lossy();
-    let actor = a.opt_str(2).map(|s| s.to_string_lossy()).filter(|s| !s.is_empty());
+    let actor = a
+        .opt_str(2)
+        .map(|s| s.to_string_lossy())
+        .filter(|s| !s.is_empty());
     let details = a.val(3);
-    let name = a.opt_str(4).map(|s| s.to_string_lossy()).filter(|s| !s.is_empty());
+    let name = a
+        .opt_str(4)
+        .map(|s| s.to_string_lossy())
+        .filter(|s| !s.is_empty());
     let lang = a.str(5).to_string_lossy();
     let cls = vm.find_class(b"SoapFault", false)?.expect("SoapFault");
     let f = vm.instantiate(&cls)?;
@@ -719,7 +725,12 @@ pub fn fault(vm: &mut Vm, a: &mut Args) -> R<Value> {
     );
     super::set_fault_string(vm, &f, raw_string);
     let (version, sdl, st, headers) = with(&this, |d| {
-        (d.version, d.sdl.clone(), d.state.clone(), d.out_headers.clone())
+        (
+            d.version,
+            d.sdl.clone(),
+            d.state.clone(),
+            d.out_headers.clone(),
+        )
     })
     .unwrap_or((1, None, SoapState::default(), Vec::new()));
     let xml = fault_xml(vm, version, &f, sdl, &st, &headers, None)?;
@@ -754,7 +765,10 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let this = a.this_obj().clone();
     let constructed = with(&this, |d| d.constructed).unwrap_or(false);
     if !constructed {
-        return vm.throw("Error", "Cannot invoke methods on an uninitialized SoapServer");
+        return vm.throw(
+            "Error",
+            "Cannot invoke methods on an uninitialized SoapServer",
+        );
     }
     let version = with(&this, |d| d.version).unwrap_or(1);
     let request: Vec<u8> = match a.opt_str(0) {
@@ -784,7 +798,11 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Ok(Out::Fault(..)) | Ok(Out::Plain(..)) | Ok(Out::Early(..)) | Err(Unwind::Throw(_))
     );
     while vm.out.buffers.len() > level {
-        let f = if discard { "ob_end_clean" } else { "ob_end_flush" };
+        let f = if discard {
+            "ob_end_clean"
+        } else {
+            "ob_end_flush"
+        };
         vm.call_value(&Value::Str(PhpStr::from(f)), vec![])?;
     }
     let headers = with(&this, |d| {
@@ -792,8 +810,8 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
         std::mem::take(&mut d.out_headers)
     })
     .unwrap_or_default();
-    let (sdl, st) = with(&this, |d| (d.sdl.clone(), d.state.clone()))
-        .unwrap_or((None, SoapState::default()));
+    let (sdl, st) =
+        with(&this, |d| (d.sdl.clone(), d.state.clone())).unwrap_or((None, SoapState::default()));
     let out = match r {
         Ok(o) => o,
         Err(Unwind::Throw(e)) => {
@@ -868,7 +886,11 @@ fn decompress(vm: &mut Vm, req: Vec<u8>) -> Vec<u8> {
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(b"content-encoding"))
         .map(|(_, v)| String::from_utf8_lossy(v).to_ascii_lowercase());
-    let enc = enc.or_else(|| std::env::var("HTTP_CONTENT_ENCODING").ok().map(|s| s.to_ascii_lowercase()));
+    let enc = enc.or_else(|| {
+        std::env::var("HTTP_CONTENT_ENCODING")
+            .ok()
+            .map(|s| s.to_ascii_lowercase())
+    });
     match enc.as_deref().map(str::trim) {
         Some("gzip") | Some("x-gzip") => goro_ext_zlib::gzdecode(&req, 0).unwrap_or(req),
         Some("deflate") => goro_ext_zlib::zlib_decode(&req, 0)
@@ -899,14 +921,16 @@ fn wsdl_output(vm: &mut Vm, this: &ObjRef, version: i64) -> R<Value> {
                 _ => {
                     let f = make_fault(vm, "Server", "Couldn't find WSDL")?;
                     let xml = fault_xml(vm, version, &f, None, &SoapState::default(), &[], None)?;
-                    send_fault_doc(vm, version, &xml);                    return Err(Unwind::Exit);
+                    send_fault_doc(vm, version, &xml);
+                    return Err(Unwind::Exit);
                 }
             }
         }
         None => {
             let f = make_fault(vm, "Server", "WSDL generation is not supported yet")?;
             let xml = fault_xml(vm, version, &f, None, &SoapState::default(), &[], None)?;
-            send_fault_doc(vm, version, &xml);            return Err(Unwind::Exit);
+            send_fault_doc(vm, version, &xml);
+            return Err(Unwind::Exit);
         }
     }
     Ok(Value::Null)
@@ -969,14 +993,22 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
         return fault_out(vm, "VersionMismatch", "Wrong Version");
     };
     if doc.local(env) != "Envelope" {
-        return fault_out(vm, "Client", "looks like we got XML without \"Envelope\" element");
+        return fault_out(
+            vm,
+            "Client",
+            "looks like we got XML without \"Envelope\" element",
+        );
     }
     with(this, |d| d.version = version);
     let sender = if version == 2 { "Sender" } else { "Client" };
     // Envelope checks (SOAP 1.2 part 1 section 5.1, 5.3).
     for (ns, local, _) in doc.attrs(env) {
         if ns == env_ns && local == "encodingStyle" && version == 2 {
-            return fault_out(vm, sender, "encodingStyle cannot be specified on the Envelope");
+            return fault_out(
+                vm,
+                sender,
+                "encodingStyle cannot be specified on the Envelope",
+            );
         }
         if ns.is_empty() && version == 2 {
             return fault_out(
@@ -994,7 +1026,11 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
         } else if doc.ns(c) == env_ns && doc.local(c) == "Body" && body.is_none() {
             body = Some(c);
         } else if version == 2 {
-            return fault_out(vm, sender, "A SOAP 1.2 envelope can contain only Header and Body");
+            return fault_out(
+                vm,
+                sender,
+                "A SOAP 1.2 envelope can contain only Header and Body",
+            );
         }
     }
     let Some(body) = body else {
@@ -1209,7 +1245,16 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     let Some(call) = call else {
         // An empty body: only headers.
         return Ok(Out::Doc(response_doc(
-            vm, this, &sdl, &st, version, None, None, &[], &resp_headers, false,
+            vm,
+            this,
+            &sdl,
+            &st,
+            version,
+            None,
+            None,
+            &[],
+            &resp_headers,
+            false,
         )?));
     };
     let Some(fname) = func_name else {
@@ -1275,8 +1320,15 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
     if let Target::Object(_) = &target
         && !target.has(vm, &fname)?
     {
-        let call_name = func_def.as_ref().map(|f| f.name.clone()).unwrap_or(fname.clone());
-        let f = make_fault(vm, "Server", &format!("Function '{call_name}' doesn't exist"))?;
+        let call_name = func_def
+            .as_ref()
+            .map(|f| f.name.clone())
+            .unwrap_or(fname.clone());
+        let f = make_fault(
+            vm,
+            "Server",
+            &format!("Function '{call_name}' doesn't exist"),
+        )?;
         return Ok(Out::Fault(f, None));
     }
     if !target.has(vm, &fname)? {
@@ -1318,7 +1370,10 @@ fn proc_not_present(vm: &mut Vm) -> R<ObjRef> {
     super::init_fault(
         vm,
         &f,
-        Some((Some(NS_SOAP12_RPC.to_string()), "ProcedureNotPresent".into())),
+        Some((
+            Some(NS_SOAP12_RPC.to_string()),
+            "ProcedureNotPresent".into(),
+        )),
         "Procedure not present",
         None,
         Value::Null,

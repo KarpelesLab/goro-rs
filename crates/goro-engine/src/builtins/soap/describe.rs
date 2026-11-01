@@ -151,11 +151,7 @@ pub fn type_decl(sdl: &Sdl, t: TId) -> String {
             }
             s
         }
-        Kind::List => format!(
-            "list {} {{{}}}",
-            ty.name,
-            tref_name(sdl, &ty.list_item)
-        ),
+        Kind::List => format!("list {} {{{}}}", ty.name, tref_name(sdl, &ty.list_item)),
         Kind::Union => {
             let m: Vec<String> = ty
                 .union

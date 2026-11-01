@@ -680,8 +680,15 @@ impl<'a, 'b> Ctx<'a, 'b> {
         for c in self.d(di).kids(n) {
             let d = self.d(di);
             let ns = d.ns(c);
-            if [NS_WSDL, NS_WSDL_SOAP11, NS_WSDL_SOAP12, super::xmlout::NS_WSDL_HTTP, super::xmlout::NS_WSDL_MIME, XSD]
-                .contains(&ns)
+            if [
+                NS_WSDL,
+                NS_WSDL_SOAP11,
+                NS_WSDL_SOAP12,
+                super::xmlout::NS_WSDL_HTTP,
+                super::xmlout::NS_WSDL_MIME,
+                XSD,
+            ]
+            .contains(&ns)
             {
                 continue;
             }
@@ -796,8 +803,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     if self.d(bdi).attr(*bf, "name").as_deref() == Some(&fname) {
                         for sf in self.d(bdi).kids(*bf) {
                             if self.d(bdi).is(sf, soap_ns, "fault") {
-                                literal =
-                                    self.d(bdi).attr(sf, "use").as_deref() != Some("encoded");
+                                literal = self.d(bdi).attr(sf, "use").as_deref() != Some("encoded");
                                 ns = self.d(bdi).attr(sf, "namespace").unwrap_or_default();
                             }
                         }
@@ -838,9 +844,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             let Some(name) = d.attr(p, "name") else {
                 return err("No name associated with <part> '{}'");
             };
-            let element = d
-                .attr(p, "element")
-                .and_then(|e| d.resolve_qname(p, &e));
+            let element = d.attr(p, "element").and_then(|e| d.resolve_qname(p, &e));
             let typ = d
                 .attr(p, "type")
                 .and_then(|t| d.resolve_qname(p, &t))
@@ -1221,7 +1225,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let mut t = SType::new(Kind::Complex, &tname, &sc.tns);
         t.global = global;
         t.from_element = from_el;
-        t.mixed = matches!(self.d(di).attr(n, "mixed").as_deref(), Some("true") | Some("1"));
+        t.mixed = matches!(
+            self.d(di).attr(n, "mixed").as_deref(),
+            Some("true") | Some("1")
+        );
         let id = self.register(t, global);
         self.complex_body(sc, n, id)?;
         Ok(id)

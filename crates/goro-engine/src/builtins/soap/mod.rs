@@ -268,8 +268,14 @@ const CONSTANTS: &[(&str, ConstVal)] = &[
     ("SOAP_ENC_OBJECT", ConstVal::Int(301)),
     ("SOAP_ENC_ARRAY", ConstVal::Int(300)),
     ("XSD_1999_TIMEINSTANT", ConstVal::Int(401)),
-    ("XSD_NAMESPACE", ConstVal::Str("http://www.w3.org/2001/XMLSchema")),
-    ("XSD_1999_NAMESPACE", ConstVal::Str("http://www.w3.org/1999/XMLSchema")),
+    (
+        "XSD_NAMESPACE",
+        ConstVal::Str("http://www.w3.org/2001/XMLSchema"),
+    ),
+    (
+        "XSD_1999_NAMESPACE",
+        ConstVal::Str("http://www.w3.org/1999/XMLSchema"),
+    ),
     ("SOAP_SINGLE_ELEMENT_ARRAYS", ConstVal::Int(1)),
     ("SOAP_WAIT_ONE_WAY_CALLS", ConstVal::Int(2)),
     ("SOAP_USE_XSI_ARRAY_TYPE", ConstVal::Int(4)),
@@ -462,13 +468,16 @@ pub fn init_fault(
     vm.set_prop_raw(
         o,
         b"faultactor",
-        actor.map(|a| Value::Str(PhpStr::from(a))).unwrap_or(Value::Null),
+        actor
+            .map(|a| Value::Str(PhpStr::from(a)))
+            .unwrap_or(Value::Null),
     );
     vm.set_prop_raw(o, b"detail", detail);
     vm.set_prop_raw(
         o,
         b"_name",
-        name.map(|n| Value::Str(PhpStr::from(n))).unwrap_or(Value::Null),
+        name.map(|n| Value::Str(PhpStr::from(n)))
+            .unwrap_or(Value::Null),
     );
     vm.set_prop_raw(o, b"headerfault", header_fault);
     // The language defaults to "en" (observed on PHP 8.5).
@@ -577,7 +586,11 @@ fn soapheader_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let this = a.this_obj().clone();
     let ns = a.str(0);
     if ns.is_empty() {
-        return vm.fthrow(a, "ValueError", "Argument #1 ($namespace) must not be empty");
+        return vm.fthrow(
+            a,
+            "ValueError",
+            "Argument #1 ($namespace) must not be empty",
+        );
     }
     let name = a.str(1);
     if name.is_empty() {
@@ -618,17 +631,29 @@ fn soapfault_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Null => None,
         Value::Str(s) => {
             if s.is_empty() {
-                return vm.fthrow(a, "ValueError", "Argument #1 ($code) is not a valid fault code");
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    "Argument #1 ($code) is not a valid fault code",
+                );
             }
             Some((None, s.to_string_lossy()))
         }
         Value::Array(arr) => {
             let vals: Vec<Value> = arr.iter().map(|(_, v)| v.deref()).collect();
             if vals.len() != 2 {
-                return vm.fthrow(a, "ValueError", "Argument #1 ($code) is not a valid fault code");
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    "Argument #1 ($code) is not a valid fault code",
+                );
             }
             let (Value::Str(ns), Value::Str(c)) = (&vals[0], &vals[1]) else {
-                return vm.fthrow(a, "ValueError", "Argument #1 ($code) is not a valid fault code");
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    "Argument #1 ($code) is not a valid fault code",
+                );
             };
             Some((Some(ns.to_string_lossy()), c.to_string_lossy()))
         }
@@ -682,7 +707,11 @@ fn soapvar_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Null => types::UNKNOWN_TYPE,
         Value::Int(n) => {
             if !types::valid_code(n) {
-                return vm.fthrow(a, "ValueError", "Argument #2 ($encoding) is not a valid encoding");
+                return vm.fthrow(
+                    a,
+                    "ValueError",
+                    "Argument #2 ($encoding) is not a valid encoding",
+                );
             }
             n
         }

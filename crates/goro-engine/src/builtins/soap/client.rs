@@ -162,7 +162,9 @@ fn fetch(vm: &mut Vm, a: &Args, u: &str) -> Result<Vec<u8>, String> {
     }
     match super::super::file::open_stream(vm, a, u.as_bytes(), b"rb", true) {
         Ok(Some(mut s)) => Ok(super::super::file::read_rest(vm, &mut s)),
-        _ => Err(format!("failed to load \"{u}\": No such file or directory\n")),
+        _ => Err(format!(
+            "failed to load \"{u}\": No such file or directory\n"
+        )),
     }
 }
 
@@ -207,7 +209,11 @@ fn construct_inner(
         }
         let uri = opt(opts, "uri");
         if !matches!(uri, Some(Value::Str(_))) {
-            return Err(soap_php_error(vm, a, "'uri' option is required in nonWSDL mode"));
+            return Err(soap_php_error(
+                vm,
+                a,
+                "'uri' option is required in nonWSDL mode",
+            ));
         }
         if !matches!(opt(opts, "location"), Some(Value::Str(_))) {
             return Err(soap_php_error(
@@ -360,7 +366,16 @@ pub fn call(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let name = a.str(0).to_string_lossy();
     let args = a.array(1);
     let args: Vec<Value> = args.iter().map(|(_, v)| v.deref()).collect();
-    do_call(vm, a, &this, &name, args, PhpArray::new(), Value::Null, None)
+    do_call(
+        vm,
+        a,
+        &this,
+        &name,
+        args,
+        PhpArray::new(),
+        Value::Null,
+        None,
+    )
 }
 
 pub fn soap_call(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -446,7 +461,9 @@ fn do_call(
     pop_mode();
     let r = match r {
         Ok(v) => v,
-        Err(Unwind::Throw(f)) if !exceptions && super::is_fault_obj(vm, &Value::Object(f.clone())) => {
+        Err(Unwind::Throw(f))
+            if !exceptions && super::is_fault_obj(vm, &Value::Object(f.clone())) =>
+        {
             Value::Object(f)
         }
         Err(e) => return Err(e),
@@ -509,12 +526,25 @@ fn call_inner(
             };
             let style = int_prop(vm, this, "style").unwrap_or(1);
             let use_ = int_prop(vm, this, "use").unwrap_or(1);
-            let req = plain_request(vm, &mut cx, name, &uri, &args, headers, style != 2, use_ == 2)?;
+            let req = plain_request(
+                vm,
+                &mut cx,
+                name,
+                &uri,
+                &args,
+                headers,
+                style != 2,
+                use_ == 2,
+            )?;
             (req, action, None)
         }
     };
     if trace {
-        vm.set_prop_raw(this, b"__last_request", Value::Str(PhpStr::from(request.clone())));
+        vm.set_prop_raw(
+            this,
+            b"__last_request",
+            Value::Str(PhpStr::from(request.clone())),
+        );
     }
     let one_way = func.as_ref().is_some_and(|f| f.output.is_none());
     let location = location.unwrap_or_default();
@@ -582,7 +612,8 @@ fn finish(cx: &mut Cx, env: El, method: Option<El>, encoded: bool) {
         }
     } else {
         cx.doc.ensure_ns(Some(env), NS_SOAP11_ENC);
-        cx.doc.set_attr(env, "SOAP-ENV:encodingStyle", NS_SOAP11_ENC);
+        cx.doc
+            .set_attr(env, "SOAP-ENV:encodingStyle", NS_SOAP11_ENC);
     }
 }
 
@@ -627,7 +658,8 @@ pub fn write_headers(
         cx.doc.rename(el, &q);
         if bool_prop(vm, o, "mustUnderstand") {
             let a = format!("{prefix}:mustUnderstand");
-            cx.doc.set_attr(el, &a, if cx.version == 2 { "true" } else { "1" });
+            cx.doc
+                .set_attr(el, &a, if cx.version == 2 { "true" } else { "1" });
         }
         match vm.get_prop_raw(o, b"actor") {
             Value::Str(s) => {
@@ -1051,7 +1083,10 @@ fn parse_fault(
                         .map(super::sdl::Enc::Builtin);
                     let v = from_xml(vm, dx, enc, c)?;
                     raw_string = Some(vm.to_php_str(&v)?);
-                    string = raw_string.as_ref().map(|s| s.to_string_lossy()).unwrap_or_default();
+                    string = raw_string
+                        .as_ref()
+                        .map(|s| s.to_string_lossy())
+                        .unwrap_or_default();
                 }
                 "faultactor" => actor = Some(d.text(c)),
                 "detail" => detail = fault_detail(vm, dx, c, func)?,
@@ -1164,7 +1199,16 @@ pub fn do_request(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let action = a.str(2).to_string_lossy();
     let version = a.int_or(3, 1);
     let one_way = a.bool_or(4, false);
-    match super::http::send(vm, a, &this, request.as_bytes(), &location, &action, version, one_way)? {
+    match super::http::send(
+        vm,
+        a,
+        &this,
+        request.as_bytes(),
+        &location,
+        &action,
+        version,
+        one_way,
+    )? {
         Ok(resp) => Ok(Value::Str(PhpStr::from(resp))),
         Err((code, msg)) => {
             let f = make_fault(vm, code, &msg)?;
