@@ -14,7 +14,7 @@ use crate::compiler::Unit;
 use crate::func::Func;
 
 /// Stack the parser may use (it runs on the engine's large thread stack).
-pub const PARSER_STACK: usize = 512 << 20;
+pub const PARSER_STACK: usize = 128 << 20;
 
 /// The __halt_compiler() data offset of the original source, from the one
 /// of its converted form (the keyword is ASCII in both).

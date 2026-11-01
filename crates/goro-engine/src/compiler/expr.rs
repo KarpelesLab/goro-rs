@@ -89,7 +89,11 @@ impl<'a> Compiler<'a> {
         }
         // Test Zend/tests/class_name/class_name_as_scalar_error_002.
         if word == "parent"
+            // (`parent::C` in a constant expression fails at run time, test
+            // Zend/tests/invalid_parent_const_ref_leak; `parent::class`
+            // here, test class_name_as_scalar_error_002)
             && self.f.flags & fflags::CLOSURE == 0
+            && (with_static || self.f.flags & fflags::CONST_EXPR == 0)
             && self
                 .class
                 .as_ref()
@@ -1364,10 +1368,14 @@ impl<'a> Compiler<'a> {
             dst: d,
             cap: items.len() as u32,
         });
+        let mut last_line = line;
         for it in items {
+            // Reported on the line of the element before it (test
+            // Zend/tests/bug75426).
             let Some(it) = it else {
-                return self.err("Cannot use empty array elements in arrays", line);
+                return self.err("Cannot use empty array elements in arrays", last_line);
             };
+            last_line = it.span.line;
             self.f.line = it.span.line;
             if it.unpack {
                 let s = self.expr(&it.value)?;
@@ -2018,6 +2026,23 @@ impl<'a> Compiler<'a> {
                     let v = self.expr(&a.value)?;
                     self.free(v);
                     self.emit(Op::Send { src: v, arg: i });
+                }
+                // `f($a = &$b)`: a by-reference parameter gets the reference
+                // (test Zend/tests/bug72038).
+                ExprKind::AssignRef { target, .. } if matches!(target.kind, ExprKind::Variable(n) if n != b"this" && !is_superglobal(n)) =>
+                {
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
+                    self.emit(Op::Send { src: v, arg: i });
+                    let j2 = self.emit(Op::Jmp { t: 0 });
+                    self.patch_here(j);
+                    let ExprKind::Variable(n) = target.kind else {
+                        unreachable!()
+                    };
+                    let var = self.cv(n);
+                    self.emit(Op::SendVar { var, arg: i });
+                    self.patch_here(j2);
                 }
                 // A place through a temporary (`C[0]`, `func_get_args()[0]`):
                 // a value, or an error for a by-reference parameter (test

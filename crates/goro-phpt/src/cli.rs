@@ -24,7 +24,10 @@ options:
   --php-cgi PATH      CGI binary for tests with request sections (GET, POST,
                       COOKIE, EXPECTHEADERS...); default: `goro --cgi` with
                       the default --php, else php-cgi next to --php
-  --timeout SECS      per-run timeout (default 60)
+  --php-fpm PATH      FPM binary for sapi/fpm tests; default: goro (run as
+                      php-fpm) with the default --php, else php-fpm next
+                      to --php or in ../sbin
+  --timeout SECS     per-run timeout (default 60)
   -d KEY=VALUE        extra ini setting for every run (after the defaults)
   --root DIR          test-suite root: working directory of the runs and
                       base of test names (default: the nearest parent of the
@@ -37,7 +40,7 @@ options:
   --results FILE      write a result file (one STATUS<TAB>test line per test)
   --guard BASELINE    compare with a baseline result file and exit 1 if a test
                       that passed there does not pass now
-  --mem-limit MB      address-space limit of each test process (default 6144;
+  --mem-limit MB      address-space limit of each test process (default 4096;
                       0: none)
   --heavy             also run tests needing several GB of memory or disk
   --online            also run tests reaching hosts on the Internet
@@ -54,6 +57,7 @@ struct Options {
     jobs: usize,
     php: Option<PathBuf>,
     php_cgi: Option<PathBuf>,
+    php_fpm: Option<PathBuf>,
     timeout: u64,
     ini: Vec<(String, String)>,
     root: Option<PathBuf>,
@@ -80,6 +84,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         jobs: default_jobs(),
         php: None,
         php_cgi: None,
+        php_fpm: None,
         timeout: 60,
         ini: Vec::new(),
         root: None,
@@ -87,7 +92,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
         keep: false,
         results: None,
         guard: None,
-        mem_limit_mb: 6144,
+        mem_limit_mb: 4096,
         min_free_gb: 30,
         heavy: false,
         online: false,
@@ -131,6 +136,7 @@ fn parse_options(args: &[OsString]) -> Result<Options, String> {
             }
             "--php" => o.php = Some(value(&mut it, "--php")?.into()),
             "--php-cgi" => o.php_cgi = Some(value(&mut it, "--php-cgi")?.into()),
+            "--php-fpm" => o.php_fpm = Some(value(&mut it, "--php-fpm")?.into()),
             "--timeout" => {
                 let v = value(&mut it, "--timeout")?;
                 o.timeout = v
@@ -283,6 +289,37 @@ fn cgi_link(php: &Path) -> Option<PathBuf> {
     }
 }
 
+fn fpm_link_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("goro-phpt-fpm-{}", std::process::id()))
+}
+
+/// `DIR/bin/php` (the PHP binary) and `DIR/sbin/php-fpm` (the FPM
+/// binary), in a directory of its own under the temporary directory:
+/// sapi/fpm/tests/tester.inc looks for php-fpm in `../sbin` of
+/// TEST_PHP_EXECUTABLE's directory. Returns the `bin/php` path.
+fn fpm_links(php: &Path, fpm: &Path) -> Option<PathBuf> {
+    let dir = fpm_link_dir();
+    std::fs::create_dir(&dir).ok()?;
+    let ok = std::fs::create_dir(dir.join("bin")).is_ok()
+        && std::fs::create_dir(dir.join("sbin")).is_ok()
+        && std::os::unix::fs::symlink(php, dir.join("bin/php")).is_ok()
+        && std::os::unix::fs::symlink(fpm, dir.join("sbin/php-fpm")).is_ok();
+    if !ok {
+        remove_fpm_links();
+        return None;
+    }
+    Some(dir.join("bin/php"))
+}
+
+fn remove_fpm_links() {
+    let dir = fpm_link_dir();
+    let _ = std::fs::remove_file(dir.join("bin/php"));
+    let _ = std::fs::remove_file(dir.join("sbin/php-fpm"));
+    let _ = std::fs::remove_dir(dir.join("bin"));
+    let _ = std::fs::remove_dir(dir.join("sbin"));
+    let _ = std::fs::remove_dir(&dir);
+}
+
 /// `goro --test ARGS...`: returns the process exit code.
 pub fn test_main(args: &[OsString]) -> i32 {
     let o = match parse_options(args) {
@@ -429,6 +466,18 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
                 args: Vec::new(),
             }),
     };
+    // goro is php-fpm when run under that name; a binary given with
+    // --php-fpm, or found next to --php, is used through a link.
+    let fpm = match (&o.php_fpm, &o.php) {
+        (Some(f), _) => Some(find_program(f)),
+        (None, None) => Some(php.clone()),
+        (None, Some(_)) => php.parent().and_then(|d| {
+            [d.join("php-fpm"), d.join("../sbin/php-fpm")]
+                .into_iter()
+                .find(|c| c.is_file())
+        }),
+    };
+    let fpm_php = fpm.and_then(|f| fpm_links(&php, &f));
     let cfg = Config {
         php: php.clone(),
         root,
@@ -441,6 +490,7 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
         heavy: o.heavy,
         online: o.online,
         cgi,
+        fpm_php,
     };
     let jobs = schedule::jobs(&files);
     let all: Mutex<(Vec<TestResult>, Counts)> =
@@ -483,6 +533,9 @@ fn run_and_report(o: &Options, php: PathBuf, root: PathBuf, paths: &[PathBuf]) -
     {
         let _ = std::fs::remove_file(&c.program);
         let _ = std::fs::remove_dir(dir);
+    }
+    if cfg.fpm_php.is_some() {
+        remove_fpm_links();
     }
     let (results_list, counts) = all.into_inner().unwrap();
     let elapsed = start.elapsed();

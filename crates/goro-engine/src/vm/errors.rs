@@ -157,6 +157,26 @@ impl Vm {
         let file = String::from_utf8_lossy(file);
         let fatal_level =
             level & (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE) != 0;
+        if fatal_level && self.out.sapi.fpm && !crate::builtins::headers::sent(self) {
+            // fastcgi.error_header: the status line of a response ended by
+            // a fatal error (PHP manual: FPM, fastcgi.error_header; test
+            // sapi/fpm/tests/gh9981-fastcgi-error-header-reset.phpt).
+            if let Some(h) = self
+                .get_ini(b"fastcgi.error_header")
+                .filter(|h| !h.is_empty())
+            {
+                let h = h.to_vec();
+                if let Some(code) = h
+                    .split(|&c| c == b' ')
+                    .nth(1)
+                    .map(goro_runtime::convert::str_to_int)
+                    .filter(|&c| c >= 100)
+                {
+                    self.out.sapi.status = code;
+                }
+                self.out.sapi.status_line = Some(h);
+            }
+        }
         if fatal_level
             && self.out.sapi.web()
             && self.ini.display_errors == 0
@@ -185,6 +205,9 @@ impl Vm {
                         p.as_os_str().as_bytes(),
                     )))
                     .and_then(|mut f| f.write_all(format!("[{stamp}] {text}").as_bytes()));
+            } else if self.out.sapi.fpm {
+                // FPM's log and the web server's (FCGI_STDERR).
+                crate::fpm::request::sapi_log(text.trim_end_matches('\n').as_bytes());
             } else {
                 self.out.flush();
                 self.write_stderr(text.as_bytes());
@@ -797,9 +820,11 @@ impl Vm {
                         b"debug_backtrace" | b"debug_print_backtrace"
                     )
                 });
+                // eval frames have no "args" at all (observed on PHP 8.5;
+                // test Zend/tests/bug73156).
                 let args = if with_args && fname != "eval" && called_above {
                     Some(vec![Value::Str(code.file.clone())])
-                } else if with_args {
+                } else if with_args && fname != "eval" {
                     Some(Vec::new())
                 } else {
                     None

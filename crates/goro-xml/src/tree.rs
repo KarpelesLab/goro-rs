@@ -617,6 +617,10 @@ pub struct Arena {
     unheld_docs: Vec<NodeId>,
     /// Bumped by every structural change (live collections cache on it).
     generation: u64,
+    /// Comments made without content (`new DOMComment()`): an empty one is
+    /// not serialized (observed on PHP 8.5; test ext/dom/tests/
+    /// gh16338.phpt).
+    null_content: std::collections::HashSet<NodeId>,
 }
 
 /// Iterator over a sibling chain.
@@ -659,6 +663,7 @@ impl Arena {
             free: Vec::new(),
             unheld_docs: Vec::new(),
             generation: 0,
+            null_content: Default::default(),
         }
     }
 
@@ -668,11 +673,27 @@ impl Arena {
         }
         if let Some(i) = self.free.pop() {
             self.nodes[i as usize] = Some(n);
-            return NodeId(NonZeroU32::new(i).unwrap());
+            let id = NodeId(NonZeroU32::new(i).unwrap());
+            if !self.null_content.is_empty() {
+                self.null_content.remove(&id);
+            }
+            return id;
         }
         let i = self.nodes.len() as u32;
         self.nodes.push(Some(n));
         NodeId(NonZeroU32::new(i).unwrap())
+    }
+
+    /// Marks comment `id` as made without content.
+    pub fn mark_null_content(&mut self, id: NodeId) {
+        self.null_content.insert(id);
+    }
+
+    /// True if `id` is a comment made without content and still empty.
+    pub fn is_null_comment(&self, id: NodeId) -> bool {
+        !self.null_content.is_empty()
+            && self.null_content.contains(&id)
+            && matches!(&self.node(id).data, NodeData::Comment(t) if t.is_empty())
     }
 
     /// Number of live nodes.
@@ -2086,6 +2107,9 @@ impl Arena {
         let is_doc = matches!(data, NodeData::Document(_));
         let copy = self.alloc(Node::new(data, if is_doc { None } else { Some(doc) }));
         self.node_mut(copy).line = line;
+        if self.is_null_comment(n) {
+            self.null_content.insert(copy);
+        }
         let target_doc = if is_doc { copy } else { doc };
         if let Some(e) = self.element(n) {
             let tc = e.template_contents;

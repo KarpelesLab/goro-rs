@@ -243,7 +243,14 @@ impl Vm {
             Some(v) => Ok(v.clone()),
             None => {
                 self.undefined_var(r)?;
-                Ok(Value::Null)
+                // An attached frame (include) may have bound the variable
+                // to its owner's just now (a function's `global $x` made
+                // it after the include started).
+                Ok(match unsafe { &*self.slot_ptr(r) } {
+                    Some(Value::Ref(rf)) => rf.get(),
+                    Some(v) => v.clone(),
+                    None => Value::Null,
+                })
             }
         }
     }
@@ -1424,7 +1431,7 @@ impl Vm {
         let x = self.get(a)?;
         let y = self.get(b)?;
         // Test Zend/tests/operator_unsupported_types.
-        goro_runtime::ops::set_expression_operands(true);
+        goro_runtime::ops::set_expression_operands(a & CONST != 0 && b & CONST == 0);
         let r = self.binary_op(op, &x, &y);
         goro_runtime::ops::set_expression_operands(false);
         let r = r?;

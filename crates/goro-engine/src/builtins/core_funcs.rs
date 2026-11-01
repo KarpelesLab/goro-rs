@@ -667,10 +667,95 @@ fn header_register_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn register_shutdown_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.val(0);
+    let f = pin_relative_callable(vm, a.val(0));
+    let f = pin_this_callable(vm, f);
     let args = a.vals[1..].to_vec();
     vm.shutdown_functions.push((f, args));
     Ok(Value::Null)
+}
+
+/// A callable kept for later: a non-static method named by class, given in
+/// a method of that class, keeps the `$this` it would have been called with
+/// (test Zend/tests/register_shutdown_function_refcount).
+fn pin_this_callable(vm: &mut Vm, f: Value) -> Value {
+    let Some(this) = vm.this_obj() else {
+        return f;
+    };
+    let (class, method) = match f.deref() {
+        Value::Str(s) => match s.windows(2).position(|w| w == b"::") {
+            Some(p) => (PhpStr::new(&s[..p]), PhpStr::new(&s[p + 2..])),
+            None => return f,
+        },
+        Value::Array(a) if a.len() == 2 => {
+            match (
+                a.get_int(0).map(|x| x.deref()),
+                a.get_int(1).map(|x| x.deref()),
+            ) {
+                (Some(Value::Str(c)), Some(Value::Str(m))) => (c, m),
+                _ => return f,
+            }
+        }
+        _ => return f,
+    };
+    let Ok(Some(cls)) = vm.find_class(&class, false) else {
+        return f;
+    };
+    let this_cls = vm.class_of(&this);
+    let is_method = cls
+        .find_method(&crate::class::lower(&method))
+        .is_some_and(|m| m.flags & crate::class::mflags::STATIC == 0);
+    if is_method && (Rc::ptr_eq(&this_cls, &cls) || this_cls.is_subclass_of(&cls)) {
+        return Value::Array(PhpArray::from_values([
+            Value::Object(this),
+            Value::Str(method),
+        ]));
+    }
+    f
+}
+
+/// A callable kept for later: `self`/`parent`/`static` mean the classes of
+/// the scope it was given in (test Zend/tests/bug41026: the shutdown
+/// function runs with no class scope).
+fn pin_relative_callable(vm: &Vm, f: Value) -> Value {
+    let name_of = |c: &[u8]| -> Option<PhpStr> {
+        let l = c.to_ascii_lowercase();
+        let p = match &l[..] {
+            b"self" | b"parent" => vm.scope_ptr(),
+            b"static" => vm.static_class_ptr(),
+            _ => return None,
+        };
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: classes live as long as the VM.
+        let cls = unsafe { &*p };
+        if l == b"parent" {
+            cls.parent.as_ref().map(|c| c.name.clone())
+        } else {
+            Some(cls.name.clone())
+        }
+    };
+    match f.deref() {
+        Value::Array(a) if a.len() == 2 => {
+            if let (Some(Value::Str(c)), Some(m)) = (a.get_int(0).map(|x| x.deref()), a.get_int(1))
+                && let Some(n) = name_of(&c)
+            {
+                return Value::Array(PhpArray::from_values([Value::Str(n), m.deref()]));
+            }
+            f
+        }
+        Value::Str(s) => {
+            if let Some(p) = s.windows(2).position(|w| w == b"::")
+                && let Some(n) = name_of(&s[..p])
+            {
+                let mut v = n.to_vec();
+                v.extend_from_slice(&s[p..]);
+                return Value::Str(PhpStr::from(v));
+            }
+            f
+        }
+        _ => f,
+    }
 }
 
 fn get_defined_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -1215,6 +1300,12 @@ fn get_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Value::Str(s) => Key::from_php_str(&s),
             _ => continue,
         };
+        // A reference held by the property alone is a plain value (test
+        // Zend/tests/bug71336); a shared one stays a reference.
+        let v = match v {
+            Value::Ref(r) if r.refcount() <= 2 => r.get(),
+            v => v,
+        };
         out.insert(key, v);
     }
     Ok(Value::Array(out))
@@ -1725,6 +1816,12 @@ fn error_log(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     .is_ok();
                 return Ok(Value::Bool(ok));
             }
+            if vm.out.sapi.fpm {
+                // FPM's log and the web server's (FCGI_STDERR; tests
+                // sapi/fpm/tests/log-bm-*.phpt).
+                crate::fpm::request::sapi_log(&msg);
+                return Ok(Value::Bool(true));
+            }
             vm.out.flush();
             if vm.out.sapi.server {
                 // The web server's log (observed on PHP 8.5).
@@ -2157,6 +2254,8 @@ fn zero_int(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(if vm.out.sapi.server {
         "cli-server"
+    } else if vm.out.sapi.fpm {
+        "fpm-fcgi"
     } else if vm.out.sapi.cgi {
         "cgi-fcgi"
     } else {

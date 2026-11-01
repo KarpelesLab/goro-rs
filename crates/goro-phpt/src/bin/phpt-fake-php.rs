@@ -12,6 +12,7 @@
 //!   "allocated" (fails under the runner's address-space limit)
 //! - `touch PATH`, `rm PATH`, `exists PATH`: files relative to the script
 //! - `flaky PATH`: prints "first" and creates PATH, or "second" if it exists
+//! - `fd N`: prints whether file descriptor N is open ("open" or "closed")
 //!
 //! Other lines are ignored.
 
@@ -113,6 +114,10 @@ fn main() {
                 let _ = std::fs::remove_file(dir.join(rest));
             }
             "exists" => println!("{}", if dir.join(rest).exists() { "yes" } else { "no" }),
+            "fd" => {
+                let open = Path::new("/proc/self/fd").join(rest).exists();
+                println!("{}", if open { "open" } else { "closed" });
+            }
             "flaky" => {
                 let p = dir.join(rest);
                 if p.exists() {
