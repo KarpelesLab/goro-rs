@@ -106,7 +106,12 @@ pub fn finish_response(app_status: u32) -> bool {
         }
         a.finished = true;
         let mut out = Vec::new();
-        fcgi::stream_records(&mut out, fcgi::STDOUT, a.id, &std::mem::take(&mut a.pending_head));
+        fcgi::stream_records(
+            &mut out,
+            fcgi::STDOUT,
+            a.id,
+            &std::mem::take(&mut a.pending_head),
+        );
         fcgi::end_stream(&mut out, fcgi::STDOUT, a.id);
         if a.stderr_sent > 0 {
             fcgi::end_stream(&mut out, fcgi::STDERR, a.id);
@@ -297,7 +302,10 @@ pub fn resolve_paths(
         out.script = if discard_path {
             sf.clone().or(pt.clone())
         } else {
-            pt.clone().filter(|p| is_file(p)).or(sf.clone()).or(pt.clone())
+            pt.clone()
+                .filter(|p| is_file(p))
+                .or(sf.clone())
+                .or(pt.clone())
         };
         out.php_self = match &pi {
             Some(p) if !p.is_empty() => p.clone(),
@@ -429,11 +437,9 @@ fn ini_lines(vm: &mut Vm, text: &[u8]) -> Vec<(String, String)> {
         }
     }
     let mut out = Vec::new();
-    let Ok(ev) = goro_ext_standard::ini::parse(
-        text,
-        goro_ext_standard::ini::Mode::Normal,
-        &mut E(vm),
-    ) else {
+    let Ok(ev) =
+        goro_ext_standard::ini::parse(text, goro_ext_standard::ini::Mode::Normal, &mut E(vm))
+    else {
         return out;
     };
     for e in ev {
@@ -444,7 +450,9 @@ fn ini_lines(vm: &mut Vm, text: &[u8]) -> Vec<(String, String)> {
         } = e
         {
             let v = match value {
-                goro_ext_standard::ini::IniValue::Str(s) => String::from_utf8_lossy(&s).into_owned(),
+                goro_ext_standard::ini::IniValue::Str(s) => {
+                    String::from_utf8_lossy(&s).into_owned()
+                }
                 goro_ext_standard::ini::IniValue::Int(i) => i.to_string(),
                 goro_ext_standard::ini::IniValue::Float(f) => f.to_string(),
                 goro_ext_standard::ini::IniValue::Bool(true) => "1".into(),
@@ -570,7 +578,12 @@ pub fn run(vm: &mut Vm, req: &fcgi::Request, set: &Settings) -> i64 {
     let Some(script) = script else {
         // (observed behaviour of php-fpm as test
         // sapi/fpm/tests/bug69625-no-script-filename.phpt expects)
-        simple_response(vm, "404 Not Found", b"File not found.\n", "Primary script unknown");
+        simple_response(
+            vm,
+            "404 Not Found",
+            b"File not found.\n",
+            "Primary script unknown",
+        );
         return 404;
     };
     if !set.limit_extensions.is_empty()
@@ -772,13 +785,16 @@ pub fn run(vm: &mut Vm, req: &fcgi::Request, set: &Settings) -> i64 {
     let src = match std::fs::read(&script_path) {
         Ok(src) => src,
         Err(_) => {
-            simple_response(vm, "404 Not Found", b"File not found.\n", "Primary script unknown");
+            simple_response(
+                vm,
+                "404 Not Found",
+                b"File not found.\n",
+                "Primary script unknown",
+            );
             return 404;
         }
     };
-    if register_argv
-        && let Some(line) = crate::cgi::first_server_use(&src)
-    {
+    if register_argv && let Some(line) = crate::cgi::first_server_use(&src) {
         let _ = vm.raise_at(
             crate::vm::errors::E_DEPRECATED,
             "Deriving $_SERVER['argv'] from the query string is deprecated. Configure register_argc_argv=0 to turn this message off",

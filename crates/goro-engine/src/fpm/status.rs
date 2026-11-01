@@ -278,7 +278,11 @@ impl Status {
             "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\" lang=\"en\">\n<head><title>PHP-FPM Status Page</title></head>\n<body>\n<table>\n",
         );
         for (k, v) in self.rows(true) {
-            o.push_str(&format!("<tr><th>{}</th><td>{}</td></tr>\n", k, html_escape(&v)));
+            o.push_str(&format!(
+                "<tr><th>{}</th><td>{}</td></tr>\n",
+                k,
+                html_escape(&v)
+            ));
         }
         o.push_str("</table>\n");
         if full {
@@ -365,9 +369,15 @@ impl Status {
         let mut o = String::new();
         let mut m = |name: &str, help: &str, ty: &str, v: i64, type_first: bool| {
             if type_first {
-                o.push_str(&format!("# TYPE phpfpm_{} {}\n# HELP phpfpm_{} {}\n", name, ty, name, help));
+                o.push_str(&format!(
+                    "# TYPE phpfpm_{} {}\n# HELP phpfpm_{} {}\n",
+                    name, ty, name, help
+                ));
             } else {
-                o.push_str(&format!("# HELP phpfpm_{} {}\n# TYPE phpfpm_{} {}\n", name, help, name, ty));
+                o.push_str(&format!(
+                    "# HELP phpfpm_{} {}\n# TYPE phpfpm_{} {}\n",
+                    name, help, name, ty
+                ));
             }
             o.push_str(&format!("phpfpm_{} {}\n", name, v));
         };
@@ -381,18 +391,90 @@ impl Status {
             1,
             false,
         );
-        m("start_since", "The number of seconds since FPM has started.", "counter", self.start_since, false);
-        m("accepted_connections", "The number of requests accepted by the pool.", "counter", self.accepted, false);
-        m("listen_queue", "The number of requests in the queue of pending connections.", "gauge", self.listen_queue, false);
-        m("max_listen_queue", "The maximum number of requests in the queue of pending connections since FPM has started.", "counter", self.max_listen_queue, false);
-        m("listen_queue_length", "The size of the socket queue of pending connections.", "gauge", self.listen_queue_len, true);
-        m("idle_processes", "The number of idle processes.", "gauge", self.idle, false);
-        m("active_processes", "The number of active processes.", "gauge", self.active, false);
-        m("total_processes", "The number of idle + active processes.", "gauge", self.total, false);
-        m("max_active_processes", "The maximum number of active processes since FPM has started.", "counter", self.max_active, false);
-        m("max_children_reached", "The number of times, the process limit has been reached, when pm tries to start more children (works only for pm 'dynamic' and 'ondemand').", "counter", self.max_children_reached, false);
-        m("slow_requests", "The number of requests that exceeded your 'request_slowlog_timeout' value.", "counter", self.slow_requests, false);
-        m("memory_peak", "The memory usage peak since FPM has started.", "gauge", self.memory_peak, false);
+        m(
+            "start_since",
+            "The number of seconds since FPM has started.",
+            "counter",
+            self.start_since,
+            false,
+        );
+        m(
+            "accepted_connections",
+            "The number of requests accepted by the pool.",
+            "counter",
+            self.accepted,
+            false,
+        );
+        m(
+            "listen_queue",
+            "The number of requests in the queue of pending connections.",
+            "gauge",
+            self.listen_queue,
+            false,
+        );
+        m(
+            "max_listen_queue",
+            "The maximum number of requests in the queue of pending connections since FPM has started.",
+            "counter",
+            self.max_listen_queue,
+            false,
+        );
+        m(
+            "listen_queue_length",
+            "The size of the socket queue of pending connections.",
+            "gauge",
+            self.listen_queue_len,
+            true,
+        );
+        m(
+            "idle_processes",
+            "The number of idle processes.",
+            "gauge",
+            self.idle,
+            false,
+        );
+        m(
+            "active_processes",
+            "The number of active processes.",
+            "gauge",
+            self.active,
+            false,
+        );
+        m(
+            "total_processes",
+            "The number of idle + active processes.",
+            "gauge",
+            self.total,
+            false,
+        );
+        m(
+            "max_active_processes",
+            "The maximum number of active processes since FPM has started.",
+            "counter",
+            self.max_active,
+            false,
+        );
+        m(
+            "max_children_reached",
+            "The number of times, the process limit has been reached, when pm tries to start more children (works only for pm 'dynamic' and 'ondemand').",
+            "counter",
+            self.max_children_reached,
+            false,
+        );
+        m(
+            "slow_requests",
+            "The number of requests that exceeded your 'request_slowlog_timeout' value.",
+            "counter",
+            self.slow_requests,
+            false,
+        );
+        m(
+            "memory_peak",
+            "The memory usage peak since FPM has started.",
+            "gauge",
+            self.memory_peak,
+            false,
+        );
         o.push_str("# EOF\n");
         o
     }

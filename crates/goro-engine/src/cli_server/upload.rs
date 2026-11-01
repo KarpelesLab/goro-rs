@@ -59,6 +59,12 @@ pub struct Limits {
     /// mbstring.encoding_translation, a quoted parameter keeps them
     /// (test tests/basic/029.phpt).
     pub mb_lead: Option<fn(u8) -> bool>,
+    /// At request startup, going over max_input_vars is a warning and the
+    /// parts go on counting (test
+    /// sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt);
+    /// for request_parse_body() it ends the parsing with an exception
+    /// (test ext/standard/tests/http/request_parse_body/multipart_max_input_vars.phpt).
+    pub vars_warn_only: bool,
 }
 
 fn size_ini(vm: &Vm, k: &[u8], d: i64) -> i64 {
@@ -76,6 +82,7 @@ impl Limits {
             max_input_vars: size_ini(vm, b"max_input_vars", 1000),
             max_parts: size_ini(vm, b"max_multipart_body_parts", -1),
             mb_lead: None,
+            vars_warn_only: false,
         }
     }
 
@@ -339,17 +346,15 @@ pub fn parse(
                 }
                 nvars += 1;
                 if limits.max_input_vars >= 0 && nvars > limits.max_input_vars {
-                    // Warned once; the parts go on counting toward
-                    // max_multipart_body_parts (test
-                    // sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt).
+                    let msg = format!(
+                        "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                        limits.max_input_vars
+                    );
+                    if !limits.vars_warn_only {
+                        return Err(msg);
+                    }
                     if nvars == limits.max_input_vars + 1 {
-                        crate::request_vars::startup_warning(
-                            vm,
-                            &format!(
-                                "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-                                limits.max_input_vars
-                            ),
-                        );
+                        crate::request_vars::startup_warning(vm, &msg);
                     }
                     continue;
                 }

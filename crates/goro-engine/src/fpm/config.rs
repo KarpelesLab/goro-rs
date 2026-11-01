@@ -345,8 +345,8 @@ fn glob_files(pattern: &Path) -> Vec<PathBuf> {
 }
 
 /// Parses the configuration; errors are logged ("[file:line] ...") and
-/// make the result an error.
-pub fn load(file: &Path, prefix: &Path, consts: ConstLookup) -> Result<Config, ()> {
+/// make the result None.
+pub fn load(file: &Path, prefix: &Path, consts: ConstLookup) -> Option<Config> {
     let mut cfg = Config {
         file: file.to_path_buf(),
         ..Default::default()
@@ -360,10 +360,8 @@ pub fn load(file: &Path, prefix: &Path, consts: ConstLookup) -> Result<Config, (
         depth: 0,
     };
     p.file(file);
-    if !p.ok {
-        return Err(());
-    }
-    Ok(cfg)
+    let ok = p.ok;
+    ok.then_some(cfg)
 }
 
 struct Parser<'a, 'c> {
@@ -455,9 +453,7 @@ impl Parser<'_, '_> {
                     Some(p) => {
                         let k = String::from_utf8_lossy(t[..p].trim_ascii()).into_owned();
                         let mut v = t[p + 1..].trim_ascii();
-                        if v.len() >= 2
-                            && (v[0] == b'"' || v[0] == b'\'')
-                            && v[v.len() - 1] == v[0]
+                        if v.len() >= 2 && (v[0] == b'"' || v[0] == b'\'') && v[v.len() - 1] == v[0]
                         {
                             v = &v[1..v.len() - 1];
                         }
@@ -498,7 +494,14 @@ impl Parser<'_, '_> {
         }
     }
 
-    fn set(&mut self, file: &Path, line: usize, key: &str, offset: Option<Option<String>>, v: String) {
+    fn set(
+        &mut self,
+        file: &Path,
+        line: usize,
+        key: &str,
+        offset: Option<Option<String>>,
+        v: String,
+    ) {
         if key == "include" {
             let pat = if Path::new(&v).is_absolute() {
                 PathBuf::from(&v)
@@ -514,7 +517,12 @@ impl Parser<'_, '_> {
                 self.error(
                     file,
                     line,
-                    &format!("Unable to include {} from {} at line {}", v, file.display(), line),
+                    &format!(
+                        "Unable to include {} from {} at line {}",
+                        v,
+                        file.display(),
+                        line
+                    ),
                 );
                 return;
             }
@@ -812,11 +820,7 @@ impl Parser<'_, '_> {
             }
         }
         if invalid {
-            self.error(
-                file,
-                line,
-                &format!("Invalid value '{}' for '{}'", v, key),
-            );
+            self.error(file, line, &format!("Invalid value '{}' for '{}'", v, key));
         }
     }
 }
@@ -936,7 +940,10 @@ pub fn dump(cfg: &Config) -> Vec<String> {
         kv("rlimit_core", p.rlimit_core.to_string());
         kv("chroot", opt(&p.chroot));
         kv("chdir", opt(&p.chdir));
-        kv("catch_workers_output", yes_no(p.catch_workers_output).into());
+        kv(
+            "catch_workers_output",
+            yes_no(p.catch_workers_output).into(),
+        );
         kv(
             "decorate_workers_output",
             yes_no(p.decorate_workers_output).into(),

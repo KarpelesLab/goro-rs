@@ -64,9 +64,7 @@ impl Capture {
     /// Text bytes that fit on one line.
     fn room(&self, st: &Style) -> usize {
         if st.decorate {
-            st.limit
-                .saturating_sub(self.prefix(st).len() + 3)
-                .max(16)
+            st.limit.saturating_sub(self.prefix(st).len() + 3).max(16)
         } else {
             st.limit.saturating_sub(1).max(16)
         }

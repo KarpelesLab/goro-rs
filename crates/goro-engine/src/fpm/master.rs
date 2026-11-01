@@ -252,7 +252,10 @@ fn check(cfg: &mut Config, test: bool) -> bool {
         return false;
     }
     if cfg.pools.is_empty() {
-        log::zlog(Level::Error, "No pool defined. at least one pool section must be specified in config file");
+        log::zlog(
+            Level::Error,
+            "No pool defined. at least one pool section must be specified in config file",
+        );
         return false;
     }
     // SAFETY: geteuid has no preconditions.
@@ -377,8 +380,7 @@ fn check(cfg: &mut Config, test: bool) -> bool {
                         p.start_servers
                     ),
                 );
-            } else if p.start_servers < p.min_spare_servers
-                || p.start_servers > p.max_spare_servers
+            } else if p.start_servers < p.min_spare_servers || p.start_servers > p.max_spare_servers
             {
                 return err(&format!(
                     "pm.start_servers({}) must not be less than pm.min_spare_servers({}) and not greater than pm.max_spare_servers({})",
@@ -398,7 +400,10 @@ fn check(cfg: &mut Config, test: bool) -> bool {
                 p.process_idle_timeout
             ));
         }
-        for (what, v) in [("pm.status_path", &p.status_path), ("ping.path", &p.ping_path)] {
+        for (what, v) in [
+            ("pm.status_path", &p.status_path),
+            ("ping.path", &p.ping_path),
+        ] {
             if let Some(v) = v
                 && !v.starts_with('/')
             {
@@ -429,7 +434,9 @@ fn parse_listen(s: &str) -> Result<Addr, String> {
         return Ok(Addr::Unix(PathBuf::from(s)));
     }
     let (host, port) = if let Some(r) = s.strip_prefix('[') {
-        let close = r.find(']').ok_or_else(|| format!("invalid address '{}'", s))?;
+        let close = r
+            .find(']')
+            .ok_or_else(|| format!("invalid address '{}'", s))?;
         let rest = r[close + 1..].strip_prefix(':').unwrap_or("");
         (Some(r[..close].to_string()), rest.to_string())
     } else if let Some(p) = s.rfind(':') {
@@ -788,11 +795,7 @@ impl Master {
             (unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0)
                 .then_some((fds[0], fds[1]))
         };
-        let (out, err) = if catch {
-            (mk(), mk())
-        } else {
-            (None, None)
-        };
+        let (out, err) = if catch { (mk(), mk()) } else { (None, None) };
         // SAFETY: the engine thread forks; the child continues as a
         // worker and never returns here.
         let pid = unsafe { libc::fork() };
@@ -884,8 +887,8 @@ impl Master {
                 );
             } else if libc::WIFSIGNALED(st) {
                 let s = libc::WTERMSIG(st);
-                let calm = (self.stopping || c.quitting)
-                    && (s == libc::SIGTERM || s == libc::SIGQUIT);
+                let calm =
+                    (self.stopping || c.quitting) && (s == libc::SIGTERM || s == libc::SIGQUIT);
                 log::pool(
                     if calm { Level::Notice } else { Level::Warning },
                     &name,
@@ -1408,7 +1411,7 @@ pub fn main(opts: Options) -> i32 {
         log::zlog(Level::Error, "FPM initialization failed");
         78
     };
-    let Ok(mut cfg) = config::load(&file, &prefix, &lookup) else {
+    let Some(mut cfg) = config::load(&file, &prefix, &lookup) else {
         return fail();
     };
     drop(consts_vm);

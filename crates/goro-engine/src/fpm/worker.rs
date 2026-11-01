@@ -205,11 +205,11 @@ pub fn access_line(fmt: &str, d: &Done, pool: &str) -> Vec<u8> {
         }
         i += 1;
         let mut arg: Option<String> = None;
-        if b.get(i) == Some(&b'{') {
-            if let Some(e) = b[i..].iter().position(|&c| c == b'}') {
-                arg = Some(String::from_utf8_lossy(&b[i + 1..i + e]).into_owned());
-                i += e + 1;
-            }
+        if b.get(i) == Some(&b'{')
+            && let Some(e) = b[i..].iter().position(|&c| c == b'}')
+        {
+            arg = Some(String::from_utf8_lossy(&b[i + 1..i + e]).into_owned());
+            i += e + 1;
         }
         let Some(&k) = b.get(i) else { break };
         i += 1;
@@ -491,7 +491,10 @@ impl<'a> W<'a> {
             {
                 log::zlog(
                     Level::Error,
-                    &format!("Connection disallowed: IP address '{}' has been dropped.", ip),
+                    &format!(
+                        "Connection disallowed: IP address '{}' has been dropped.",
+                        ip
+                    ),
                 );
                 // SAFETY: closing the connection we accepted.
                 unsafe { libc::close(conn) };
@@ -577,7 +580,10 @@ impl<'a> W<'a> {
         let (_, active) = self.board().counts();
         self.board().head().max_active.fetch_max(active, Relaxed);
         if self.pool().status_of.is_some() {
-            main.board.head().max_active.fetch_max(main.board.counts().1, Relaxed);
+            main.board
+                .head()
+                .max_active
+                .fetch_max(main.board.counts().1, Relaxed);
         }
 
         let script_name = r
@@ -588,7 +594,12 @@ impl<'a> W<'a> {
         let own = if mcfg.ping_path.as_deref().map(str::as_bytes) == Some(&script_name[..]) {
             Some((
                 200,
-                own_response(r.id, self.expose, "text/plain", mcfg.ping_response.as_bytes()),
+                own_response(
+                    r.id,
+                    self.expose,
+                    "text/plain",
+                    mcfg.ping_response.as_bytes(),
+                ),
             ))
         } else if mcfg.status_path.as_deref().map(str::as_bytes) == Some(&script_name[..]) {
             let st = super::status::Status::of(
