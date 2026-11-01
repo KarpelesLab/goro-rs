@@ -381,7 +381,8 @@ impl Vm {
                 self.put(dst, Value::Bool(false));
                 return Ok(());
             };
-            let v = self.run_attached(&src, &path, false, fname)?;
+            let name = crate::builtins::userstream::take_opened_path().unwrap_or(path.clone());
+            let v = self.run_attached(&src, &name, false, fname)?;
             self.put(dst, v);
             return Ok(());
         }
