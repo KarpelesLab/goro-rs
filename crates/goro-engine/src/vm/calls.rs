@@ -61,6 +61,9 @@ fn closure_statics(c: &Callee, base: *mut Slot) -> *const RefCell<Vec<Option<Php
     let Some(cd) = any.downcast_ref::<ClosureData>() else {
         return &c.func.statics;
     };
+    if cd.from_callable {
+        return &c.func.statics;
+    }
     if !base.is_null()
         && let FuncKind::User(code) = &c.func.kind
     {
@@ -191,6 +194,20 @@ pub struct ClosureData {
     /// magic method name for `__call` trampolines.
     pub magic_name: Option<PhpStr>,
     pub from_callable: bool,
+}
+
+impl ClosureData {
+    /// Where a call keeps its static variables: a closure has its own, while
+    /// one made from a callable shares those of the function (test
+    /// Zend/tests/bug75474).
+    #[inline]
+    fn statics_cell(&self) -> *const RefCell<Vec<Option<PhpRef>>> {
+        if self.from_callable {
+            &self.func.statics
+        } else {
+            &self.statics
+        }
+    }
 }
 
 impl goro_runtime::NativeData for ClosureData {
@@ -429,7 +446,7 @@ impl Vm {
             cd.scope,
             0,
             Some(o.clone()),
-            &cd.statics,
+            cd.statics_cell(),
         );
         for (k, (inner, _, _)) in code.uses.iter().enumerate() {
             if let Some(Some(v)) = cd.captured.get(k) {
@@ -2075,7 +2092,17 @@ impl Vm {
                         k => k,
                     };
                     match k {
-                        Value::Str(s) => self.send_named(Value::Str(s), x, true)?,
+                        Value::Str(s) => {
+                            let f = self.pending().func.clone();
+                            let at = self
+                                .params_of(&f)
+                                .iter()
+                                .position(|p| p.name == s && p.by_ref);
+                            if let Some(at) = at {
+                                self.unpack_by_ref_warning(&f, at as u32)?;
+                            }
+                            self.send_named(Value::Str(s), x, true)?
+                        }
                         Value::Int(_) | Value::Null => {
                             if self.pending().has_named {
                                 return self.throw(
@@ -2084,6 +2111,10 @@ impl Vm {
                                 );
                             }
                             let arg = self.pending().argc;
+                            if self.pending_arg_by_ref(arg) {
+                                let f = self.pending().func.clone();
+                                self.unpack_by_ref_warning(&f, arg)?;
+                            }
                             self.put_arg(arg, x);
                         }
                         _ => {
@@ -2098,6 +2129,17 @@ impl Vm {
             }
             _ => self.throw("Error", "Only arrays and Traversables can be unpacked"),
         }
+    }
+
+    /// A Traversable's elements go by value (tests Zend/tests/arg_unpack/
+    /// traversable_with_by_ref_parameters, named_params/unpack).
+    fn unpack_by_ref_warning(&mut self, f: &Func, arg: u32) -> R<()> {
+        let msg = format!(
+            "Cannot pass by-reference argument {} of {}() by unpacking a Traversable, passing by-value instead",
+            arg + 1,
+            self.func_display_name(f)
+        );
+        self.warn(&msg)
     }
 
     pub(crate) fn send_named(&mut self, name: Value, v: Value, _unpack: bool) -> R<()> {
@@ -3323,7 +3365,9 @@ impl Vm {
             (Value::Float(_), m) if m & tmask::FLOAT != 0 => return Ok(()),
             _ => {}
         }
-        let r = self.check_type(&val, ty, strict, func.scope.get(), static_class);
+        // (a closure's `self` is its own scope: test Zend/tests/bug75079)
+        let scope = self.frame().scope;
+        let r = self.check_type(&val, ty, strict, scope, static_class);
         match r? {
             Check::Ok => Ok(()),
             Check::Coerced(c) => {
@@ -3612,7 +3656,8 @@ impl Vm {
         let p = self.slot_ptr(param);
         let v = unsafe { (*p).clone() }.unwrap_or_default();
         let strict = code.flags & fflags::STRICT != 0;
-        match self.check_type(&v, ty, strict, func.scope.get(), self.frame().static_class)? {
+        let scope = self.frame().scope;
+        match self.check_type(&v, ty, strict, scope, self.frame().static_class)? {
             Check::Ok => Ok(()),
             Check::Coerced(c) => {
                 unsafe { *p = Some(c) };
@@ -3669,11 +3714,15 @@ impl Vm {
         let none = implicit;
         let v = match self.peek(src) {
             Some(v) => v.deref(),
+            // An undefined variable warns first (test
+            // Zend/tests/undef_var_in_verify_return).
+            None if !implicit => self.get(src)?,
             None => Value::Null,
         };
         let strict = code.flags & fflags::STRICT != 0;
         let static_class = self.frame().static_class;
-        match self.check_type(&v, ty, strict, func.scope.get(), static_class)? {
+        let scope = self.frame().scope;
+        match self.check_type(&v, ty, strict, scope, static_class)? {
             Check::Ok => Ok(()),
             Check::Coerced(c) => {
                 // The compiler puts constants in a temporary first.
@@ -3897,7 +3946,7 @@ impl Vm {
                     unsafe { *base.add(*inner as usize) = Some(v.clone()) };
                 }
             }
-            &cd.statics
+            cd.statics_cell()
         };
         if !binds_simply(self, code, base, argc) {
             let mut v = Vec::with_capacity(argc as usize);
