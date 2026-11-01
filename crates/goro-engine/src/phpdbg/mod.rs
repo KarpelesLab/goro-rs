@@ -460,6 +460,7 @@ fn do_run(args: Option<Vec<Vec<u8>>>, stdin: Option<Vec<u8>>) -> RunEnd {
     vm.included.push(key.clone());
     vm.included_set.insert(key);
     crate::builtins::output::start_ini_handler(&mut vm);
+    vm.arm_stack_limit();
     vm.arm_memory_limit();
     with(|d| {
         d.running = true;

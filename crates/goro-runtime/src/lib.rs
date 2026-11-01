@@ -114,6 +114,7 @@ pub mod numeric;
 pub mod object;
 pub mod ops;
 pub mod reference;
+pub mod stack;
 pub mod string;
 pub mod value;
 

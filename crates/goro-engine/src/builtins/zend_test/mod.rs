@@ -235,6 +235,10 @@ pub static MODULE: Module = Module {
             call_stack_get,
         ),
         (
+            "function zend_test_zend_call_stack_use_all(): int",
+            call_stack_use_all,
+        ),
+        (
             "function zend_test_compile_to_ast(string $str): string",
             compile_to_ast,
         ),
@@ -864,7 +868,7 @@ fn fill_packed_array(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 fn call_stack_get(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     let marker = 0u8;
     let pos = &marker as *const u8 as usize;
-    let Some((base, size)) = thread_stack() else {
+    let Some((base, size)) = crate::vm::setup::thread_stack() else {
         return Ok(Value::Null);
     };
     let mut out = PhpArray::new();
@@ -872,23 +876,26 @@ fn call_stack_get(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     out.insert(Key::from("base"), hex(base));
     out.insert(Key::from("max_size"), hex(size));
     out.insert(Key::from("position"), hex(pos));
-    out.insert(Key::from("EG(stack_limit)"), hex(base.saturating_sub(size)));
+    let low = goro_runtime::stack::current().0;
+    out.insert(Key::from("EG(stack_limit)"), hex(low));
     Ok(Value::Array(out))
 }
 
-/// (top of the stack, size) of the current thread.
-fn thread_stack() -> Option<(usize, usize)> {
-    unsafe {
-        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
-            return None;
-        }
-        let mut addr: *mut libc::c_void = std::ptr::null_mut();
-        let mut size: libc::size_t = 0;
-        let ok = libc::pthread_attr_getstack(&attr, &mut addr, &mut size) == 0;
-        libc::pthread_attr_destroy(&mut attr);
-        ok.then(|| (addr as usize + size, size))
+/// Recurses until the stack limit (test
+/// Zend/tests/stack_limit/stack_limit_009): the number of levels.
+#[inline(never)]
+fn use_all_levels(n: i64) -> i64 {
+    let page = [0u8; 4096];
+    std::hint::black_box(&page);
+    if goro_runtime::stack::exceeded() {
+        n
+    } else {
+        use_all_levels(n + 1) + std::hint::black_box(0)
     }
+}
+
+fn call_stack_use_all(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    Ok(Value::Int(use_all_levels(0)))
 }
 
 /// Runs `$source_string` as the file `$filename`: from a shebang line

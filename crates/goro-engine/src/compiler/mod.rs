@@ -691,7 +691,7 @@ impl<'a> Compiler<'a> {
             file: self.file.clone(),
             ops: std::mem::take(&mut f.ops),
             lines: std::mem::take(&mut f.lines),
-            consts: std::mem::take(&mut f.consts),
+            consts: Consts::from_values(std::mem::take(&mut f.consts)),
             num_cvs: f.num_cvs,
             num_slots: f.max_slot,
             cv_names,
@@ -2143,4 +2143,17 @@ thread_local! {
 #[inline]
 pub(crate) fn debug_markers() -> bool {
     DEBUG_MARKERS.with(|c| c.get())
+}
+
+/// The fatal error for running out of native stack while compiling (tests
+/// Zend/tests/stack_limit/stack_limit_012, 013).
+pub(crate) fn stack_exhausted_error(line: u32) -> CompileError {
+    let (_, size) = goro_runtime::stack::current();
+    CompileError {
+        notices: Vec::new(),
+        message: format!(
+            "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression"
+        ),
+        line,
+    }
 }

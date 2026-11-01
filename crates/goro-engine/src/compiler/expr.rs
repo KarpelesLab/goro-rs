@@ -204,6 +204,10 @@ impl<'a> Compiler<'a> {
 
     /// The value of a compile-time constant expression, if it is one.
     pub(crate) fn const_value(&mut self, e: &'a Expr<'a>) -> Option<Value> {
+        // The general path reports it (test Zend/tests/stack_limit/stack_limit_013).
+        if goro_runtime::stack::exceeded() {
+            return None;
+        }
         match &e.kind {
             ExprKind::Int(i) => Some(Value::Int(*i)),
             ExprKind::Float(f) => Some(Value::Float(*f)),
@@ -369,6 +373,10 @@ impl<'a> Compiler<'a> {
     /// producers.
     pub(crate) fn expr_hint(&mut self, e: &'a Expr<'a>, hint: Reg) -> CResult<Reg> {
         let line = e.span.line;
+        // Tests Zend/tests/stack_limit/stack_limit_012, 013.
+        if goro_runtime::stack::exceeded() {
+            return Err(super::stack_exhausted_error(line));
+        }
         let saved_line = self.f.line;
         self.f.line = line;
         let r = self.expr_inner(e, hint);

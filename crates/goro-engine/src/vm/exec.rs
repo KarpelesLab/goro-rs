@@ -30,28 +30,9 @@ fn needs_drop_value(v: &Value) -> bool {
 /// ints with the sign of the dividend.
 #[inline(always)]
 pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
-    fast_arith_slots(op, value_as_slot(x), value_as_slot(y))
-}
-
-// A value and the slot holding it have the same layout: `None` is a spare
-// tag of `Value`, which `peek_slot` and `value_as_slot` rely on (a slot
-// never reads as a value unless it is `Some`).
-const _: () = assert!(std::mem::size_of::<Slot>() == std::mem::size_of::<Value>());
-
-/// A value viewed as a defined slot.
-#[inline(always)]
-fn value_as_slot(v: &Value) -> &Slot {
-    // SAFETY: see the assertion above.
-    unsafe { &*(v as *const Value as *const Slot) }
-}
-
-/// [`fast_arith`] on operands read as slots (`None` for an undefined
-/// variable takes the general path, like any other non-number).
-#[inline(always)]
-pub(crate) fn fast_arith_slots(op: Bin, x: &Slot, y: &Slot) -> Option<Value> {
     use Value::{Bool, Float, Int};
     match (x, y) {
-        (Some(Int(a)), Some(Int(b))) => {
+        (Int(a), Int(b)) => {
             let (a, b) = (*a, *b);
             Some(match op {
                 // (a match, not `unwrap_or`: the unused default would go
@@ -101,17 +82,15 @@ pub(crate) fn fast_arith_slots(op: Bin, x: &Slot, y: &Slot) -> Option<Value> {
                 _ => return None,
             })
         }
-        (Some(Float(_)), Some(Float(_)))
-        | (Some(Int(_)), Some(Float(_)))
-        | (Some(Float(_)), Some(Int(_))) => {
+        (Float(_), Float(_)) | (Int(_), Float(_)) | (Float(_), Int(_)) => {
             let fa = match x {
-                Some(Int(i)) => *i as f64,
-                Some(Float(f)) => *f,
+                Int(i) => *i as f64,
+                Float(f) => *f,
                 _ => unreachable!(),
             };
             let fb = match y {
-                Some(Int(i)) => *i as f64,
-                Some(Float(f)) => *f,
+                Int(i) => *i as f64,
+                Float(f) => *f,
                 _ => unreachable!(),
             };
             Some(match op {
@@ -123,15 +102,21 @@ pub(crate) fn fast_arith_slots(op: Bin, x: &Slot, y: &Slot) -> Option<Value> {
                 Bin::Le => Bool(fa <= fb),
                 Bin::Eq => Bool(fa == fb),
                 Bin::Ne => Bool(fa != fb),
-                Bin::Identical if matches!((x, y), (Some(Float(_)), Some(Float(_)))) => {
-                    Bool(fa == fb)
-                }
-                Bin::NotIdentical if matches!((x, y), (Some(Float(_)), Some(Float(_)))) => {
-                    Bool(fa != fb)
-                }
+                Bin::Identical if matches!((x, y), (Float(_), Float(_))) => Bool(fa == fb),
+                Bin::NotIdentical if matches!((x, y), (Float(_), Float(_))) => Bool(fa != fb),
                 _ => return None,
             })
         }
+        _ => None,
+    }
+}
+
+/// [`fast_arith`] on operands read as slots (`None` for an undefined
+/// variable takes the general path, like any other non-number).
+#[inline(always)]
+pub(crate) fn fast_arith_slots(op: Bin, x: &Slot, y: &Slot) -> Option<Value> {
+    match (x, y) {
+        (Some(x), Some(y)) => fast_arith(op, x, y),
         _ => None,
     }
 }
@@ -198,7 +183,8 @@ impl Vm {
     pub(crate) fn peek_slot(&self, r: Reg) -> &Slot {
         if r & CONST != 0 {
             let code = self.code_ref();
-            value_as_slot(unsafe { code.consts.get_unchecked((r & !CONST) as usize) })
+            // SAFETY: constant operands are in range.
+            unsafe { code.consts.slot_unchecked((r & !CONST) as usize) }
         } else {
             unsafe { &*self.slot_ptr(r) }
         }
@@ -515,6 +501,13 @@ impl Vm {
     pub fn run(&mut self) -> R<Value> {
         let entry = self.ex.frames.len();
         self.run_depth += 1;
+        // Each nested run is native recursion: the call does not start, and
+        // the caller's handlers see the error (tests Zend/tests/stack_limit/*).
+        if goro_runtime::stack::exceeded() {
+            self.unwind_frames(entry - 1);
+            self.run_depth -= 1;
+            return Err(self.stack_exhausted());
+        }
         let r = loop {
             match self.exec(entry) {
                 Ok(v) => break Ok(v),
