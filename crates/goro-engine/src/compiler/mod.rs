@@ -341,7 +341,11 @@ pub fn compile_program<'a>(
         e.notices = std::mem::take(&mut c.notices);
         return Err(e);
     }
-    // Implicit `return 1` of a file (include's result).
+    // Implicit `return 1` of a file (include's result). A debugger shows
+    // it on the file's last line (test sapi/phpdbg/tests/next_001.phpt).
+    if debug_markers() {
+        c.f.line = src.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+    }
     let one = c.int_const(1);
     c.emit(Op::Return { src: one });
     let halt = prog.halt_compiler_offset;
@@ -379,6 +383,18 @@ impl<'a> Compiler<'a> {
 
     #[inline]
     pub(crate) fn emit(&mut self, op: Op) -> usize {
+        if matches!(
+            op,
+            Op::Return { .. }
+                | Op::ReturnRef { .. }
+                | Op::GeneratorReturn { .. }
+                | Op::FastCall { .. }
+                | Op::FastRet { .. }
+        ) && debug_markers()
+        {
+            self.f.ops.push(Op::Ticks);
+            self.f.lines.push(self.f.line);
+        }
         self.f.ops.push(op);
         self.f.lines.push(self.f.line);
         self.f.ops.len() - 1
@@ -957,6 +973,10 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn stmt(&mut self, s: &'a Stmt<'a>) -> CResult<()> {
+        if debug_markers() && is_executable_stmt(s) {
+            self.f.line = s.span.line;
+            self.emit(Op::Ticks);
+        }
         self.stmt_inner(s)?;
         if self.ticks > 0
             && !matches!(
@@ -1868,11 +1888,22 @@ impl<'a> Compiler<'a> {
                 range: range_idx as u32,
             });
         }
+        // Debugger markers of the finally entry and exit stand on the line
+        // of the `finally` keyword (test sapi/phpdbg/tests/stepping_001.phpt).
+        let fin_line = match t.finally {
+            Some(fin) if debug_markers() => fin
+                .first()
+                .map(|s| finally_line(self.src, s.span.start as usize, s.span.line)),
+            _ => None,
+        };
         self.f.regions.push(Region::Try(range_idx as u32));
         self.block(t.body)?;
         self.f.regions.pop();
         let mut to_end = Vec::new();
         if has_finally {
+            if let Some(l) = fin_line {
+                self.f.line = l;
+            }
             let at = self.emit(Op::FastCall { t: 0, ret });
             self.f.finallys.last_mut().unwrap().fastcalls.push(at);
         }
@@ -1917,6 +1948,9 @@ impl<'a> Compiler<'a> {
                 self.block(c.body)?;
                 self.f.regions.pop();
                 if has_finally {
+                    if let Some(l) = fin_line {
+                        self.f.line = l;
+                    }
                     let at = self.emit(Op::FastCall { t: 0, ret });
                     self.f.finallys.last_mut().unwrap().fastcalls.push(at);
                 }
@@ -1937,6 +1971,9 @@ impl<'a> Compiler<'a> {
             self.f.regions.push(Region::Finally(range_idx as u32));
             self.block(fin)?;
             self.f.regions.pop();
+            if let Some(l) = fin_line {
+                self.f.line = l;
+            }
             self.emit(Op::FastRet {
                 ret,
                 try_index: range_idx as u32,
@@ -1989,6 +2026,39 @@ impl<'a> Compiler<'a> {
             self.emit(Op::JmpZ { c, t: 0 })
         })
     }
+}
+
+/// Statements a debugger stops at (declarations, blocks and `try` itself
+/// run no code of their own).
+fn is_executable_stmt(s: &Stmt<'_>) -> bool {
+    match &s.kind {
+        StmtKind::InlineHtml(t) => !t.is_empty(),
+        StmtKind::Block(_)
+        | StmtKind::Try(_)
+        | StmtKind::Label(_)
+        | StmtKind::Declare(_)
+        | StmtKind::Function(_)
+        | StmtKind::Class(_)
+        | StmtKind::Namespace { .. }
+        | StmtKind::Use { .. }
+        | StmtKind::GroupUse { .. }
+        | StmtKind::Nop
+        | StmtKind::HaltCompiler { .. } => false,
+        _ => true,
+    }
+}
+
+/// The line of the `finally` keyword before the source offset `before`
+/// (for debugger markers; the AST keeps no span for it).
+fn finally_line(src: &[u8], before: usize, fallback: u32) -> u32 {
+    let end = before.min(src.len());
+    let Some(p) = src[..end]
+        .windows(7)
+        .rposition(|w| w.eq_ignore_ascii_case(b"finally"))
+    else {
+        return fallback;
+    };
+    src[..p].iter().filter(|&&b| b == b'\n').count() as u32 + 1
 }
 
 fn is_shebang_or_empty(t: &[u8]) -> bool {
@@ -2059,4 +2129,18 @@ thread_local! {
     /// UTF-8 (the internal encoding).
     pub static LITERAL_ENCODING: std::cell::Cell<Option<goro_charset::Encoding>> =
         const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
+    /// Emit statement markers (`Op::Ticks`) for a debugger (phpdbg): one
+    /// before each executable statement, each match arm, each return and
+    /// each entry into and exit from a finally block. Off by default: plain
+    /// runs get no marker at all.
+    pub static DEBUG_MARKERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether statement markers are emitted (see [`DEBUG_MARKERS`]).
+#[inline]
+pub(crate) fn debug_markers() -> bool {
+    DEBUG_MARKERS.with(|c| c.get())
 }

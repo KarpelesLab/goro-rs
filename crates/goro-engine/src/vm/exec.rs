@@ -546,7 +546,8 @@ impl Vm {
             let op = unsafe { &*pc };
             self.ex.top.pc = unsafe { pc.add(1) };
             match *op {
-                Op::Nop | Op::Ticks => {}
+                Op::Nop => {}
+                Op::Ticks => crate::phpdbg::on_marker(self)?,
                 Op::Assign { dst, src } => {
                     // A scalar over a scalar: in place, nothing released.
                     let scalar = match self.peek_slot(src) {

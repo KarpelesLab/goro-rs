@@ -673,6 +673,14 @@ impl<'a> Compiler<'a> {
                 let f = c.chain_base(callee)?;
                 c.free(f);
                 let nargs = args.as_slice().len() as u32;
+                // A closure called where it is written: the call stands on
+                // the closure's last line (tests
+                // sapi/phpdbg/tests/exceptions_001.phpt, exceptions_002.phpt).
+                let line = if matches!(callee.kind, ExprKind::Closure(_) | ExprKind::ArrowFn(_)) {
+                    callee.span.end_line
+                } else {
+                    line
+                };
                 c.f.line = line;
                 c.emit(Op::InitDynCall { callee: f, nargs });
                 c.finish_call(args, hint, line)
@@ -1470,6 +1478,11 @@ impl<'a> Compiler<'a> {
         for (i, arm) in arms.iter().enumerate() {
             starts[i] = self.here();
             self.f.line = arm.body.span.line;
+            if super::debug_markers() {
+                // A debugger can stop at an arm (tests
+                // sapi/phpdbg/tests/match_breakpoints_*.phpt).
+                self.emit(Op::Ticks);
+            }
             let v = self.expr(&arm.body)?;
             self.free(v);
             self.emit(Op::Copy { dst: d, src: v });

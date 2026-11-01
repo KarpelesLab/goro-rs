@@ -406,6 +406,12 @@ impl Vm {
     /// returns the exception.
     pub(crate) fn dispatch_exception(&mut self, mut ex: ObjRef, entry: usize) -> R<()> {
         loop {
+            if crate::compiler::debug_markers()
+                && let Err(u) = crate::phpdbg::on_exception(self, &ex)
+            {
+                self.unwind_frames(entry - 1);
+                return Err(u);
+            }
             let depth = self.ex.frames.len();
             let ip = self.ex.ip().saturating_sub(1) as u32;
             let code = self.ex.frames[depth - 1].code;
@@ -809,6 +815,9 @@ impl Vm {
                     3 => "require",
                     4 => "require_once",
                     5 => "eval",
+                    // (7: a debugger's evaluation, test
+                    // sapi/phpdbg/tests/exceptions_002.phpt)
+                    7 => "unknown",
                     _ => "include",
                 };
                 // The innermost frame (code of the included file itself
@@ -822,7 +831,7 @@ impl Vm {
                 });
                 // eval frames have no "args" at all (observed on PHP 8.5;
                 // test Zend/tests/bug73156).
-                let args = if with_args && fname != "eval" && called_above {
+                let args = if with_args && fname != "eval" && fname != "unknown" && called_above {
                     Some(vec![Value::Str(code.file.clone())])
                 } else if with_args && fname != "eval" {
                     Some(Vec::new())

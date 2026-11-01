@@ -2258,6 +2258,9 @@ fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         "fpm-fcgi"
     } else if vm.out.sapi.cgi {
         "cgi-fcgi"
+    } else if crate::compiler::debug_markers() {
+        // (Only the phpdbg SAPI sets the flag.)
+        "phpdbg"
     } else {
         "cli"
     })))
