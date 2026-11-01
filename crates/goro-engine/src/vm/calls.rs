@@ -1404,6 +1404,12 @@ impl Vm {
                 };
                 let is_static = f.flags & mflags::STATIC != 0
                     && !(f.is_native() && unsafe { (*cls_ptr).native.static_this });
+                if !f.is_native() {
+                    let scope = f.scope.get();
+                    let this = if is_static { None } else { Some(o) };
+                    self.push_user(f, this, cls_ptr, scope, 0);
+                    return Ok(());
+                }
                 let cb = Callee {
                     scope: f.scope.get(),
                     func: f,

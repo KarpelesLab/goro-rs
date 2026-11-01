@@ -1029,7 +1029,20 @@ impl Vm {
                         }
                     }
                     let v = self.get_hot(src)?;
-                    self.send_val(arg, v, false)?;
+                    // SAFETY: a call is pending; its fresh parameter slot.
+                    unsafe {
+                        let s = self.plain_arg_slot(arg);
+                        if !s.is_null() {
+                            debug_assert!((*s).is_none());
+                            std::ptr::write(s, Some(v));
+                            // Nothing released (and a constant ran no code).
+                            if src & CONST != 0 {
+                                continue;
+                            }
+                        } else {
+                            self.send_val(arg, v, false)?;
+                        }
+                    }
                 }
                 Op::SendValRef { src, arg } => {
                     // A by-reference function's result passes its reference
@@ -1044,7 +1057,29 @@ impl Vm {
                         v => self.send_val(arg, v, true)?,
                     }
                 }
-                Op::SendVar { var, arg } => self.send_var(var, arg)?,
+                Op::SendVar { var, arg } => {
+                    // A defined variable to a by-value parameter's fresh slot.
+                    // SAFETY: a slot of the frame, and a call is pending.
+                    unsafe {
+                        let src = self.slot_ptr(var);
+                        if (*src).is_some() {
+                            let s = self.plain_arg_slot(arg);
+                            if !s.is_null() {
+                                debug_assert!((*s).is_none());
+                                let v = match &*src {
+                                    Some(Value::Int(i)) => Value::Int(*i),
+                                    Some(Value::Ref(r)) => r.get(),
+                                    Some(v) => v.clone(),
+                                    None => std::hint::unreachable_unchecked(),
+                                };
+                                std::ptr::write(s, Some(v));
+                                // Nothing released.
+                                continue;
+                            }
+                        }
+                    }
+                    self.send_var(var, arg)?
+                }
                 Op::SendRef { src, arg } => {
                     let v = self.get_raw(src);
                     self.send_ref(arg, v)?;
