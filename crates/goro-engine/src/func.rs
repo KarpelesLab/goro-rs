@@ -22,6 +22,11 @@ pub struct NativeSig {
     pub by_ref_return: bool,
     pub variadic: bool,
     pub ret_text: Option<String>,
+    /// Which arguments go by reference ([`crate::bytecode::byref_mask`]).
+    pub byref: u64,
+    /// Arguments matching their types exactly need no further checks (no
+    /// check by the function's name applies).
+    pub quick: bool,
 }
 
 pub enum FuncKind {

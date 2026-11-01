@@ -407,7 +407,7 @@ impl Vm {
     pub(crate) fn dispatch_exception(&mut self, mut ex: ObjRef, entry: usize) -> R<()> {
         loop {
             let depth = self.ex.frames.len();
-            let ip = self.ex.ip.saturating_sub(1) as u32;
+            let ip = self.ex.ip().saturating_sub(1) as u32;
             let code = self.ex.frames[depth - 1].code;
             let code = unsafe { &*code };
             let mut handled = false;
@@ -427,7 +427,7 @@ impl Vm {
                     self.truncate_pending(tr.call_depth);
                     self.free_live_ranges(code, ip, tr.catch);
                     self.cur_exception = Some(ex.clone());
-                    self.ex.ip = tr.catch as usize;
+                    self.ex.set_ip(tr.catch as usize);
                     handled = true;
                     break;
                 }
@@ -440,7 +440,7 @@ impl Vm {
                     let p = self.slot_ptr(tr.finally_ret);
                     let old = unsafe { (*p).replace(Value::Null) };
                     drop(old);
-                    self.ex.ip = tr.finally as usize;
+                    self.ex.set_ip(tr.finally as usize);
                     handled = true;
                     break;
                 }
@@ -599,7 +599,7 @@ impl Vm {
             }
         }
         if !matched {
-            self.ex.ip = next as usize;
+            self.ex.set_ip(next as usize);
             return Ok(());
         }
         let ex = self.cur_exception.take().unwrap();
@@ -796,11 +796,8 @@ impl Vm {
                 (None, 0)
             } else {
                 let caller = &ex.frames[i - 1];
-                let cip = caller.ip.saturating_sub(1);
-                (
-                    Some(caller.code().file.clone()),
-                    caller.code().line_of(cip as usize),
-                )
+                let cip = caller.ip().saturating_sub(1);
+                (Some(caller.code().file.clone()), caller.code().line_of(cip))
             };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
                 // (6: a front controller's file, without a frame of its own)

@@ -30,9 +30,28 @@ fn needs_drop_value(v: &Value) -> bool {
 /// ints with the sign of the dividend.
 #[inline(always)]
 pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
+    fast_arith_slots(op, value_as_slot(x), value_as_slot(y))
+}
+
+// A value and the slot holding it have the same layout: `None` is a spare
+// tag of `Value`, which `peek_slot` and `value_as_slot` rely on (a slot
+// never reads as a value unless it is `Some`).
+const _: () = assert!(std::mem::size_of::<Slot>() == std::mem::size_of::<Value>());
+
+/// A value viewed as a defined slot.
+#[inline(always)]
+fn value_as_slot(v: &Value) -> &Slot {
+    // SAFETY: see the assertion above.
+    unsafe { &*(v as *const Value as *const Slot) }
+}
+
+/// [`fast_arith`] on operands read as slots (`None` for an undefined
+/// variable takes the general path, like any other non-number).
+#[inline(always)]
+pub(crate) fn fast_arith_slots(op: Bin, x: &Slot, y: &Slot) -> Option<Value> {
     use Value::{Bool, Float, Int};
     match (x, y) {
-        (Int(a), Int(b)) => {
+        (Some(Int(a)), Some(Int(b))) => {
             let (a, b) = (*a, *b);
             Some(match op {
                 // (a match, not `unwrap_or`: the unused default would go
@@ -82,15 +101,17 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
                 _ => return None,
             })
         }
-        (Float(_), Float(_)) | (Int(_), Float(_)) | (Float(_), Int(_)) => {
+        (Some(Float(_)), Some(Float(_)))
+        | (Some(Int(_)), Some(Float(_)))
+        | (Some(Float(_)), Some(Int(_))) => {
             let fa = match x {
-                Int(i) => *i as f64,
-                Float(f) => *f,
+                Some(Int(i)) => *i as f64,
+                Some(Float(f)) => *f,
                 _ => unreachable!(),
             };
             let fb = match y {
-                Int(i) => *i as f64,
-                Float(f) => *f,
+                Some(Int(i)) => *i as f64,
+                Some(Float(f)) => *f,
                 _ => unreachable!(),
             };
             Some(match op {
@@ -102,8 +123,12 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
                 Bin::Le => Bool(fa <= fb),
                 Bin::Eq => Bool(fa == fb),
                 Bin::Ne => Bool(fa != fb),
-                Bin::Identical if matches!((x, y), (Float(_), Float(_))) => Bool(fa == fb),
-                Bin::NotIdentical if matches!((x, y), (Float(_), Float(_))) => Bool(fa != fb),
+                Bin::Identical if matches!((x, y), (Some(Float(_)), Some(Float(_)))) => {
+                    Bool(fa == fb)
+                }
+                Bin::NotIdentical if matches!((x, y), (Some(Float(_)), Some(Float(_)))) => {
+                    Bool(fa != fb)
+                }
                 _ => return None,
             })
         }
@@ -113,8 +138,8 @@ pub(crate) fn fast_arith(op: Bin, x: &Value, y: &Value) -> Option<Value> {
 
 /// [`fast_arith`] for the comparison operators: the bool result.
 #[inline(always)]
-pub(crate) fn fast_cmp(op: Bin, x: &Value, y: &Value) -> Option<bool> {
-    let r = fast_arith(op, x, y);
+pub(crate) fn fast_cmp(op: Bin, x: &Slot, y: &Slot) -> Option<bool> {
+    let r = fast_arith_slots(op, x, y);
     let b = match &r {
         Some(Value::Bool(b)) => Some(*b),
         _ => None,
@@ -164,6 +189,18 @@ impl Vm {
             Some(unsafe { code.consts.get_unchecked((r & !CONST) as usize) })
         } else {
             unsafe { (*self.slot_ptr(r)).as_ref() }
+        }
+    }
+
+    /// Peeks at an operand as a slot (`None`: an undefined variable), the
+    /// cheapest look: no `Option<&Value>` to build and test.
+    #[inline(always)]
+    pub(crate) fn peek_slot(&self, r: Reg) -> &Slot {
+        if r & CONST != 0 {
+            let code = self.code_ref();
+            value_as_slot(unsafe { code.consts.get_unchecked((r & !CONST) as usize) })
+        } else {
+            unsafe { &*self.slot_ptr(r) }
         }
     }
 
@@ -504,15 +541,15 @@ impl Vm {
             self.run_pending_destructors()?;
         }
         loop {
-            let ip = self.ex.ip;
-            // SAFETY: the running frame's code; ip stays within it.
-            let op = unsafe { &*self.ex.top.ops.add(ip) };
-            self.ex.ip = ip + 1;
+            let pc = self.ex.top.pc;
+            // SAFETY: the running frame's code; pc stays within it.
+            let op = unsafe { &*pc };
+            self.ex.top.pc = unsafe { pc.add(1) };
             match *op {
                 Op::Nop | Op::Ticks => {}
                 Op::Assign { dst, src } => {
                     // A scalar over a scalar: in place, nothing released.
-                    let scalar = match self.peek(src) {
+                    let scalar = match self.peek_slot(src) {
                         Some(Value::Int(i)) => Some(Value::Int(*i)),
                         Some(Value::Float(f)) => Some(Value::Float(*f)),
                         Some(Value::Bool(b)) => Some(Value::Bool(*b)),
@@ -545,6 +582,10 @@ impl Vm {
                     unsafe {
                         if holds_no_resources(&*p) {
                             std::ptr::write(p, Some(v));
+                            // Nothing released (and a temporary ran no code).
+                            if src & (CONST | TMP) == TMP {
+                                continue;
+                            }
                         } else {
                             let old = (*p).replace(v);
                             drop(old);
@@ -566,8 +607,8 @@ impl Vm {
                     // One look at each operand; int and float operands own
                     // nothing, so a consumed temporary may keep its stale
                     // scalar.
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(Bin::Add, x, y)
+                    if let Some(r) =
+                        fast_arith_slots(Bin::Add, self.peek_slot(a), self.peek_slot(b))
                     {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
@@ -581,8 +622,8 @@ impl Vm {
                     // One look at each operand; int and float operands own
                     // nothing, so a consumed temporary may keep its stale
                     // scalar.
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(Bin::Sub, x, y)
+                    if let Some(r) =
+                        fast_arith_slots(Bin::Sub, self.peek_slot(a), self.peek_slot(b))
                     {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
@@ -596,8 +637,8 @@ impl Vm {
                     // One look at each operand; int and float operands own
                     // nothing, so a consumed temporary may keep its stale
                     // scalar.
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(Bin::Mul, x, y)
+                    if let Some(r) =
+                        fast_arith_slots(Bin::Mul, self.peek_slot(a), self.peek_slot(b))
                     {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
@@ -609,9 +650,7 @@ impl Vm {
                 }
                 Op::Concat { dst, a, b } => self.op_concat(dst, a, b)?,
                 Op::Lt { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
-                    {
+                    if let Some(r) = fast_cmp(Bin::Lt, self.peek_slot(a), self.peek_slot(b)) {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -621,9 +660,7 @@ impl Vm {
                     }
                 }
                 Op::Le { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Le, x, y)
-                    {
+                    if let Some(r) = fast_cmp(Bin::Le, self.peek_slot(a), self.peek_slot(b)) {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -633,9 +670,7 @@ impl Vm {
                     }
                 }
                 Op::Eq { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Eq, x, y)
-                    {
+                    if let Some(r) = fast_cmp(Bin::Eq, self.peek_slot(a), self.peek_slot(b)) {
                         if self.try_put_bool(dst, r) {
                             continue;
                         }
@@ -645,8 +680,7 @@ impl Vm {
                     }
                 }
                 Op::Identical { dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Identical, x, y)
+                    if let Some(r) = fast_cmp(Bin::Identical, self.peek_slot(a), self.peek_slot(b))
                     {
                         if self.try_put_bool(dst, r) {
                             continue;
@@ -657,9 +691,7 @@ impl Vm {
                     }
                 }
                 Op::BinOp { op, dst, a, b } => {
-                    if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_arith(op, x, y)
-                    {
+                    if let Some(r) = fast_arith_slots(op, self.peek_slot(a), self.peek_slot(b)) {
                         match self.try_put_scalar(dst, r) {
                             Ok(()) => continue,
                             Err(r) => self.put(dst, r),
@@ -707,19 +739,19 @@ impl Vm {
                     self.op_incdec_var(op, var, res)?
                 }
                 Op::Jmp { t } => {
-                    self.ex.ip = t as usize;
+                    self.ex.set_ip(t as usize);
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
                     continue;
                 }
                 Op::JmpZ { c, t } => {
-                    if let Some(Value::Bool(b)) = self.peek(c) {
+                    if let Some(Value::Bool(b)) = self.peek_slot(c) {
                         // A bool temporary holds nothing to release: it may
                         // keep its stale value.
                         let b = *b;
                         if !b {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     }
@@ -727,19 +759,19 @@ impl Vm {
                     let b = self.to_bool(&v);
                     drop(v);
                     if !b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNZ { c, t } => {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
-                    if let Some(Value::Bool(b)) = self.peek(c) {
+                    if let Some(Value::Bool(b)) = self.peek_slot(c) {
                         // A bool temporary holds nothing to release: it may
                         // keep its stale value.
                         let b = *b;
                         if b {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     }
@@ -747,7 +779,7 @@ impl Vm {
                     let b = self.to_bool(&v);
                     drop(v);
                     if b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpLt { a, b, t } => {
@@ -756,14 +788,13 @@ impl Vm {
                     }
                     let r = if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         if x < y {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
-                    } else if let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
-                        && let Some(r) = fast_cmp(Bin::Lt, x, y)
+                    } else if let Some(r) = fast_cmp(Bin::Lt, self.peek_slot(a), self.peek_slot(b))
                     {
                         if r {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     } else {
@@ -775,7 +806,7 @@ impl Vm {
                         r
                     };
                     if r {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpZEx { c, res, t } => {
@@ -783,7 +814,7 @@ impl Vm {
                     let b = self.to_bool(&v);
                     self.put(res, Value::Bool(b));
                     if !b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNZEx { c, res, t } => {
@@ -791,14 +822,14 @@ impl Vm {
                     let b = self.to_bool(&v);
                     self.put(res, Value::Bool(b));
                     if b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpSet { c, res, t } => {
                     let v = self.get_quiet(c);
                     if !v.is_null() {
                         self.put(res, v);
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNull { c, res, t } => {
@@ -814,7 +845,7 @@ impl Vm {
                         if res != NONE {
                             self.put(res, Value::Null);
                         }
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::Switch { .. } => {
@@ -839,9 +870,11 @@ impl Vm {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
-                    let v = self.get_hot(src)?;
-                    if let Some(v) = self.do_return(v, false)? {
-                        return Ok(v);
+                    if !self.return_plain(src) {
+                        let v = self.get_hot(src)?;
+                        if let Some(v) = self.do_return(v, false)? {
+                            return Ok(v);
+                        }
                     }
                 }
                 Op::ReturnRef { src } => {
@@ -859,7 +892,7 @@ impl Vm {
                 Op::RecvDefault { param, t } => {
                     let p = self.slot_ptr(param);
                     if unsafe { (*p).is_some() } {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::RecvCheck { param } => self.recv_check(param)?,
@@ -965,7 +998,11 @@ impl Vm {
                     nargs,
                     cache,
                     fallback,
-                } => self.op_init_fcall(name, nargs, cache, fallback)?,
+                } => {
+                    self.op_init_fcall(name, nargs, cache, fallback)?;
+                    // Nothing released.
+                    continue;
+                }
                 Op::InitDynCall { callee, nargs } => self.op_init_dyn_call(callee, nargs)?,
                 Op::InitMethod {
                     obj,
@@ -981,8 +1018,38 @@ impl Vm {
                 } => self.op_init_static_call(class, name, nargs, cache)?,
                 Op::InitParentHook { name, set } => self.op_init_parent_hook(name, set)?,
                 Op::Send { src, arg } => {
+                    // A temporary moves straight to its parameter's fresh
+                    // slot.
+                    if src & (CONST | TMP) == TMP {
+                        let sp = self.slot_ptr(src);
+                        // SAFETY: a slot of the frame, and a call is pending.
+                        unsafe {
+                            if !matches!(&*sp, None | Some(Value::Ref(_))) {
+                                let s = self.plain_arg_slot(arg);
+                                if !s.is_null() {
+                                    debug_assert!((*s).is_none());
+                                    std::ptr::copy_nonoverlapping(sp, s, 1);
+                                    std::ptr::write(sp, None);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     let v = self.get_hot(src)?;
-                    self.send_val(arg, v, false)?;
+                    // SAFETY: a call is pending; its fresh parameter slot.
+                    unsafe {
+                        let s = self.plain_arg_slot(arg);
+                        if !s.is_null() {
+                            debug_assert!((*s).is_none());
+                            std::ptr::write(s, Some(v));
+                            // Nothing released (and a constant ran no code).
+                            if src & CONST != 0 {
+                                continue;
+                            }
+                        } else {
+                            self.send_val(arg, v, false)?;
+                        }
+                    }
                 }
                 Op::SendValRef { src, arg } => {
                     // A by-reference function's result passes its reference
@@ -997,7 +1064,29 @@ impl Vm {
                         v => self.send_val(arg, v, true)?,
                     }
                 }
-                Op::SendVar { var, arg } => self.send_var(var, arg)?,
+                Op::SendVar { var, arg } => {
+                    // A defined variable to a by-value parameter's fresh slot.
+                    // SAFETY: a slot of the frame, and a call is pending.
+                    unsafe {
+                        let src = self.slot_ptr(var);
+                        if (*src).is_some() {
+                            let s = self.plain_arg_slot(arg);
+                            if !s.is_null() {
+                                debug_assert!((*s).is_none());
+                                let v = match &*src {
+                                    Some(Value::Int(i)) => Value::Int(*i),
+                                    Some(Value::Ref(r)) => r.get(),
+                                    Some(v) => v.clone(),
+                                    None => std::hint::unreachable_unchecked(),
+                                };
+                                std::ptr::write(s, Some(v));
+                                // Nothing released.
+                                continue;
+                            }
+                        }
+                    }
+                    self.send_var(var, arg)?
+                }
                 Op::SendRef { src, arg } => {
                     let v = self.get_raw(src);
                     self.send_ref(arg, v)?;
@@ -1017,25 +1106,25 @@ impl Vm {
                 }
                 Op::JmpArgByRef { arg, t } => {
                     if self.pending_arg_by_ref(arg) {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNamedArgByRef { name, t } => {
                     let n = self.peek(name).cloned().unwrap_or_default();
                     if self.pending_named_by_ref(&n) {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::DoCall { dst } => {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
-                    if let Some(v) = self.do_call(dst)? {
-                        // A native call returned a value.
-                        let _ = v;
-                    }
+                    let entered = self.do_call(dst)?;
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
+                    }
+                    if entered {
+                        continue;
                     }
                 }
                 Op::CallableConvert { dst } => {
@@ -1073,7 +1162,7 @@ impl Vm {
                 }
                 Op::BindStatic { var, index, t } => {
                     if self.bind_static(var, index)? {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::StaticInit { index, src } => {
@@ -1158,17 +1247,17 @@ impl Vm {
                     return Err(Unwind::Throw(ex));
                 }
                 Op::FastCall { t, ret } => {
-                    let back = self.ex.ip as i64;
+                    let back = self.ex.ip() as i64;
                     let p = self.slot_ptr(ret);
                     let old = unsafe { (*p).replace(Value::Int(back)) };
                     drop(old);
-                    self.ex.ip = t as usize;
+                    self.ex.set_ip(t as usize);
                 }
                 Op::FastRet { ret, try_index } => {
                     let p = self.slot_ptr(ret);
                     let v = unsafe { (*p).take() };
                     match v {
-                        Some(Value::Int(back)) => self.ex.ip = back as usize,
+                        Some(Value::Int(back)) => self.ex.set_ip(back as usize),
                         _ => {
                             // An exception is pending: rethrow it.
                             let tr = self.code_ref().try_ranges[try_index as usize];
@@ -1191,12 +1280,12 @@ impl Vm {
                     t,
                 } => {
                     if !self.fe_reset(iter, src, by_ref)? {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::FeFetch { iter, val, key, t } => {
                     if !self.fe_fetch(iter, val, key)? {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::FeFree { iter } => self.fe_free(iter)?,
