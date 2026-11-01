@@ -2044,8 +2044,10 @@ impl<'a> Compiler<'a> {
                     });
                     self.patch_here(j2);
                 }
-                ExprKind::Index { index: None, .. } => {
-                    // `f($a[])`: only valid for by-reference parameters.
+                // `f($a[])`, `f($a[][$k])`: only valid for by-reference
+                // parameters, else an Error at run time (test
+                // Zend/tests/func_arg_fetch_optimization).
+                ExprKind::Index { .. } if dim_chain_appends(&a.value) => {
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
                     let msg =
                         self.add_const(Value::Str(PhpStr::intern(b"Cannot use [] for reading")));
@@ -3476,5 +3478,15 @@ impl<'a> Compiler<'a> {
             );
         }
         Ok(())
+    }
+}
+
+/// A dimension chain with an append (`$a[]`, `$a[][$k]`, `$a[]->p[0]` is not
+/// one: the chain stops at a property).
+fn dim_chain_appends(e: &Expr<'_>) -> bool {
+    match &e.kind {
+        ExprKind::Index { index: None, .. } => true,
+        ExprKind::Index { base, .. } => dim_chain_appends(base),
+        _ => false,
     }
 }

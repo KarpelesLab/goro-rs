@@ -35,6 +35,11 @@ pub enum ExtAction {
 
 const ZEND_EXTENSIONS: &[&str] = &["opcache", "xdebug"];
 
+/// Test-only modules a binary may load by name without a file in
+/// extension_dir (goro's built-in zend_test emulation): asked for with
+/// `-d extension=NAME` and `extension_loaded()`.
+const OPTIONAL: &[&str] = &["zend_test"];
+
 impl Extensions {
     pub fn probe(php: &Path, cwd: &Path) -> Extensions {
         let mut ext = Extensions::default();
@@ -66,6 +71,22 @@ impl Extensions {
                 if !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
                     ext.shared.insert(l.to_ascii_lowercase());
                 }
+            }
+        }
+        for name in OPTIONAL {
+            if ext.builtin.contains(*name) || ext.shared.contains(*name) {
+                continue;
+            }
+            let code = format!("echo extension_loaded('{name}') ? 'yes' : 'no';");
+            let args: Vec<OsString> = vec![
+                "-n".into(),
+                "-d".into(),
+                format!("extension={name}").into(),
+                "-r".into(),
+                code.into(),
+            ];
+            if quick(php, cwd, &args).is_some_and(|o| o.trim_ascii() == b"yes") {
+                ext.shared.insert((*name).to_string());
             }
         }
         ext

@@ -1076,6 +1076,9 @@ impl<'a> Compiler<'a> {
         let parent_f = std::mem::replace(&mut self.f, FState::new(Vec::new()));
         self.f.line = e.span.line;
         self.f.flags |= fflags::CONST_EXPR;
+        if let ExprKind::Const(_) = e.kind {
+            self.f.flags |= fflags::BARE_CONST;
+        }
         self.f.func_name = parent_f.func_name.clone();
         self.f.method_name = parent_f.method_name.clone();
         self.f.prop_name = parent_f.prop_name.clone();
