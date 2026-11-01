@@ -2036,7 +2036,10 @@ fn is_executable_stmt(s: &Stmt<'_>) -> bool {
 /// (for debugger markers; the AST keeps no span for it).
 fn finally_line(src: &[u8], before: usize, fallback: u32) -> u32 {
     let end = before.min(src.len());
-    let Some(p) = src[..end].windows(7).rposition(|w| w.eq_ignore_ascii_case(b"finally")) else {
+    let Some(p) = src[..end]
+        .windows(7)
+        .rposition(|w| w.eq_ignore_ascii_case(b"finally"))
+    else {
         return fallback;
     };
     src[..p].iter().filter(|&&b| b == b'\n').count() as u32 + 1
