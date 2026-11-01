@@ -374,6 +374,18 @@ impl Vm {
             IncludeKind::RequireOnce => "require_once",
         };
         if let Some(cls) = crate::builtins::userstream::wrapper_for(self, &path) {
+            // Once per URL too (test ext/standard/tests/file/include_streams).
+            if matches!(kind, IncludeKind::IncludeOnce | IncludeKind::RequireOnce) {
+                if self
+                    .included
+                    .iter()
+                    .any(|k| k.as_bytes() == path.as_bytes())
+                {
+                    self.put(dst, Value::Bool(true));
+                    return Ok(());
+                }
+                self.included.push(path.clone());
+            }
             let Some(src) = crate::builtins::userstream::read_all(self, fname, &cls, &path)? else {
                 self.warn(&format!(
                     "{}(): Failed opening '{}' for inclusion (include_path='{}')",
@@ -397,6 +409,13 @@ impl Vm {
             return self.include_failed(dst, &path, kind, fname);
         }
         let resolved = self.resolve_include(&path);
+        // On include_path through a user wrapper (test ext/standard/tests/
+        // file/include_streams).
+        if resolved.is_none()
+            && let Some(found) = crate::builtins::file::user_wrapper_include_path(self, &path)
+        {
+            return self.op_include(dst, Value::Str(found), kind);
+        }
         if resolved.is_none()
             && !path.is_empty()
             && !path.starts_with(b"/")

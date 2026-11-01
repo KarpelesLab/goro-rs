@@ -165,7 +165,18 @@ impl Vm {
         {
             self.hide_native = Rc::as_ptr(f);
         }
+        let hide_php = f.as_ref().is_some_and(|f| match &f.kind {
+            crate::func::FuncKind::User(code) => code.file.is_empty(),
+            _ => false,
+        });
+        if hide_php {
+            let depth = self.ex.frames.len() as u32;
+            self.ex.hidden_iter_frames.push(depth);
+        }
         let r = self.call_method(it, lname, args);
+        if hide_php {
+            self.ex.hidden_iter_frames.pop();
+        }
         self.hide_native = std::ptr::null();
         r
     }

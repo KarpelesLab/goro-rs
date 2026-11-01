@@ -571,7 +571,7 @@ impl Vm {
 
     /// The effective limit in bytes (the backstop for -1, `None` when
     /// really unlimited).
-    fn effective_memory_limit(&self) -> Option<i64> {
+    pub(crate) fn effective_memory_limit(&self) -> Option<i64> {
         let l = self.ini.memory_limit;
         if l >= 0 {
             Some(l)

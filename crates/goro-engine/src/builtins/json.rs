@@ -326,8 +326,18 @@ impl Vm {
             let res = if let Value::Object(o2) = &r
                 && ObjRef::ptr_eq(o2, o)
             {
-                // Returning $this serializes its properties.
-                let props = self.visible_props_from(o, std::ptr::null());
+                // Returning $this serializes its properties, for an internal
+                // class with a table of its own that table (test ext/spl/
+                // tests/ArrayObject/gh10519).
+                let props = if cls.native.props_for.is_some() {
+                    self.object_props_cast(o)
+                        .iter()
+                        .filter(|(k, _)| !matches!(k, goro_runtime::KeyRef::Str(s) if s.first() == Some(&0)))
+                        .map(|(k, v)| (k.to_value(), v.deref()))
+                        .collect()
+                } else {
+                    self.visible_props_from(o, std::ptr::null())
+                };
                 e.depth += 1;
                 let r = self.json_object_pairs(e, props);
                 e.depth -= 1;

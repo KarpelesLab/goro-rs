@@ -172,9 +172,13 @@ fn iptcembed(vm: &mut Vm, a: &mut Args) -> R<Value> {
     };
     let d = super::file::read_rest(vm, &mut s);
     super::streams::close_stream(vm, &mut s)?;
-    let Some(out) = iptc::embed(data.as_bytes(), &d) else {
+    let Some(mut out) = iptc::embed(data.as_bytes(), &d) else {
         return Ok(Value::Bool(false));
     };
+    // The result is sized from the file's stat: what a pipe delivers beyond
+    // that is dropped (test image/gh20582).
+    let size = std::fs::metadata(vm.fs_path(&f)).map_or(0, |m| m.len()) as usize;
+    out.truncate(size + 28 + data.len() + 1026);
     // PHP manual: with $spool of 1 or more the JPEG is printed, and from
     // 2 it is not returned (observed on PHP 8.5).
     if spool >= 1 {

@@ -88,6 +88,8 @@ fn incomplete_hooks() -> crate::class::NativeHooks {
 #[derive(Default)]
 struct Ser {
     out: Vec<u8>,
+    /// Current nesting.
+    depth: usize,
     /// Value numbers of objects (by handle) and references (by cell).
     objs: HashMap<u32, usize>,
     refs: HashMap<usize, usize>,
@@ -164,7 +166,42 @@ impl Vm {
         r
     }
 
-    fn ser(&mut self, s: &mut Ser, v: &Value, _in_array: bool) -> R<()> {
+    /// Nesting past `zend.max_allowed_stack_size` is refused (test
+    /// serialize/gh15169).
+    fn ser(&mut self, s: &mut Ser, v: &Value, in_array: bool) -> R<()> {
+        s.depth += 1;
+        if s.depth >= self.native_stack_levels() {
+            s.depth -= 1;
+            let size = self.native_stack_size();
+            return self.throw(
+                "Error",
+                &format!(
+                    "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
+                ),
+            );
+        }
+        let r = self.ser_inner(s, v, in_array);
+        s.depth -= 1;
+        r
+    }
+
+    /// The nesting levels native recursion may reach under an explicit
+    /// `zend.max_allowed_stack_size` (a level taking about 256 bytes);
+    /// without one, no limit.
+    pub(crate) fn native_stack_levels(&self) -> usize {
+        match self.native_stack_size() {
+            0 => usize::MAX,
+            n => (n / 256) as usize,
+        }
+    }
+
+    pub(crate) fn native_stack_size(&self) -> i64 {
+        self.get_ini(b"zend.max_allowed_stack_size")
+            .map_or(0, |v| goro_runtime::convert::str_to_int(&v))
+            .max(0)
+    }
+
+    fn ser_inner(&mut self, s: &mut Ser, v: &Value, _in_array: bool) -> R<()> {
         // References: the second time a cell is seen, `R:n;`.
         if let Value::Ref(r) = v {
             if r.refcount() > 1 {

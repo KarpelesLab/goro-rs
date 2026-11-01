@@ -272,7 +272,13 @@ fn instance(vm: &mut Vm, class: &PhpStr, context: Option<Value>) -> R<ObjRef> {
     let cls = vm.find_class(class, true)?.expect("wrapper class");
     let o = vm.instantiate(&cls)?;
     let ctx = context.unwrap_or(Value::Null);
-    vm.set_prop_raw(&o, b"context", ctx);
+    // A declared type is respected (test streams/user_streams_context_001).
+    let name = PhpStr::intern(b"context");
+    if !ctx.is_null() && vm.typed_prop_info(&o, &name).is_some() {
+        vm.write_prop(&o, &name, ctx, None)?;
+    } else {
+        vm.set_prop_raw(&o, b"context", ctx);
+    }
     if let Some(f) = cls.magic.borrow().construct.clone() {
         vm.call_func_this(&f, Some(o.clone()), Vec::new())?;
     }
@@ -339,6 +345,19 @@ pub fn open_named(
     let ctx = OPEN_CONTEXT
         .with(|c| c.borrow().clone())
         .unwrap_or_else(super::sockets::default_context);
+    // What can't be instantiated can't open anything (test streams/bug74951).
+    if let Some(cls) = vm.find_class(class, true)?
+        && cls.kind != crate::class::ClassKind::Class
+    {
+        if !quiet {
+            vm.warn(&format!(
+                "{}({}): Failed to open stream: operation failed",
+                fname,
+                String::from_utf8_lossy(path)
+            ))?;
+        }
+        return Ok(None);
+    }
     let o = instance(vm, class, Some(ctx))?;
     let opened = PhpRef::new(Value::Null);
     let options = if quiet { 0 } else { 8 };

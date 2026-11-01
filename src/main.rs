@@ -710,8 +710,52 @@ fn with_ini_file(f: &[u8], ini: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8
         p.to_path_buf()
     };
     let Ok(text) = std::fs::read(&p) else {
+        return with_scan_dir(ini);
+    };
+    let full = std::fs::canonicalize(&p).unwrap_or(p);
+    goro_engine::builtins::core_funcs::note_loaded_ini(full.as_os_str().as_bytes());
+    let mut from_file = parse_ini_lines(&text);
+    from_file.extend(with_scan_dir(ini));
+    from_file
+}
+
+/// Settings of the `.ini` files in PHP_INI_SCAN_DIR, after the main file's
+/// (PHP manual: The configuration file; test ext/standard/tests/ini_info/
+/// php_ini_scanned_files).
+fn with_scan_dir(ini: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let Some(dir) = std::env::var_os("PHP_INI_SCAN_DIR") else {
         return ini;
     };
+    if dir.is_empty() {
+        return ini;
+    }
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return ini;
+    };
+    let mut files: Vec<std::path::PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ini"))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    let mut list = Vec::new();
+    for f in &files {
+        if let Ok(text) = std::fs::read(f) {
+            out.extend(parse_ini_lines(&text));
+            list.extend_from_slice(f.as_os_str().as_bytes());
+            list.push(b'\n');
+        }
+    }
+    if !list.is_empty() {
+        goro_engine::builtins::core_funcs::note_scanned_ini(&list);
+    }
+    out.extend(ini);
+    out
+}
+
+/// The `key = value` lines before the first section of an ini file.
+fn parse_ini_lines(text: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut from_file = Vec::new();
     for line in text.split(|&c| c == b'\n') {
         let line = line.trim_ascii();
@@ -735,7 +779,6 @@ fn with_ini_file(f: &[u8], ini: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8
             from_file.push((k, v));
         }
     }
-    from_file.extend(ini);
     from_file
 }
 

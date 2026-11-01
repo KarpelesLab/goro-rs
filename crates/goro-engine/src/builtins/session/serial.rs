@@ -82,7 +82,9 @@ pub(super) fn decode(vm: &mut Vm, handler: &[u8], data: &[u8]) -> R<Option<Decod
     }
     match handler {
         b"php_serialize" => {
-            let Some((v, n)) = vm.unserialize_prefix(data) else {
+            // Warnings name session_decode() (test ext/standard/tests/
+            // strings/bug72663_2).
+            let Ok((v, n)) = vm.unser_part(data, "session_decode()")? else {
                 return Ok(None);
             };
             if n != data.len() {

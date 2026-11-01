@@ -214,6 +214,12 @@ class SplFileObject extends SplFileInfo implements RecursiveIterator, SeekableIt
         }
         $this->__fp = $fp;
         $this->__mode = $mode;
+        // Found on include_path: the object's path is where it was found
+        // (test SplFileObject/fileobject_004).
+        if ($useIncludePath && !str_contains($filename, '://')
+            && ($found = stream_resolve_include_path($filename)) !== false) {
+            $filename = $found;
+        }
         $this->__h_setPath($filename);
     }
     protected function __h_fchk() {

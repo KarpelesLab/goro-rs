@@ -260,7 +260,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "function php_ini_scanned_files(): string|false",
-            php_ini_loaded_file,
+            php_ini_scanned_files,
         ),
         // runtime
         ("function gc_collect_cycles(): int", gc_collect_cycles),
@@ -2183,8 +2183,34 @@ fn get_cfg_var(vm: &mut Vm, a: &mut Args) -> R<Value> {
     Ok(Value::Array(out))
 }
 
+thread_local! {
+    /// The ini file read (-c) and the list of scanned ones (PHP_INI_SCAN_DIR).
+    static LOADED_INI: std::cell::RefCell<(Option<Vec<u8>>, Option<Vec<u8>>)> =
+        const { std::cell::RefCell::new((None, None)) };
+}
+
+/// Records the ini file the command line named.
+pub fn note_loaded_ini(path: &[u8]) {
+    LOADED_INI.with(|l| l.borrow_mut().0 = Some(path.to_vec()));
+}
+
+/// Records the files read from the scan directory, one per line.
+pub fn note_scanned_ini(list: &[u8]) {
+    LOADED_INI.with(|l| l.borrow_mut().1 = Some(list.to_vec()));
+}
+
 fn php_ini_loaded_file(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Bool(false))
+    Ok(LOADED_INI.with(|l| match &l.borrow().0 {
+        Some(p) => Value::Str(PhpStr::new(p)),
+        None => Value::Bool(false),
+    }))
+}
+
+fn php_ini_scanned_files(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    Ok(LOADED_INI.with(|l| match &l.borrow().1 {
+        Some(p) => Value::Str(PhpStr::new(p)),
+        None => Value::Bool(false),
+    }))
 }
 
 // ---------------------------------------------------------------- runtime
@@ -2743,8 +2769,24 @@ fn get_current_user(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(u)))
 }
 
-fn get_resources(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
-    Ok(Value::Array(PhpArray::new()))
+/// get_resources() (PHP manual): the live streams, by resource id.
+fn get_resources(_vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let want = a.opt_str(0);
+    let mut live = super::file::open_stream_resources();
+    live.sort_by_key(|r| r.id());
+    let mut out = PhpArray::new();
+    for r in live {
+        if r.is_closed() {
+            continue;
+        }
+        if let Some(t) = &want
+            && t.as_bytes() != r.res().kind.borrow().as_bytes()
+        {
+            continue;
+        }
+        out.insert(Key::Int(r.id()), Value::Resource(r));
+    }
+    Ok(Value::Array(out))
 }
 
 fn clone_fn(vm: &mut Vm, a: &mut Args) -> R<Value> {

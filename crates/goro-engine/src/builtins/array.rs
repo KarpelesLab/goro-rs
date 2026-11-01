@@ -2248,6 +2248,14 @@ fn array_column(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 let s = vm.obj_to_string(&o)?;
                 out.insert(Key::from_php_str(&s), v);
             }
+            // As an array offset would be (test array/bug68553).
+            Some(Value::Resource(r)) => {
+                vm.warn(&format!(
+                    "Resource ID#{0} used as offset, casting to integer ({0})",
+                    r.id()
+                ))?;
+                out.insert(Key::Int(r.id()), v);
+            }
             Some(other) => {
                 return vm.type_error(&format!(
                     "Cannot access offset of type {} on array",
@@ -2873,6 +2881,12 @@ fn pointer_target(vm: &mut Vm, a: &Args) -> R<Option<PhpRef>> {
     Ok(Some(r))
 }
 
+thread_local! {
+    /// The internal pointers of objects with declared properties.
+    static OBJ_POINTERS: std::cell::RefCell<std::collections::HashMap<usize, usize>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// Applies `f` to the property table of an object (the internal pointer
 /// of objects with only dynamic properties persists there, as PHP keeps
 /// it in the property table: test gh16905.phpt), returning `get`'s result.
@@ -2882,8 +2896,35 @@ fn with_obj_table<T>(vm: &mut Vm, a: &Args, f: impl FnOnce(&mut PhpArray) -> T) 
     };
     let declared = !vm.class_of(&o).props.borrow().is_empty();
     if declared {
+        // The table is rebuilt each time, so the pointer is kept by object:
+        // uninitialized properties have no position, and with none at all
+        // the pointer stays at the end (test gh16905.phpt).
         let mut arr = vm.object_props_array(&o, true);
-        return f(&mut arr);
+        let id = o.handle() as usize;
+        let saved = OBJ_POINTERS.with(|m| m.borrow().get(&id).copied());
+        if !arr.is_empty() {
+            let d = arr.make_mut();
+            match saved {
+                Some(usize::MAX) => {
+                    d.end();
+                    d.advance();
+                }
+                Some(n) => {
+                    d.reset();
+                    for _ in 0..n {
+                        d.advance();
+                    }
+                }
+                None => d.reset(),
+            }
+        }
+        let r = f(&mut arr);
+        let pos = match arr.data().current_key() {
+            Some(k) => arr.iter().position(|(x, _)| x == k).unwrap_or(usize::MAX),
+            None => usize::MAX,
+        };
+        OBJ_POINTERS.with(|m| m.borrow_mut().insert(id, pos));
+        return r;
     }
     let mut t = o.obj().props.borrow_mut();
     f(&mut t)

@@ -387,6 +387,18 @@ thread_local! {
     static NEXT_RES: Cell<i64> = const { Cell::new(1) };
 }
 
+/// While no user-visible resource was made since the standard streams, the
+/// engine's own sentinel (id 4) gives its number back: functions that make no
+/// default stream context get it (test ext/standard/tests/general_functions/
+/// proc_open_null).
+pub fn release_reserved_res_id() {
+    NEXT_RES.with(|n| {
+        if n.get() == 5 {
+            n.set(4);
+        }
+    });
+}
+
 impl ResRef {
     /// Creates a resource with the next resource id (ids are not reused).
     pub fn new(kind: PhpStr, data: Box<dyn Any>) -> ResRef {
@@ -406,6 +418,11 @@ impl ResRef {
     #[inline]
     pub fn id(&self) -> i64 {
         self.0.id
+    }
+
+    /// The holders of this resource (debug_zval_dump()).
+    pub fn refcount(&self) -> usize {
+        Rc::strong_count(&self.0)
     }
 
     pub fn res(&self) -> &Resource {

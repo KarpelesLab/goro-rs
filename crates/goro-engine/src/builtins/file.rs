@@ -409,6 +409,8 @@ pub struct Stream {
     /// or process (tests streams/stream_get_meta_data_file_variation2,
     /// filters/filter_errors_*).
     pub chunk_end: u64,
+    /// Held by an internal class: fclose() refuses it.
+    pub no_close: bool,
 }
 
 impl Stream {
@@ -442,6 +444,7 @@ impl Stream {
             chunk_size: 8192,
             read_failed: false,
             chunk_end: 0,
+            no_close: false,
         }
     }
 
@@ -487,10 +490,12 @@ impl Stream {
             // a short read of a file or memory stream is its end: the
             // filters see the last data with $closing set (test
             // streams/bug79984.phpt)
+            // (php://memory only knows at the next read: test filters/
+            // gh20370_dynamic_stream_property)
             let closing = n == 0
                 || (n < 8192
-                    && (matches!(self.backing, Backing::Memory { .. })
-                        || matches!(self.backing, Backing::File(_)) && !self.is_pipe()));
+                    && (matches!(self.backing, Backing::File(_)) && !self.is_pipe()
+                        || self.uri.starts_with(b"php://temp")));
             let mut chain = std::mem::take(&mut self.read_filters);
             let prev = FILTER_EOF.with(|c| c.replace(Some(closing)));
             let r = super::streams::run_chain(vm, &mut chain, &raw, closing);
@@ -767,6 +772,11 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The streams still alive, for get_resources().
+pub(crate) fn open_stream_resources() -> Vec<ResRef> {
+    OPEN_STREAMS.with(|l| l.borrow().iter().filter_map(|w| w.upgrade()).collect())
+}
+
 /// Closes the streams still open at the end of the request, so that
 /// their write filters finish (observed on PHP 8.5: zlib.deflate output
 /// is complete without fclose()).
@@ -1007,6 +1017,19 @@ pub fn open_stream(
                 "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
                 fname, scheme
             ))?;
+            // With the plain files wrapper gone, a file:// URL has none left
+            // (test file/stream_001).
+            if filename.starts_with(b"file://") {
+                vm.warn(&format!(
+                    "{fname}(): file:// wrapper is disabled in the server configuration"
+                ))?;
+                vm.warn(&format!(
+                    "{}({}): Failed to open stream: no suitable wrapper could be found",
+                    fname,
+                    String::from_utf8_lossy(filename)
+                ))?;
+                return Ok(None);
+            }
             vm.warn(&format!(
                 "{}({}): Failed to open stream: No such file or directory",
                 fname,
@@ -1249,6 +1272,9 @@ fn wrapper_include_path(vm: &mut Vm, f: &[u8]) -> Option<PhpStr> {
     if f.starts_with(b"/") || f.windows(3).any(|w| w == b"://") {
         return None;
     }
+    if let Some(found) = user_wrapper_include_path(vm, f) {
+        return Some(found);
+    }
     let ip = vm.ini.include_path.to_vec();
     for d in super::streams::split_include_path(&ip) {
         if !d.windows(3).any(|w| w == b"://") {
@@ -1261,6 +1287,40 @@ fn wrapper_include_path(vm: &mut Vm, f: &[u8]) -> Option<PhpStr> {
         c.push(b'/');
         c.extend_from_slice(f.strip_prefix(b"./").unwrap_or(f));
         if matches!(op(vm, &c, 2), Ok(Some(_))) {
+            return Some(PhpStr::from(c));
+        }
+    }
+    None
+}
+
+/// A relative path found on an include_path entry of a user wrapper, asked
+/// with url_stat() (test file/include_streams).
+pub(crate) fn user_wrapper_include_path(vm: &mut Vm, f: &[u8]) -> Option<PhpStr> {
+    if f.starts_with(b"/") || f.starts_with(b".") || f.windows(3).any(|w| w == b"://") {
+        return None;
+    }
+    let ip = vm.ini.include_path.to_vec();
+    if !ip.windows(3).any(|w| w == b"://") {
+        return None;
+    }
+    // Entries in order: a local directory before the wrapper's wins.
+    for d in super::streams::split_include_path(&ip) {
+        if !d.windows(3).any(|w| w == b"://") {
+            let mut local = d.clone();
+            local.push(b'/');
+            local.extend_from_slice(f);
+            if vm.fs_path(&local).exists() {
+                return None;
+            }
+            continue;
+        }
+        let Some(cls) = super::userstream::wrapper_for(vm, &d) else {
+            continue;
+        };
+        let mut c = d.clone();
+        c.push(b'/');
+        c.extend_from_slice(f);
+        if matches!(super::userstream::url_stat(vm, &cls, &c, 2), Ok(Some(_))) {
             return Some(PhpStr::from(c));
         }
     }
@@ -1290,8 +1350,13 @@ fn fopen(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Some(p) if !vm.fs_path(&f).exists() => p,
         _ => with_include_path(vm, &f, use_ip && m.first() == Some(&b'r')),
     };
+    // Opened by SPL's classes, written in PHP: the object owns the stream.
+    let internal = vm.has_frame() && vm.code_ref().file.is_empty();
     match open_stream(vm, a, &f, &m, false)? {
-        Some(s) => Ok(Value::Resource(new_stream_res(s))),
+        Some(mut s) => {
+            s.no_close = internal;
+            Ok(Value::Resource(new_stream_res(s)))
+        }
         None => Ok(Value::Bool(false)),
     }
 }
@@ -1315,14 +1380,21 @@ fn fclose(vm: &mut Vm, a: &mut Args) -> R<Value> {
             "Argument #1 ($stream) must be an open stream resource",
         );
     }
-    let is_std = [
-        &vm.resources.stdin,
-        &vm.resources.stdout,
-        &vm.resources.stderr,
-    ]
-    .iter()
-    .any(|x| x.as_ref().is_some_and(|x| ResRef::ptr_eq(x, r)));
-    let _ = is_std;
+    // A stream SplFileObject owns (tests ext/spl/tests/bug81691).
+    let owned = {
+        let data = r.res().data.borrow();
+        data.as_ref()
+            .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+            .and_then(|c| c.try_borrow().ok().map(|s| s.no_close))
+            .unwrap_or(false)
+    };
+    if owned && !vm.code_ref().file.is_empty() {
+        vm.fwarn(
+            a,
+            "cannot close the provided stream, as it must not be manually closed",
+        )?;
+        return Ok(Value::Bool(false));
+    }
     let user = {
         let data = r.res().data.borrow();
         data.as_ref()
@@ -1735,6 +1807,12 @@ pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> boo
     if let Backing::Dir { pos, .. } = &mut s.backing {
         *pos = 0;
         return true;
+    }
+    // Pending writes go first (test filters/gh20370_dynamic_stream_property).
+    if let Err(e) = super::streams::flush_write_filters(vm, s)
+        && vm.err.deferred.is_none()
+    {
+        vm.err.deferred = Some(e);
     }
     s.eof = false;
     s.pending.clear();
@@ -4540,9 +4618,15 @@ fn fputcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let (sep, enc, esc) = csv_opts(vm, a, 2)?;
     let eol = a.opt_str(5).unwrap_or_else(|| PhpStr::from("\n"));
     let line = csv_line(vm, &fields, sep, enc, esc, &eol)?;
-    with_stream(vm, a, 0, |vm, s| match s.write_all(vm, &line) {
-        Ok(n) => Ok(Value::Int(n as i64)),
-        Err(_) => Ok(Value::Bool(false)),
+    with_stream(vm, a, 0, |vm, s| {
+        // A read-only stream (test SplFileObject/bug78976).
+        if !s.writable {
+            return Ok(Value::Bool(false));
+        }
+        match s.write_all(vm, &line) {
+            Ok(n) => Ok(Value::Int(n as i64)),
+            Err(_) => Ok(Value::Bool(false)),
+        }
     })
 }
 
@@ -4557,6 +4641,16 @@ fn fgetcsv(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 i64::MAX - 1
             ),
         );
+    }
+    // The line buffer takes $length bytes up front (test file/gh15653).
+    if let (Some(l), Some(limit)) = (a.opt_int(1), vm.effective_memory_limit())
+        && l >= 0
+        && l as u64 >= limit as u64
+    {
+        return Err(vm.fatal(&format!(
+            "Allowed memory size of {limit} bytes exhausted (tried to allocate {} bytes)",
+            l as u64 + 1
+        )));
     }
     let (sep, enc, esc) = csv_opts(vm, a, 2)?;
     with_stream(vm, a, 0, |vm, s| {

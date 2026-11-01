@@ -63,6 +63,7 @@ static WRAPPER: NativeWrapper = NativeWrapper::new(wrapper_open);
 fn init(vm: &mut Vm) {
     register_wrapper(vm, "http", &WRAPPER);
     register_wrapper(vm, "https", &WRAPPER);
+    super::streams::register_filter(vm, "dechunk", dechunk_filter);
 }
 
 /// The headers of the last request (http_get_last_response_headers()).
@@ -210,6 +211,26 @@ impl Conn {
         }
         true
     }
+}
+
+/// The `dechunk` stream filter (PHP manual: stream_get_filters; test
+/// filters/chunked_001).
+struct DechunkFilter(Dechunk);
+
+impl super::streams::StreamFilter for DechunkFilter {
+    fn filter(&mut self, _vm: &mut Vm, input: &[u8], _c: bool, out: &mut Vec<u8>) -> R<bool> {
+        self.0.feed(input, out);
+        Ok(true)
+    }
+}
+
+fn dechunk_filter(
+    _vm: &mut Vm,
+    _name: &[u8],
+    _p: &Value,
+    _s: super::streams::FilterSide,
+) -> R<Option<Box<dyn super::streams::StreamFilter>>> {
+    Ok(Some(Box::new(DechunkFilter(Dechunk::default()))))
 }
 
 /// Transfer-Encoding: chunked decoding (RFC 9112 section 7.1), lenient

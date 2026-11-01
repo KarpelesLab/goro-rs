@@ -597,6 +597,7 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let specs = a.array(1);
     let mut child: Vec<(i64, ChildFd)> = Vec::new();
     let mut parent: Vec<(i64, Parent)> = Vec::new();
+    let mut pty: Option<(OwnedFd, OwnedFd)> = None;
     // Child ends to close once the child runs.
     let mut keep: Vec<OwnedFd> = Vec::new();
     for (k, v) in specs.iter() {
@@ -734,17 +735,30 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
                         };
                         child.push((idx, ChildFd::Redirect(t)));
                     }
-                    b"pty" => match open_pty() {
-                        Ok((master, slave)) => {
-                            child.push((idx, ChildFd::Dup(slave.as_raw_fd())));
-                            keep.push(slave);
-                            parent.push((idx, Parent::Pipe(master, b"r+")));
+                    // All "pty" descriptors of a call share one terminal (test
+                    // file/bug69442).
+                    b"pty" => {
+                        if pty.is_none() {
+                            match open_pty() {
+                                Ok(pair) => pty = Some(pair),
+                                Err(e) => {
+                                    vm.fwarn(a, &format!("Failed to open PTY master: {}", e))?;
+                                    return Ok(Value::Bool(false));
+                                }
+                            }
                         }
-                        Err(e) => {
-                            vm.fwarn(a, &format!("Failed to open PTY master: {}", e))?;
+                        let Some((master, slave)) = &pty else {
                             return Ok(Value::Bool(false));
+                        };
+                        child.push((idx, ChildFd::Dup(slave.as_raw_fd())));
+                        match master.try_clone() {
+                            Ok(m) => parent.push((idx, Parent::Pipe(m, b"r+"))),
+                            Err(e) => {
+                                vm.fwarn(a, &format!("Failed to open PTY master: {}", e))?;
+                                return Ok(Value::Bool(false));
+                            }
                         }
-                    },
+                    }
                     other => {
                         vm.fwarn(
                             a,
@@ -830,6 +844,8 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
     };
     drop(keep);
+    drop(pty);
+    goro_runtime::object::release_reserved_res_id();
     let mut pipes = PhpArray::new();
     let mut held = Vec::new();
     for (idx, p) in parent {
@@ -1152,7 +1168,9 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
                 "Argument #5 ($microseconds) must be greater than or equal to 0",
             );
         }
-    } else if a.opt_int(4).is_some() {
+    } else if a.opt_int(4).is_some_and(|u| u != 0) {
+        // 0 is what the parameter defaults to (test streams/
+        // stream_select_null_usec).
         return vm.fthrow(
             a,
             "ValueError",
@@ -1199,7 +1217,9 @@ fn stream_select(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
     }
-    if entries.is_empty() && sets.iter().flatten().all(|s| !s.is_empty()) {
+    // Nothing could be selected on, an empty set or none castable alike (test
+    // streams/gh14506).
+    if entries.is_empty() {
         return vm.throw("ValueError", "No stream arrays were passed");
     }
     let mut pfds: Vec<libc::pollfd> = entries

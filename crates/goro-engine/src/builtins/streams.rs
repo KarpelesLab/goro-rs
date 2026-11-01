@@ -1227,6 +1227,12 @@ impl StreamFilter for UserFilter {
         Ok(true)
     }
 
+    /// A flush reaches the filter, with nothing to filter (test filters/
+    /// gh20370_dynamic_stream_property).
+    fn flush(&mut self, vm: &mut Vm, out: &mut Vec<u8>) -> R<bool> {
+        self.filter(vm, &[], false, out)
+    }
+
     fn on_close(&mut self, vm: &mut Vm) -> R<()> {
         if self.has(vm, b"onclose") {
             vm.call_method(&self.obj, b"onclose", Vec::new())?;

@@ -722,10 +722,10 @@ impl Vm {
             let nc = &ex.native_calls[k];
             let d = nc.depth as usize;
             nc.func.scope().is_none()
-                && matches!(
+                && (matches!(
                     nc.func.lname.as_bytes(),
                     b"call_user_func" | b"call_user_func_array"
-                )
+                ) || rope_sprintf(nc))
                 && d > 0
                 && !ex.frames[d - 1].code().file.is_empty()
                 // (in a namespace an unqualified name is resolved at run time)
@@ -777,6 +777,12 @@ impl Vm {
             if f.flags & frame_flags::GLOBAL != 0 {
                 continue;
             }
+            // A method of an SPL iterator written in PHP that foreach called
+            // is no frame (test ext/spl/tests/
+            // recursiveIteratorIterator_endchildren_error).
+            if ex.hidden_iter_frames.contains(&(i as u32)) {
+                continue;
+            }
             // A constant expression evaluated by another one shows only the
             // outer "[constant expression]" frame (test
             // Zend/tests/constants/bug41633_3).
@@ -790,7 +796,19 @@ impl Vm {
             // (or from the engine itself: shutdown functions, fibers).
             let called_from_native =
                 natives > 0 && ex.native_calls[natives - 1].depth as usize == i;
-            let (file, line) = if called_from_native
+            let hidden_root = (i > 0 && ex.frames[i - 1].code().file.is_empty())
+                .then(|| {
+                    (1..i)
+                        .rev()
+                        .take_while(|&j| ex.frames[j].code().file.is_empty())
+                        .find(|&j| ex.hidden_iter_frames.contains(&(j as u32)))
+                })
+                .flatten();
+            let (file, line) = if let Some(root) = hidden_root {
+                let caller = &ex.frames[root - 1];
+                let cip = caller.ip().saturating_sub(1);
+                (Some(caller.code().file.clone()), caller.code().line_of(cip))
+            } else if called_from_native
                 && (direct_cuf(natives - 1)
                     || (gen_dtor(natives - 1) && i > 0 && !ex.frames[i - 1].code().file.is_empty()))
             {
@@ -1318,6 +1336,31 @@ fn trace_escape(s: &[u8]) -> String {
     out
 }
 
+/// sprintf() with only `%s` and `%d` for its arguments is no call of its own:
+/// PHP compiles it to a string concatenation (tests ext/standard/tests/
+/// strings/sprintf_rope_optimization_00*).
+fn rope_sprintf(nc: &super::NativeCall) -> bool {
+    if nc.func.lname.as_bytes() != b"sprintf" {
+        return false;
+    }
+    // SAFETY: the arguments outlive the native call they belong to.
+    let args = unsafe { &*nc.args };
+    let Some(Value::Str(fmt)) = args.first() else {
+        return false;
+    };
+    let mut specs = 0;
+    let mut it = fmt.iter();
+    while let Some(c) = it.next() {
+        if *c == b'%' {
+            match it.next() {
+                Some(b's' | b'd') => specs += 1,
+                _ => return false,
+            }
+        }
+    }
+    specs + 1 == args.len()
+}
+
 /// An argument as `getTraceAsString()` prints it.
 pub fn trace_arg(v: &Value) -> String {
     trace_arg_max(v, 15)
@@ -1332,7 +1375,9 @@ pub fn trace_arg_max(v: &Value, max: usize) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => {
             // Integral floats keep a ".0" (observed on PHP 8.5: "f(1.0)").
-            let mut s = goro_runtime::float_fmt::to_php_string(*f, 17);
+            // Under the default `precision` (test ext/standard/tests/streams/
+            // gh8409: 0.2).
+            let mut s = goro_runtime::float_fmt::to_php_string(*f, 14);
             if f.is_finite() && !s.contains(['.', 'E', 'e']) {
                 s.push_str(".0");
             }
