@@ -388,8 +388,9 @@ pub(crate) fn memory_limit_cap(vm: &Vm, v: &[u8]) -> Option<(PhpStr, Option<Stri
 /// order (observed on PHP 8.5).
 pub(crate) fn startup_ini_deprecations(vm: &mut Vm, ini: &[(Vec<u8>, Vec<u8>)]) {
     // Directives removed from PHP stop it at startup (test ext/standard/tests/
-    // general_functions/get_cfg_var_variation8; the list beyond that test's
-    // magic_quotes_gpc comes from the PHP manual's migration notes).
+    // general_functions/get_cfg_var_variation8). Only magic_quotes_gpc is
+    // tested; the rest of the list is from memory, not checked against the
+    // manual or a reference PHP.
     for (k, _) in ini {
         let removed = [
             &b"magic_quotes_gpc"[..],
