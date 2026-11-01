@@ -411,6 +411,7 @@ impl<'a> Compiler<'a> {
             | Op::JmpZ { t, .. }
             | Op::JmpNZ { t, .. }
             | Op::JmpLt { t, .. }
+            | Op::JmpCmp { t, .. }
             | Op::JmpZEx { t, .. }
             | Op::JmpNZEx { t, .. }
             | Op::JmpSet { t, .. }
@@ -1988,6 +1989,41 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------ conditions
 
+    /// A comparison as `cond`, whose right operand can't change the left
+    /// one: the fused jump. None when `cond` is something else.
+    fn cmp_jump(&mut self, cond: &'a Expr<'a>, when: bool, target: u32) -> CResult<Option<usize>> {
+        let ExprKind::Binary { op, left, right } = &cond.kind else {
+            return Ok(None);
+        };
+        let (cmp, swap) = match op {
+            BinaryOp::Less => (Bin::Lt, false),
+            BinaryOp::LessEqual => (Bin::Le, false),
+            BinaryOp::Greater => (Bin::Lt, true),
+            BinaryOp::GreaterEqual => (Bin::Le, true),
+            BinaryOp::Equal => (Bin::Eq, false),
+            BinaryOp::NotEqual => (Bin::Ne, false),
+            BinaryOp::Identical => (Bin::Identical, false),
+            BinaryOp::NotIdentical => (Bin::NotIdentical, false),
+            _ => return Ok(None),
+        };
+        if !is_simple_operand(right) || self.const_value(cond).is_some() {
+            return Ok(None);
+        }
+        self.f.line = cond.span.line;
+        let a = self.expr(left)?;
+        let b = self.expr(right)?;
+        self.free(b);
+        self.free(a);
+        let (a, b) = if swap { (b, a) } else { (a, b) };
+        Ok(Some(self.emit(Op::JmpCmp {
+            cmp,
+            when,
+            a,
+            b,
+            t: target,
+        })))
+    }
+
     /// Emits a jump to `target` when `cond` is `when`.
     fn cond_jump(&mut self, cond: &'a Expr<'a>, when: bool, target: u32) -> CResult<()> {
         // Fused compare-and-jump for `$i < $n` loops.
@@ -2005,6 +2041,9 @@ impl<'a> Compiler<'a> {
             self.emit(Op::JmpLt { a, b, t: target });
             return Ok(());
         }
+        if self.cmp_jump(cond, when, target)?.is_some() {
+            return Ok(());
+        }
         let c = self.expr(cond)?;
         self.free(c);
         if when {
@@ -2017,7 +2056,10 @@ impl<'a> Compiler<'a> {
 
     /// Emits a forward jump taken when `cond` is `when`; returns it for
     /// patching.
-    fn cond_jump_fwd(&mut self, cond: &'a Expr<'a>, when: bool) -> CResult<usize> {
+    pub(crate) fn cond_jump_fwd(&mut self, cond: &'a Expr<'a>, when: bool) -> CResult<usize> {
+        if let Some(j) = self.cmp_jump(cond, when, 0)? {
+            return Ok(j);
+        }
         let c = self.expr(cond)?;
         self.free(c);
         Ok(if when {

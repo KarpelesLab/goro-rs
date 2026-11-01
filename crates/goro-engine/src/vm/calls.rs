@@ -2410,7 +2410,8 @@ impl Vm {
             self.hide_native = std::ptr::null();
         }
         self.ex.native_calls.push(super::NativeCall {
-            func: func.clone(),
+            // SAFETY: `func`, a local here, outlives the entry popped below.
+            func: unsafe { super::CallingFunc::borrowed(&func) },
             args: &args as *const Vec<Value>,
             this: this.clone(),
             depth: self.ex.frames.len() as u32,

@@ -362,6 +362,15 @@ pub enum Op {
         t: u32,
     },
     /// Jumps if `a < b` / `a <= b` (loops), operands not consumed.
+    /// Jump when `a cmp b` is `when`: a comparison and its conditional jump
+    /// as one instruction (`if`, `?:` and loop conditions).
+    JmpCmp {
+        cmp: Bin,
+        when: bool,
+        a: Reg,
+        b: Reg,
+        t: u32,
+    },
     JmpLt {
         a: Reg,
         b: Reg,

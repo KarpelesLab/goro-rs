@@ -836,9 +836,7 @@ impl<'a> Compiler<'a> {
                 let d = self.tmp();
                 match then {
                     Some(t) => {
-                        let c = self.expr(cond)?;
-                        self.free(c);
-                        let j = self.emit(Op::JmpZ { c, t: 0 });
+                        let j = self.cond_jump_fwd(cond, false)?;
                         let v = self.expr(t)?;
                         self.free(v);
                         self.emit(Op::Copy { dst: d, src: v });

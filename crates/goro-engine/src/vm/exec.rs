@@ -776,6 +776,19 @@ impl Vm {
                         self.ex.set_ip(t as usize);
                     }
                 }
+                Op::JmpCmp { cmp, when, a, b, t } => {
+                    // (a condition jumping back is a loop's safe point)
+                    if when && goro_runtime::mem::pending() {
+                        return Err(self.memory_exhausted());
+                    }
+                    let r = match fast_cmp(cmp, self.peek_slot(a), self.peek_slot(b)) {
+                        Some(r) => r,
+                        None => self.cmp_slow(cmp, a, b)?,
+                    };
+                    if r == when {
+                        self.ex.set_ip(t as usize);
+                    }
+                }
                 Op::JmpLt { a, b, t } => {
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
@@ -1410,6 +1423,28 @@ impl Vm {
     }
 
     // ------------------------------------------------------------ helpers for ops
+
+    /// [`Op::JmpCmp`] on what the fast path does not cover.
+    #[cold]
+    fn cmp_slow(&mut self, op: Bin, a: Reg, b: Reg) -> R<bool> {
+        if matches!(op, Bin::Identical | Bin::NotIdentical)
+            && let (Some(x), Some(y)) = (self.peek(a), self.peek(b))
+            && let Some(same) = null_identity(x, y)
+        {
+            self.drop_tmp(a);
+            self.drop_tmp(b);
+            return Ok(same == (op == Bin::Identical));
+        }
+        let x = self.get(a)?;
+        let y = self.get(b)?;
+        goro_runtime::ops::set_expression_operands(a & CONST != 0 && b & CONST == 0);
+        let r = self.binary_op(op, &x, &y);
+        goro_runtime::ops::set_expression_operands(false);
+        let r = r?;
+        drop(x);
+        drop(y);
+        Ok(matches!(r, Value::Bool(true)))
+    }
 
     #[cold]
     pub(crate) fn binop_slow(&mut self, op: Bin, dst: Reg, a: Reg, b: Reg) -> R<()> {

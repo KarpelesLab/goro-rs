@@ -212,9 +212,32 @@ pub mod pending_flags {
     pub const INTERNAL_CALLER: u32 = 64;
 }
 
+/// The function of a native call in progress: a copy of the handle the call
+/// holds until it ends (no reference count to update), which a [`NativeCall`]
+/// never outlives.
+pub struct CallingFunc(std::mem::ManuallyDrop<Rc<Func>>);
+
+impl CallingFunc {
+    /// # Safety
+    /// `func` must stay alive as long as the result.
+    #[inline(always)]
+    pub unsafe fn borrowed(func: &Rc<Func>) -> CallingFunc {
+        // SAFETY: a bitwise copy that is never dropped.
+        CallingFunc(std::mem::ManuallyDrop::new(unsafe { std::ptr::read(func) }))
+    }
+}
+
+impl std::ops::Deref for CallingFunc {
+    type Target = Rc<Func>;
+    #[inline(always)]
+    fn deref(&self) -> &Rc<Func> {
+        &self.0
+    }
+}
+
 /// A native call in progress (for backtraces).
 pub struct NativeCall {
-    pub func: Rc<Func>,
+    pub func: CallingFunc,
     pub args: *const Vec<Value>,
     pub this: Option<ObjRef>,
     /// Frame depth at the call.
@@ -756,7 +779,20 @@ impl Vm {
         if v.capacity() == 0 {
             return;
         }
-        v.clear();
+        // (scalars, the common arguments, need no drop)
+        for x in v.iter_mut() {
+            if !matches!(
+                x,
+                Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_)
+            ) {
+                // SAFETY: each element is dropped once: the length is
+                // cleared below, and a panic cannot come from dropping a
+                // value here (destructors are queued).
+                unsafe { std::ptr::drop_in_place(x) };
+            }
+        }
+        // SAFETY: the elements were dropped above; scalars have no drop.
+        unsafe { v.set_len(0) };
         if self.arg_pool.len() < 64 {
             self.arg_pool.push(v);
         }
