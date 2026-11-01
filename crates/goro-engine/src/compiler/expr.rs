@@ -1364,10 +1364,14 @@ impl<'a> Compiler<'a> {
             dst: d,
             cap: items.len() as u32,
         });
+        let mut last_line = line;
         for it in items {
+            // Reported on the line of the element before it (test
+            // Zend/tests/bug75426).
             let Some(it) = it else {
-                return self.err("Cannot use empty array elements in arrays", line);
+                return self.err("Cannot use empty array elements in arrays", last_line);
             };
+            last_line = it.span.line;
             self.f.line = it.span.line;
             if it.unpack {
                 let s = self.expr(&it.value)?;

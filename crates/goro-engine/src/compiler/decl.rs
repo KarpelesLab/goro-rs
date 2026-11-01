@@ -831,8 +831,10 @@ impl<'a> Compiler<'a> {
                         );
                     }
                     if lname == b"self" {
+                        // An anonymous class's type stays "self" in messages
+                        // (test Zend/tests/gh19304).
                         match &self.class {
-                            Some(c) if !c.is_trait => c.name.to_vec(),
+                            Some(c) if !c.is_trait && !c.name.contains(&0) => c.name.to_vec(),
                             _ => b"self".to_vec(),
                         }
                     } else {

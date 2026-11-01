@@ -1260,7 +1260,11 @@ impl Vm {
                 let obj = match unsafe { &*cur } {
                     Value::Object(o) => o.clone(),
                     other => {
-                        if last && matches!(action, PathAction::Unset) {
+                        // unset() of something under null does nothing (test
+                        // Zend/tests/bug78644).
+                        if matches!(action, PathAction::Unset)
+                            && (last || matches!(other, Value::Null))
+                        {
                             return Ok(Value::Null);
                         }
                         let t = match other {

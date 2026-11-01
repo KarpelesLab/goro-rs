@@ -630,8 +630,20 @@ impl Vm {
         let Some(sp) = cls.find_static(name) else {
             return Ok(());
         };
-        if sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, self.scope_ptr()) {
-            return Ok(());
+        // A private one counts in its class's scope, or when the scope (an
+        // ancestor) has its own private static of that name (test
+        // Zend/tests/bug76860_2).
+        let scope = self.scope_ptr();
+        if sp.flags & mflags::PRIVATE != 0 && !std::ptr::eq(sp.class, scope) {
+            // SAFETY: classes live as long as the VM.
+            let own = !scope.is_null() && cls.is_subclass_of(unsafe { &*scope }) && {
+                let sc = unsafe { &*scope };
+                sc.find_static(name)
+                    .is_some_and(|s| s.flags & mflags::PRIVATE != 0 && std::ptr::eq(s.class, scope))
+            };
+            if !own {
+                return Ok(());
+            }
         }
         self.notice_msg(&format!(
             "Accessing static property {}::${} as non static",
@@ -2620,6 +2632,9 @@ impl Vm {
             Some(f) => {
                 let scope = self.scope_ptr();
                 if !self.method_visible(&f, scope) {
+                    // Never constructed: no destructor (test
+                    // Zend/tests/gh14456).
+                    o.mark_destructor_called();
                     // tests Zend/tests/closures/closure_instantiate,
                     // generators/errors/generator_instantiate_error
                     match cls.lname.as_bytes() {
