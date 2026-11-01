@@ -65,6 +65,7 @@ pub mod sodium;
 pub mod spl;
 pub mod spl_autoload;
 pub mod sqlite3;
+pub mod tidy;
 pub mod sqlite_common;
 pub mod stdmisc;
 pub mod streams;
@@ -159,6 +160,7 @@ pub fn modules() -> Vec<&'static Module> {
         &simplexml::MODULE,
         &xsl::MODULE,
         &dba::MODULE,
+        &tidy::MODULE,
         &soap::MODULE,
         &openssl::MODULE,
         &opcache::MODULE,

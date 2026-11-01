@@ -1,0 +1,9 @@
+[package]
+name = "goro-ext-tidy"
+description = "A from-scratch HTML cleaner and pretty printer for ext/tidy"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+goro-xml = { path = "../goro-xml" }
