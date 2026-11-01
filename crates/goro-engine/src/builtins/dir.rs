@@ -45,15 +45,14 @@ fn hooks() -> NativeHooks {
                 .set(cls.flags.get() | cflags::NOT_CLONEABLE | cflags::NOT_SERIALIZABLE);
         }),
         // Test directory/DirectoryClass_cannot_construct.
-        // ReflectionClass::newInstanceWithoutConstructor() still makes one
-        // (test directory/DirectoryClass_reflection_create_instance_no_construct).
+        // `new` only: ReflectionClass::newInstanceWithoutConstructor() and
+        // PDO::FETCH_CLASS still make one (tests directory/
+        // DirectoryClass_reflection_create_instance_no_construct, ext/pdo/
+        // tests/pdo_fetch_class_opaque_object).
         new_check: Some(|vm| {
-            let by_reflection = vm
-                .ex
-                .native_calls
-                .last()
-                .is_some_and(|c| c.func.lname.as_bytes() == b"newinstancewithoutconstructor");
-            if by_reflection {
+            let frames = vm.ex.frames.len() as u32;
+            let by_internal = vm.ex.native_calls.last().is_some_and(|c| c.depth == frames);
+            if by_internal {
                 return Ok(());
             }
             vm.throw(

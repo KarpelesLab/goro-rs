@@ -411,6 +411,8 @@ pub struct Stream {
     pub chunk_end: u64,
     /// Held by an internal class: fclose() refuses it.
     pub no_close: bool,
+    /// Something was read from it.
+    pub did_read: bool,
 }
 
 impl Stream {
@@ -445,6 +447,7 @@ impl Stream {
             read_failed: false,
             chunk_end: 0,
             no_close: false,
+            did_read: false,
         }
     }
 
@@ -490,12 +493,10 @@ impl Stream {
             // a short read of a file or memory stream is its end: the
             // filters see the last data with $closing set (test
             // streams/bug79984.phpt)
-            // (php://memory only knows at the next read: test filters/
-            // gh20370_dynamic_stream_property)
             let closing = n == 0
                 || (n < 8192
-                    && (matches!(self.backing, Backing::File(_)) && !self.is_pipe()
-                        || self.uri.starts_with(b"php://temp")));
+                    && (matches!(self.backing, Backing::Memory { .. })
+                        || matches!(self.backing, Backing::File(_)) && !self.is_pipe()));
             let mut chain = std::mem::take(&mut self.read_filters);
             let prev = FILTER_EOF.with(|c| c.replace(Some(closing)));
             let r = super::streams::run_chain(vm, &mut chain, &raw, closing);
@@ -532,6 +533,7 @@ impl Stream {
 
     /// Reads from the backing, before the read filters.
     pub fn read_raw(&mut self, vm: &mut Vm, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.did_read = true;
         // A chunk size of 1 skips the read buffer: the read asks for what the
         // caller wants (test streams/stream_set_chunk_size).
         let want = if self.chunk_size == 1 {
@@ -770,6 +772,19 @@ thread_local! {
     /// The streams opened, to close them at the end of the request.
     static OPEN_STREAMS: std::cell::RefCell<Vec<goro_runtime::object::WeakRes>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A directory stream with no URI: an archive's in-memory listing.
+pub(crate) fn is_listing_without_uri(r: &ResRef) -> bool {
+    let data = r.res().data.borrow();
+    data.as_ref()
+        .and_then(|d| d.downcast_ref::<std::cell::RefCell<Stream>>())
+        .and_then(|c| {
+            c.try_borrow()
+                .ok()
+                .map(|s| s.stream_type == "dir" && s.uri.is_empty())
+        })
+        .unwrap_or(false)
 }
 
 /// The streams still alive, for get_resources().
@@ -1808,6 +1823,18 @@ pub(crate) fn do_seek(vm: &mut Vm, s: &mut Stream, off: i64, whence: i64) -> boo
         *pos = 0;
         return true;
     }
+    // A seek flushes the read filters too; what they held is gone (the number
+    // of calls in test filters/gh20370_dynamic_stream_property).
+    let mut chain = std::mem::take(&mut s.read_filters);
+    for f in chain.iter_mut() {
+        let mut dropped = Vec::new();
+        if let Err(e) = f.filter.flush(vm, &mut dropped)
+            && vm.err.deferred.is_none()
+        {
+            vm.err.deferred = Some(e);
+        }
+    }
+    s.read_filters = chain;
     s.eof = false;
     s.pending.clear();
     s.chunk_end = 0;

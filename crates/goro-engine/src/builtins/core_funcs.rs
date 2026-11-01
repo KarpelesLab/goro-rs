@@ -2777,7 +2777,9 @@ fn get_resources(_vm: &mut Vm, a: &mut Args) -> R<Value> {
     live.sort_by_key(|r| r.id());
     let mut out = PhpArray::new();
     for r in live {
-        if r.is_closed() {
+        // (A Phar object's listing is no PHP stream: test ext/phar/tests/tar/
+        // bug70417.)
+        if r.is_closed() || super::file::is_listing_without_uri(&r) {
             continue;
         }
         if let Some(t) = &want

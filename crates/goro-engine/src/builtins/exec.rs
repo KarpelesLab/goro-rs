@@ -250,6 +250,33 @@ fn fd_stream(fd: OwnedFd, mode: &[u8]) -> ResRef {
     ))
 }
 
+/// For a pipe already read from, what PHP's read chunk would hold: the bytes
+/// waiting on it, which go. The number of bytes.
+fn discard_read_ahead(r: &ResRef, fd: RawFd) -> usize {
+    let data = r.res().data.borrow();
+    let Some(cell) = data
+        .as_ref()
+        .and_then(|d| d.downcast_ref::<RefCell<Stream>>())
+    else {
+        return 0;
+    };
+    let Ok(s) = cell.try_borrow() else {
+        return 0;
+    };
+    if !s.did_read || !s.is_pipe() {
+        return 0;
+    }
+    // SAFETY: fcntl and read on an open descriptor, with a valid buffer.
+    unsafe {
+        let fl = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        let mut buf = [0u8; 8192];
+        let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+        libc::fcntl(fd, libc::F_SETFL, fl);
+        n.max(0) as usize
+    }
+}
+
 /// The descriptor behind a stream resource, if it has one.
 /// The user-space stream object of a resource, if it is one.
 fn user_obj(r: &ResRef) -> Option<goro_runtime::ObjRef> {
@@ -611,7 +638,21 @@ fn proc_open(vm: &mut Vm, a: &mut Args) -> R<Value> {
         let v = v.deref();
         match &v {
             Value::Resource(r) => match stream_fd(r) {
-                Ok(Some(fd)) => child.push((idx, ChildFd::Dup(fd))),
+                Ok(Some(fd)) => {
+                    // What a read of this pipe had buffered can't follow the
+                    // descriptor to the child (test streams/
+                    // stream_cast_loses_data).
+                    let lost = discard_read_ahead(r, fd);
+                    if lost > 0 {
+                        vm.fwarn(
+                            a,
+                            &format!(
+                                "{lost} bytes of buffered data lost during stream conversion!"
+                            ),
+                        )?;
+                    }
+                    child.push((idx, ChildFd::Dup(fd)));
+                }
                 Ok(None) => {
                     let kind = {
                         let data = r.res().data.borrow();

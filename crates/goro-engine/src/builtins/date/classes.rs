@@ -869,7 +869,10 @@ fn iv_from_data(vm: &mut Vm, data: &PhpArray) -> R<Interval> {
         ))?;
     }
     let days = match data.get_bytes(b"days").map(|v| v.deref()) {
-        None | Some(Value::Bool(false)) | Some(Value::Null) => None,
+        // Without a `days` entry it shows as -1 (test ext/standard/tests/
+        // serialize/bug69425).
+        None => Some(-1),
+        Some(Value::Bool(false)) | Some(Value::Null) => None,
         Some(v @ (Value::Int(_) | Value::Float(_) | Value::Bool(_))) => Some(vm.to_int(&v)?),
         Some(Value::Str(t)) => Some(goro_runtime::convert::str_to_int(&t)),
         Some(_) => Some(-1),

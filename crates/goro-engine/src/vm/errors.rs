@@ -96,7 +96,13 @@ impl Vm {
         // User error handler (called regardless of error_reporting). While
         // it runs it is not the handler: errors it raises go to a handler
         // it installs, or to the standard one (test Zend/tests/bug63206.phpt).
+        // An `@` inside an internal class written in PHP is that class turning
+        // the diagnostic into its own exception: no user handler sees it (test
+        // ext/standard/tests/general_functions/bug44295).
+        let internal_silenced =
+            !self.err.silence.is_empty() && self.has_frame() && self.code_ref().file.is_empty();
         if let Some((h, mask)) = self.err.handlers.last().cloned()
+            && !internal_silenced
             && mask & level != 0
             && !h.is_null()
             && level
