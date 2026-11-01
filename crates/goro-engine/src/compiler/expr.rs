@@ -89,7 +89,11 @@ impl<'a> Compiler<'a> {
         }
         // Test Zend/tests/class_name/class_name_as_scalar_error_002.
         if word == "parent"
+            // (`parent::C` in a constant expression fails at run time, test
+            // Zend/tests/invalid_parent_const_ref_leak; `parent::class`
+            // here, test class_name_as_scalar_error_002)
             && self.f.flags & fflags::CLOSURE == 0
+            && (with_static || self.f.flags & fflags::CONST_EXPR == 0)
             && self
                 .class
                 .as_ref()

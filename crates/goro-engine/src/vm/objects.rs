@@ -2168,10 +2168,20 @@ impl Vm {
                 }
                 match unsafe { (*p).parent.clone() } {
                     Some(c) => Ok(c),
-                    None => self.throw(
-                        "Error",
-                        "Cannot use \"parent\" when current class scope has no parent",
-                    ),
+                    None => {
+                        let verb =
+                            if self.code_ref().flags & crate::bytecode::fflags::CONST_EXPR != 0 {
+                                "access"
+                            } else {
+                                "use"
+                            };
+                        self.throw(
+                            "Error",
+                            &format!(
+                                "Cannot {verb} \"parent\" when current class scope has no parent"
+                            ),
+                        )
+                    }
                 }
             }
             ClassSpec::Static => {

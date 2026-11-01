@@ -668,9 +668,49 @@ fn header_register_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
 
 fn register_shutdown_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let f = pin_relative_callable(vm, a.val(0));
+    let f = pin_this_callable(vm, f);
     let args = a.vals[1..].to_vec();
     vm.shutdown_functions.push((f, args));
     Ok(Value::Null)
+}
+
+/// A callable kept for later: a non-static method named by class, given in
+/// a method of that class, keeps the `$this` it would have been called with
+/// (test Zend/tests/register_shutdown_function_refcount).
+fn pin_this_callable(vm: &mut Vm, f: Value) -> Value {
+    let Some(this) = vm.this_obj() else {
+        return f;
+    };
+    let (class, method) = match f.deref() {
+        Value::Str(s) => match s.windows(2).position(|w| w == b"::") {
+            Some(p) => (PhpStr::new(&s[..p]), PhpStr::new(&s[p + 2..])),
+            None => return f,
+        },
+        Value::Array(a) if a.len() == 2 => {
+            match (
+                a.get_int(0).map(|x| x.deref()),
+                a.get_int(1).map(|x| x.deref()),
+            ) {
+                (Some(Value::Str(c)), Some(Value::Str(m))) => (c, m),
+                _ => return f,
+            }
+        }
+        _ => return f,
+    };
+    let Ok(Some(cls)) = vm.find_class(&class, false) else {
+        return f;
+    };
+    let this_cls = vm.class_of(&this);
+    let is_method = cls
+        .find_method(&crate::class::lower(&method))
+        .is_some_and(|m| m.flags & crate::class::mflags::STATIC == 0);
+    if is_method && (Rc::ptr_eq(&this_cls, &cls) || this_cls.is_subclass_of(&cls)) {
+        return Value::Array(PhpArray::from_values([
+            Value::Object(this),
+            Value::Str(method),
+        ]));
+    }
+    f
 }
 
 /// A callable kept for later: `self`/`parent`/`static` mean the classes of
