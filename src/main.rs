@@ -9,7 +9,7 @@ use goro_engine::{RunOptions, Script};
 /// The engine runs on a thread with a large stack: deeply nested code
 /// (parser recursion, callbacks of callbacks) needs it, as PHP has its own
 /// stack limits only for user-visible recursion.
-const STACK_SIZE: usize = 1 << 30;
+const STACK_SIZE: usize = 1 << 28;
 
 fn usage() -> &'static str {
     "Usage: goro [options] [-f] <file> [--] [args...]
@@ -186,6 +186,7 @@ const BUILT: &str = "Jan  1 2026 00:00:00";
 static ALLOC: goro_runtime::mem::CountingAlloc = goro_runtime::mem::CountingAlloc;
 
 fn main() {
+    goro_runtime::mem::limit_system_arenas();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args
         .first()
