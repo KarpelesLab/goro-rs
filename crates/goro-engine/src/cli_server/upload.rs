@@ -339,10 +339,19 @@ pub fn parse(
                 }
                 nvars += 1;
                 if limits.max_input_vars >= 0 && nvars > limits.max_input_vars {
-                    return Err(format!(
-                        "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-                        limits.max_input_vars
-                    ));
+                    // Warned once; the parts go on counting toward
+                    // max_multipart_body_parts (test
+                    // sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt).
+                    if nvars == limits.max_input_vars + 1 {
+                        crate::request_vars::startup_warning(
+                            vm,
+                            &format!(
+                                "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                                limits.max_input_vars
+                            ),
+                        );
+                    }
+                    continue;
                 }
                 if name == b"MAX_FILE_SIZE" {
                     form_max = Some(goro_runtime::convert::str_to_int(content));

@@ -431,6 +431,20 @@ fn sockaddr(a: &std::net::SocketAddr) -> (libc::sockaddr_storage, libc::socklen_
     (ss, len as libc::socklen_t)
 }
 
+/// Moves a listening socket above the low descriptors, so that accepted
+/// connections come first in a process's descriptor list (as test
+/// sapi/fpm/tests/socket-close-on-exec.phpt reads lsof's output).
+fn high_fd(fd: RawFd) -> RawFd {
+    // SAFETY: duplicating our descriptor, keeping close-on-exec.
+    let n = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
+    if n < 0 {
+        return fd;
+    }
+    // SAFETY: closing the original.
+    unsafe { libc::close(fd) };
+    n
+}
+
 fn bind_tcp(a: &std::net::SocketAddr, backlog: i32) -> Result<RawFd, i32> {
     let fam = if a.is_ipv4() {
         libc::AF_INET
@@ -469,7 +483,7 @@ fn bind_tcp(a: &std::net::SocketAddr, backlog: i32) -> Result<RawFd, i32> {
             libc::close(fd);
             return Err(e);
         }
-        Ok(fd)
+        Ok(high_fd(fd))
     }
 }
 
@@ -498,7 +512,7 @@ fn bind_unix(p: &Path, backlog: i32) -> Result<RawFd, i32> {
             libc::close(fd);
             return Err(e);
         }
-        Ok(fd)
+        Ok(high_fd(fd))
     }
 }
 
@@ -515,12 +529,7 @@ fn inherited() -> Vec<(String, RawFd)> {
         if let Some(p) = part.rfind('=')
             && let Ok(fd) = part[p + 1..].parse::<RawFd>()
         {
-            let addr = part[..p].to_string();
-            log::zlog(
-                Level::Notice,
-                &format!("using inherited socket fd={}, \"{}\"", fd, addr),
-            );
-            out.push((addr, fd));
+            out.push((part[..p].to_string(), fd));
         }
     }
     out
@@ -1364,6 +1373,12 @@ pub fn main(opts: Options) -> i32 {
                 return fail();
             }
         }
+    }
+    for (addr, fd) in &inherited_socks {
+        log::zlog(
+            Level::Notice,
+            &format!("using inherited socket fd={}, \"{}\"", fd, addr),
+        );
     }
     // The pools, with the hidden ones of pm.status_listen.
     let mut pool_cfgs: Vec<(Pool, Option<usize>)> = Vec::new();

@@ -164,13 +164,12 @@ fn header(ty: u8, id: u16, len: usize, pad: usize) -> [u8; 8] {
 }
 
 /// Appends the records of a stream's content (without the closing empty
-/// record), content padded to a multiple of 8 bytes (§3.3 recommends it).
+/// record). No padding (§3.3 makes it optional): clients that read the
+/// padding with one short read would lose their place.
 pub fn stream_records(out: &mut Vec<u8>, ty: u8, id: u16, data: &[u8]) {
-    for chunk in data.chunks(MAX_CONTENT - 7) {
-        let pad = (8 - chunk.len() % 8) % 8;
-        out.extend_from_slice(&header(ty, id, chunk.len(), pad));
+    for chunk in data.chunks(MAX_CONTENT) {
+        out.extend_from_slice(&header(ty, id, chunk.len(), 0));
         out.extend_from_slice(chunk);
-        out.extend(std::iter::repeat_n(0u8, pad));
     }
 }
 
@@ -383,7 +382,7 @@ mod tests {
     fn stream_padding() {
         let mut out = Vec::new();
         stream_records(&mut out, STDOUT, 1, b"hello");
-        assert_eq!(out.len(), 16);
-        assert_eq!(out[6], 3);
+        assert_eq!(out.len(), 13);
+        assert_eq!(out[6], 0);
     }
 }

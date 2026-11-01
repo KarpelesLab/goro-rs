@@ -380,7 +380,7 @@ fn write_access(m: &Master, pool: &PoolRt, d: &Done) {
 }
 
 /// A response FPM makes itself (ping, status page).
-fn own_response(fd: RawFd, id: u16, expose: bool, ctype: &str, body: &[u8]) {
+fn own_response(id: u16, expose: bool, ctype: &str, body: &[u8]) -> Vec<u8> {
     let mut head = String::new();
     if expose {
         head.push_str("X-Powered-By: PHP/8.5.4\r\n");
@@ -394,7 +394,7 @@ fn own_response(fd: RawFd, id: u16, expose: bool, ctype: &str, body: &[u8]) {
     fcgi::stream_records(&mut out, fcgi::STDOUT, id, &data);
     fcgi::end_stream(&mut out, fcgi::STDOUT, id);
     fcgi::end_request(&mut out, id, 0, fcgi::REQUEST_COMPLETE);
-    let _ = fcgi::write_all(fd, &out);
+    out
 }
 
 struct W<'a> {
@@ -575,18 +575,11 @@ impl<'a> W<'a> {
             .map(|v| v.to_vec())
             .unwrap_or_default();
         let mcfg = &main.cfg;
-        let mut status = 200;
-        let mut cpu = (0.0, 0.0);
-        let mut keep = true;
         let own = if mcfg.ping_path.as_deref().map(str::as_bytes) == Some(&script_name[..]) {
-            own_response(
-                conn,
-                r.id,
-                self.expose,
-                "text/plain",
-                mcfg.ping_response.as_bytes(),
-            );
-            true
+            Some((
+                200,
+                own_response(r.id, self.expose, "text/plain", mcfg.ping_response.as_bytes()),
+            ))
         } else if mcfg.status_path.as_deref().map(str::as_bytes) == Some(&script_name[..]) {
             let st = super::status::Status::of(
                 &main.board,
@@ -597,32 +590,52 @@ impl<'a> W<'a> {
             );
             let q = String::from_utf8_lossy(r.param(b"QUERY_STRING").unwrap_or(b"")).into_owned();
             let (ctype, body) = st.page(&q);
-            own_response(conn, r.id, self.expose, ctype, body.as_bytes());
-            true
+            Some((200, own_response(r.id, self.expose, ctype, body.as_bytes())))
+        } else if self.pool().status_of.is_some() {
+            // The status socket serves the status page only.
+            let mut out = Vec::new();
+            fcgi::stream_records(
+                &mut out,
+                fcgi::STDOUT,
+                r.id,
+                b"Status: 404 Not Found\r\nContent-type: text/html; charset=UTF-8\r\n\r\nFile not found.\n",
+            );
+            fcgi::end_stream(&mut out, fcgi::STDOUT, r.id);
+            fcgi::end_request(&mut out, r.id, 0, fcgi::REQUEST_COMPLETE);
+            Some((404, out))
         } else {
-            false
+            None
         };
-        if !own {
-            if self.pool().status_of.is_some() {
-                // The status socket serves the status page only.
-                let mut out = Vec::new();
-                fcgi::stream_records(
-                    &mut out,
-                    fcgi::STDOUT,
-                    r.id,
-                    b"Status: 404 Not Found\r\nContent-type: text/html; charset=UTF-8\r\n\r\nFile not found.\n",
-                );
-                fcgi::end_stream(&mut out, fcgi::STDOUT, r.id);
-                fcgi::end_request(&mut out, r.id, 0, fcgi::REQUEST_COMPLETE);
+        match own {
+            Some((status, out)) => {
+                // logged before the answer, so that the log follows the
+                // order of the requests
+                self.finish_request(r, peer, status, start, (0.0, 0.0));
                 let _ = fcgi::write_all(conn, &out);
-                status = 404;
-            } else {
-                let (st, c, ok) = self.run_child(conn, r);
-                status = st;
-                cpu = c;
-                keep = ok;
+                true
+            }
+            None => {
+                let (logged, ok) = self.run_child(conn, r, peer, start);
+                if !logged {
+                    let st = sl.status.load(Relaxed);
+                    self.finish_request(r, peer, st, start, (0.0, 0.0));
+                }
+                ok
             }
         }
+    }
+
+    /// The end of a request: the scoreboard, the flush mark of the
+    /// worker's output, the access log line.
+    fn finish_request(
+        &self,
+        r: &fcgi::Request,
+        peer: Option<IpAddr>,
+        status: i64,
+        start: i64,
+        cpu: (f64, f64),
+    ) {
+        let sl = self.board().slot(self.slot);
         let end = now_us();
         sl.req_end.store(end, Relaxed);
         sl.state.store(scoreboard::FINISHING, Relaxed);
@@ -654,20 +667,25 @@ impl<'a> W<'a> {
             script: r.param(b"SCRIPT_FILENAME").unwrap_or(b"").to_vec(),
         };
         write_access(self.m, self.pool(), &d);
-        keep
     }
 
-    /// Runs a script request in a forked process; (status, cpu times,
-    /// connection still usable).
-    fn run_child(&mut self, conn: RawFd, r: &fcgi::Request) -> (i64, (f64, f64), bool) {
+    /// Runs a script request in a forked process; (the request process
+    /// ended the request, the connection is still usable).
+    fn run_child(
+        &mut self,
+        conn: RawFd,
+        r: &fcgi::Request,
+        peer: Option<IpAddr>,
+        start: i64,
+    ) -> (bool, bool) {
         // SAFETY: this process runs one thread; the child continues with
         // a copy of it and ends with _exit.
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            return (500, (0.0, 0.0), false);
+            return (false, false);
         }
         if pid == 0 {
-            self.child(conn, r);
+            self.child(conn, r, peer, start);
         }
         let sl = self.board().slot(self.slot);
         let mut st = 0;
@@ -704,8 +722,6 @@ impl<'a> W<'a> {
                 }
             }
         }
-        let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
-        let cpu = (tv(ru.ru_utime), tv(ru.ru_stime));
         let ok = libc::WIFEXITED(st);
         let done = sl.done.load(Relaxed) != 0;
         if !done {
@@ -715,12 +731,11 @@ impl<'a> W<'a> {
             fcgi::end_request(&mut out, r.id, 0, fcgi::REQUEST_COMPLETE);
             let _ = fcgi::write_all(conn, &out);
         }
-        let status = sl.status.load(Relaxed);
-        (status, cpu, ok && done)
+        (ok && done, ok && done)
     }
 
     /// The request process.
-    fn child(&mut self, conn: RawFd, r: &fcgi::Request) -> ! {
+    fn child(&mut self, conn: RawFd, r: &fcgi::Request, peer: Option<IpAddr>, start: i64) -> ! {
         // SAFETY: signal setup of the new process.
         unsafe {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
@@ -772,6 +787,11 @@ impl<'a> W<'a> {
         let status = super::request::run(&mut self.vm, r, &set);
         let sl = self.board().slot(self.slot);
         sl.status.store(status, Relaxed);
+        // SAFETY: rusage is plain data filled by getrusage.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+        let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+        self.finish_request(r, peer, status, start, (tv(ru.ru_utime), tv(ru.ru_stime)));
         super::request::finish_response(0);
         exit_now(0);
     }
