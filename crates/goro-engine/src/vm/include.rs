@@ -103,10 +103,13 @@ impl Vm {
             }
         })?;
         let consts = &self.constants;
+        let attrs = &self.const_attrs;
         let kc = |n: &[u8]| -> Option<Value> {
             // Only engine constants that can't be redefined; deprecated
-            // ones warn at run time.
-            if crate::builtins::misc::const_deprecation(n).is_some() {
+            // ones (also those with attributes) warn at run time.
+            if crate::builtins::misc::const_deprecation(n).is_some()
+                || attrs.contains_key(&PhpStr::new(n))
+            {
                 return None;
             }
             let v = consts.get(&PhpStr::new(n))?;
@@ -706,6 +709,16 @@ impl Vm {
         }
         let r = self.run();
         let _ = what;
+        // Code that declares no function, closure or class is referenced by
+        // nothing once it ran: free it (an include or eval run many times
+        // would otherwise keep every compiled copy; test Zend/tests/
+        // runtime_compile_time_binary_operands runs 60k evals).
+        if main.children.is_empty()
+            && main.classes.is_empty()
+            && let Some(i) = self.units.iter().rposition(|u| Rc::ptr_eq(u, &main))
+        {
+            self.units.swap_remove(i);
+        }
         r
     }
 
@@ -1261,7 +1274,16 @@ impl Vm {
                 } else {
                     n.to_string_lossy()
                 };
-                self.throw("Error", &format!("Undefined constant \"{}\"", shown))
+                // In a constant expression the error shows its frame (test
+                // Zend/tests/bug47572).
+                let fl = self.code_ref().flags;
+                let ce = fl & crate::bytecode::fflags::CONST_EXPR != 0
+                    && fl & crate::bytecode::fflags::BARE_CONST == 0;
+                let on = ce || self.trace_const_expr;
+                let saved = std::mem::replace(&mut self.trace_const_expr, on);
+                let r = self.throw("Error", &format!("Undefined constant \"{}\"", shown));
+                self.trace_const_expr = saved;
+                r
             }
         }
     }

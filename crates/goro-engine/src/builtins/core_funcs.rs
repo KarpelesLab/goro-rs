@@ -667,10 +667,55 @@ fn header_register_callback(vm: &mut Vm, a: &mut Args) -> R<Value> {
 }
 
 fn register_shutdown_function(vm: &mut Vm, a: &mut Args) -> R<Value> {
-    let f = a.val(0);
+    let f = pin_relative_callable(vm, a.val(0));
     let args = a.vals[1..].to_vec();
     vm.shutdown_functions.push((f, args));
     Ok(Value::Null)
+}
+
+/// A callable kept for later: `self`/`parent`/`static` mean the classes of
+/// the scope it was given in (test Zend/tests/bug41026: the shutdown
+/// function runs with no class scope).
+fn pin_relative_callable(vm: &Vm, f: Value) -> Value {
+    let name_of = |c: &[u8]| -> Option<PhpStr> {
+        let l = c.to_ascii_lowercase();
+        let p = match &l[..] {
+            b"self" | b"parent" => vm.scope_ptr(),
+            b"static" => vm.static_class_ptr(),
+            _ => return None,
+        };
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: classes live as long as the VM.
+        let cls = unsafe { &*p };
+        if l == b"parent" {
+            cls.parent.as_ref().map(|c| c.name.clone())
+        } else {
+            Some(cls.name.clone())
+        }
+    };
+    match f.deref() {
+        Value::Array(a) if a.len() == 2 => {
+            if let (Some(Value::Str(c)), Some(m)) = (a.get_int(0).map(|x| x.deref()), a.get_int(1))
+                && let Some(n) = name_of(&c)
+            {
+                return Value::Array(PhpArray::from_values([Value::Str(n), m.deref()]));
+            }
+            f
+        }
+        Value::Str(s) => {
+            if let Some(p) = s.windows(2).position(|w| w == b"::")
+                && let Some(n) = name_of(&s[..p])
+            {
+                let mut v = n.to_vec();
+                v.extend_from_slice(&s[p..]);
+                return Value::Str(PhpStr::from(v));
+            }
+            f
+        }
+        _ => f,
+    }
 }
 
 fn get_defined_functions(vm: &mut Vm, a: &mut Args) -> R<Value> {
@@ -948,7 +993,11 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     match vm.lookup_constant(&name)? {
         Some(v) => {
-            vm.const_deprecated(&name)?;
+            // #[\Deprecated] constants warn here too (test Zend/tests/
+            // constants/const_deprecation.phpt).
+            if vm.const_attrs.is_empty() || !vm.user_const_deprecated(&name)? {
+                vm.const_deprecated(&name)?;
+            }
             Ok(v)
         }
         None => vm.throw(
@@ -1210,6 +1259,12 @@ fn get_object_vars(vm: &mut Vm, a: &mut Args) -> R<Value> {
             Value::Int(i) => Key::Int(i),
             Value::Str(s) => Key::from_php_str(&s),
             _ => continue,
+        };
+        // A reference held by the property alone is a plain value (test
+        // Zend/tests/bug71336); a shared one stays a reference.
+        let v = match v {
+            Value::Ref(r) if r.refcount() <= 2 => r.get(),
+            v => v,
         };
         out.insert(key, v);
     }
@@ -1721,6 +1776,12 @@ fn error_log(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     .is_ok();
                 return Ok(Value::Bool(ok));
             }
+            if vm.out.sapi.fpm {
+                // FPM's log and the web server's (FCGI_STDERR; tests
+                // sapi/fpm/tests/log-bm-*.phpt).
+                crate::fpm::request::sapi_log(&msg);
+                return Ok(Value::Bool(true));
+            }
             vm.out.flush();
             if vm.out.sapi.server {
                 // The web server's log (observed on PHP 8.5).
@@ -1875,6 +1936,15 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // Test Zend/tests/fibers/negative_stack_size.
     if k.as_bytes() == b"fiber.stack_size" && crate::vm::setup::parse_size(&v) < 0 {
         vm.warn("fiber.stack_size must be a positive number")?;
+        return Ok(Value::Bool(false));
+    }
+    // Empty argument separators are refused (test Zend/tests/bug46811,
+    // observed on PHP 8.5 for both).
+    if matches!(
+        k.as_bytes(),
+        b"arg_separator.output" | b"arg_separator.input"
+    ) && v.is_empty()
+    {
         return Ok(Value::Bool(false));
     }
     let mut v = v;
@@ -2144,6 +2214,8 @@ fn zero_int(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(if vm.out.sapi.server {
         "cli-server"
+    } else if vm.out.sapi.fpm {
+        "fpm-fcgi"
     } else if vm.out.sapi.cgi {
         "cgi-fcgi"
     } else if crate::compiler::debug_markers() {

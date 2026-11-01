@@ -15,6 +15,9 @@ pub struct Sapi {
     /// The "cgi-fcgi" SAPI (`goro --cgi`) runs this request: the head is
     /// CGI header lines (RFC 3875 6.2) on stdout.
     pub cgi: bool,
+    /// The "fpm-fcgi" SAPI (`php-fpm`) runs this request (with `cgi`:
+    /// the head is CGI header lines, sent as FastCGI records).
+    pub fpm: bool,
     /// The response status; 0 while unset (the CLI before
     /// http_response_code() or a status header).
     pub status: i64,

@@ -293,6 +293,7 @@ impl Writer<'_> {
                     }
                 }
             }
+            NodeData::Comment(_) if arena.is_null_comment(n) => {}
             NodeData::Comment(t) => {
                 self.out.push_str("<!--");
                 self.out.push_str(t);

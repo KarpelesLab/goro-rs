@@ -2640,9 +2640,9 @@ impl Vm {
 
     pub(crate) fn register_class(&mut self, cls: Rc<Class>) {
         let ln = cls.lname.clone();
-        if !cls.has_flag(cflags::ANON) {
-            self.class_order.push(ln.clone());
-        }
+        // Anonymous classes are listed too (observed on PHP 8.5; test
+        // ext/dom/tests/DOMXPath_callables_errors.phpt).
+        self.class_order.push(ln.clone());
         self.classes.insert(ln, cls);
     }
 
@@ -2652,8 +2652,29 @@ impl Vm {
             return Ok(());
         }
         cls.statics_ready.set(true);
-        if let Some(p) = cls.parent.clone() {
-            self.ensure_statics(&p)?;
+        if let Some(p) = cls.parent.clone()
+            && let Err(e) = self.ensure_statics(&p)
+        {
+            cls.statics_ready.set(false);
+            return Err(e);
+        }
+        // A class's constants are resolved before its static properties
+        // (observed on PHP 8.5: `A::$s` fails on an undefined constant in
+        // a constant of A).
+        if cls.kind == crate::class::ClassKind::Class {
+            let pending: Vec<Rc<crate::class::ClassConst>> = cls
+                .consts
+                .borrow()
+                .iter()
+                .filter(|c| matches!(*c.value.borrow(), crate::class::ConstState::Pending(_)))
+                .cloned()
+                .collect();
+            for c in pending {
+                if let Err(e) = self.eval_class_const(&c) {
+                    cls.statics_ready.set(false);
+                    return Err(e);
+                }
+            }
         }
         let sps: Vec<Rc<StaticProp>> = cls.static_props.borrow().clone();
         for sp in sps {

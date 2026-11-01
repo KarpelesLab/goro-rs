@@ -57,6 +57,7 @@ pub mod reflection;
 pub mod serialize;
 pub mod session;
 pub mod simplexml;
+pub mod soap;
 pub mod socketext;
 pub mod sockets;
 pub mod sodium;
@@ -78,6 +79,7 @@ pub mod xml;
 pub mod xmlreader;
 pub mod xmlstore;
 pub mod xmlwriter;
+pub mod zend_test;
 pub mod zip;
 pub mod zlib;
 
@@ -153,6 +155,7 @@ pub fn modules() -> Vec<&'static Module> {
         &xmlwriter::MODULE,
         &xmlreader::MODULE,
         &simplexml::MODULE,
+        &soap::MODULE,
         &openssl::MODULE,
         &opcache::MODULE,
         &session::MODULE,

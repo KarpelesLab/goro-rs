@@ -2032,6 +2032,23 @@ impl<'a> Compiler<'a> {
                     self.free(v);
                     self.emit(Op::Send { src: v, arg: i });
                 }
+                // `f($a = &$b)`: a by-reference parameter gets the reference
+                // (test Zend/tests/bug72038).
+                ExprKind::AssignRef { target, .. } if matches!(target.kind, ExprKind::Variable(n) if n != b"this" && !is_superglobal(n)) =>
+                {
+                    let v = self.expr(&a.value)?;
+                    self.free(v);
+                    let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
+                    self.emit(Op::Send { src: v, arg: i });
+                    let j2 = self.emit(Op::Jmp { t: 0 });
+                    self.patch_here(j);
+                    let ExprKind::Variable(n) = target.kind else {
+                        unreachable!()
+                    };
+                    let var = self.cv(n);
+                    self.emit(Op::SendVar { var, arg: i });
+                    self.patch_here(j2);
+                }
                 // A place through a temporary (`C[0]`, `func_get_args()[0]`):
                 // a value, or an error for a by-reference parameter (test
                 // Zend/tests/gh12102_*).
@@ -2057,8 +2074,10 @@ impl<'a> Compiler<'a> {
                     });
                     self.patch_here(j2);
                 }
-                ExprKind::Index { index: None, .. } => {
-                    // `f($a[])`: only valid for by-reference parameters.
+                // `f($a[])`, `f($a[][$k])`: only valid for by-reference
+                // parameters, else an Error at run time (test
+                // Zend/tests/func_arg_fetch_optimization).
+                ExprKind::Index { .. } if dim_chain_appends(&a.value) => {
                     let j = self.emit(Op::JmpArgByRef { arg: i, t: 0 });
                     let msg =
                         self.add_const(Value::Str(PhpStr::intern(b"Cannot use [] for reading")));
@@ -3489,5 +3508,15 @@ impl<'a> Compiler<'a> {
             );
         }
         Ok(())
+    }
+}
+
+/// A dimension chain with an append (`$a[]`, `$a[][$k]`, `$a[]->p[0]` is not
+/// one: the chain stops at a property).
+fn dim_chain_appends(e: &Expr<'_>) -> bool {
+    match &e.kind {
+        ExprKind::Index { index: None, .. } => true,
+        ExprKind::Index { base, .. } => dim_chain_appends(base),
+        _ => false,
     }
 }

@@ -146,12 +146,13 @@ pub(crate) fn legacy_insert(
             child = a.next_sibling(node);
         }
         let old_root = a.root(node);
+        let from_fragment = matches!(a.data(node), NodeData::Fragment);
         let inserted = a.insert_unchecked(parent, node, child);
         if old_root != node && old_root != a.doc_of(old_root) {
             s.free_if_unheld(old_root);
         }
         for &n in &inserted {
-            super::element::reconcile_after_insert(&mut s.arena, n);
+            super::element::reconcile_after_insert(&mut s.arena, n, from_fragment);
         }
         s.collect();
         Ok(inserted)
@@ -403,12 +404,13 @@ fn replace_child(vm: &mut Vm, a: &mut Args) -> R<Value> {
             }
         }
         let old_root = ar.root(node);
+        let from_fragment = matches!(ar.data(node), NodeData::Fragment);
         let r = ar.replace_child(parent, node, child)?;
         if old_root != node && !matches!(ar.data(old_root), NodeData::Document(_)) {
             s.free_if_unheld(old_root);
         }
         if !modern {
-            super::element::reconcile_after_insert(&mut s.arena, node);
+            super::element::reconcile_after_insert(&mut s.arena, node, from_fragment);
         }
         s.collect();
         Ok(r)
@@ -428,6 +430,12 @@ pub(crate) fn clone_id(n: NodeId, deep: bool) -> NodeId {
         let a = &mut s.arena;
         let doc = a.doc_of(n);
         let c = a.clone_node(n, doc, deep);
+        // A namespace node's copy belongs to the same element (test
+        // clone_nodes.phpt).
+        if matches!(a.data(n), NodeData::Namespace(_)) {
+            let p = a.parent(n);
+            a.node_mut(c).parent = p;
+        }
         if matches!(a.data(n), NodeData::Document(_)) {
             let st = s.doc_ext(n).get::<super::DocSettings>().clone();
             *s.doc_ext(c).get::<super::DocSettings>() = st;
@@ -717,7 +725,7 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
     let prefixes = match a.val(first + 3) {
         Value::Array(p) => p
             .iter()
-            .map(|(_, v)| s8(&v.as_str().cloned().unwrap_or_default()))
+            .map(|(_, v)| s8(&v.deref().as_str().cloned().unwrap_or_default()))
             .collect(),
         _ => Vec::new(),
     };
@@ -753,7 +761,8 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
                     ),
                 );
             };
-            let ns: Vec<(String, String)> = match x.get_bytes(b"namespaces") {
+            // Values may be references (test DOMNode_C14N_references.phpt).
+            let ns: Vec<(String, String)> = match x.get_bytes(b"namespaces").map(|v| v.deref()) {
                 Some(Value::Array(m)) => m
                     .iter()
                     .map(|(k, v)| {
@@ -762,7 +771,7 @@ fn c14n_run(vm: &mut Vm, a: &Args, first: usize) -> R<Option<String>> {
                                 goro_runtime::KeyRef::Str(s) => s8(s),
                                 goro_runtime::KeyRef::Int(i) => i.to_string(),
                             },
-                            s8(&v.as_str().cloned().unwrap_or_default()),
+                            s8(&v.deref().as_str().cloned().unwrap_or_default()),
                         )
                     })
                     .collect(),

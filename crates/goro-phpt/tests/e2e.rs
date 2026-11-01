@@ -33,6 +33,7 @@ fn config(root: &Path) -> Config {
         online: false,
         cgi: None,
         phpdbg: None,
+        fpm_php: None,
     }
 }
 
@@ -311,6 +312,27 @@ fn memory_limit_applies_to_the_test() {
     );
     let r = run(&cfg, &t);
     assert_eq!(r.status, Status::Pass, "{}", r.reason);
+}
+
+/// A descriptor the runner inherited (such as a suite lock's) doesn't reach
+/// the test: an orphan test process could hold the lock forever.
+#[test]
+fn test_processes_inherit_no_descriptors() {
+    const FD: i32 = 201;
+    let root = suite("fds");
+    let cfg = config(&root);
+    let path = write(
+        &root,
+        "tests/fds.phpt",
+        "--TEST--\nfds\n--FILE--\nfd 201\n--EXPECT--\nclosed\n",
+    );
+    // SAFETY: duplicates stderr to a number nothing else uses, without
+    // close-on-exec, and closes it after the run.
+    assert_eq!(unsafe { libc::dup2(2, FD) }, FD);
+    let result = run(&cfg, &path);
+    // SAFETY: closes the descriptor made above.
+    unsafe { libc::close(FD) };
+    assert_eq!(result.status, Status::Pass, "{}", result.reason);
 }
 
 #[test]

@@ -161,7 +161,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "deprecated",
-            "<?php #[Attribute(Attribute::TARGET_METHOD|Attribute::TARGET_FUNCTION|Attribute::TARGET_CLASS_CONSTANT)] final class Deprecated { public readonly ?string $message; public readonly ?string $since; public function __construct(?string $message = null, ?string $since = null) { $this->message = $message; $this->since = $since; } }",
+            "<?php #[Attribute(Attribute::TARGET_METHOD|Attribute::TARGET_FUNCTION|Attribute::TARGET_CLASS_CONSTANT|Attribute::TARGET_CONSTANT)] final class Deprecated { public readonly ?string $message; public readonly ?string $since; public function __construct(?string $message = null, ?string $since = null) { $this->message = $message; $this->since = $since; } }",
         ),
         (
             "nodiscard",

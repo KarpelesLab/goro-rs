@@ -329,7 +329,7 @@ impl Vm {
                 label.extend_from_slice(b":protected");
             } else if p.flags & crate::class::mflags::PRIVATE != 0 {
                 label.extend_from_slice(b":\"");
-                label.extend_from_slice(unsafe { &(*p.class).name });
+                label.extend_from_slice(upto_nul(unsafe { &(*p.class).name }));
                 label.extend_from_slice(b"\":private");
             }
             if self.is_uninit(v) {
@@ -522,8 +522,10 @@ impl Vm {
                 if is_std {
                     out.extend_from_slice(b"(object) array(\n");
                 } else {
+                    // The whole name, NUL and all for anonymous classes
+                    // (observed on PHP 8.5).
                     out.push(b'\\');
-                    out.extend_from_slice(cls.name.dname().as_bytes());
+                    out.extend_from_slice(&cls.name);
                     out.extend_from_slice(b"::__set_state(array(\n");
                 }
                 let props = if cls.native.props_for.is_none()
@@ -765,9 +767,11 @@ fn dump_key(k: KeyRef<'_>) -> Vec<u8> {
 /// A mangled property name (`\0*\0x`, `\0A\0x`) as var_dump shows it.
 fn mangled_label(s: &[u8]) -> Vec<u8> {
     if s.first() == Some(&0)
-        && let Some(p) = s[1..].iter().position(|&c| c == 0)
+        && let Some(p) = s[1..].iter().rposition(|&c| c == 0)
     {
-        let cls = &s[1..p + 1];
+        // The class part runs to the last NUL (an anonymous class's name
+        // has one), shown up to its own NUL (test Zend/tests/bug73816).
+        let cls = upto_nul(&s[1..p + 1]);
         let name = &s[p + 2..];
         let mut v = b"\"".to_vec();
         v.extend_from_slice(name);
@@ -782,6 +786,14 @@ fn mangled_label(s: &[u8]) -> Vec<u8> {
         return v;
     }
     dump_key(KeyRef::Str(&PhpStr::new(s)))
+}
+
+/// A class name as dumps show it: an anonymous class's up to its NUL.
+fn upto_nul(n: &[u8]) -> &[u8] {
+    match n.iter().position(|&c| c == 0) {
+        Some(i) => &n[..i],
+        None => n,
+    }
 }
 
 /// `"name":protected` → `name:protected`; `"x":"A":private` →

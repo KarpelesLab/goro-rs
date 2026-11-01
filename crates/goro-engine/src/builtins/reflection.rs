@@ -5796,9 +5796,25 @@ fn gc_to_string(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .replace("integer", "int")
         .replace("boolean", "bool");
     let mut val = Vec::new();
-    vm.append_to_string(&mut val, &v)?;
+    if let Value::Array(_) = v {
+        val.extend_from_slice(b"Array");
+    } else {
+        vm.append_to_string(&mut val, &v)?;
+    }
+    // `<persistent>` for engine constants, `deprecated` for deprecated
+    // ones (observed on PHP 8.5; test ext/reflection/tests/
+    // ReflectionConstant_dump.phpt).
+    let persistent = !vm.user_constants.contains(&normalize_const(&n));
+    let deprecated = matches!(gc_deprecated(vm, a)?, Value::Bool(true));
+    let flags = match (persistent, deprecated) {
+        (true, true) => "<persistent, deprecated> ",
+        (true, false) => "<persistent> ",
+        (false, true) => "<deprecated> ",
+        (false, false) => "",
+    };
     Ok(Value::Str(PhpStr::from(format!(
-        "Constant [ {} {} ] {{ {} }}\n",
+        "Constant [ {}{} {} ] {{ {} }}\n",
+        flags,
         ty,
         n.to_string_lossy(),
         String::from_utf8_lossy(&val)

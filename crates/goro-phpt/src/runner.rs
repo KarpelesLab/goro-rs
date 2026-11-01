@@ -111,6 +111,10 @@ pub struct Config {
     pub cgi: Option<CgiCommand>,
     /// How to run phpdbg; none: tests with a PHPDBG section are skipped.
     pub phpdbg: Option<CgiCommand>,
+    /// For the FPM tests: a `bin/php` path whose `../sbin/php-fpm` is the
+    /// FPM binary, given to them as TEST_PHP_EXECUTABLE (where
+    /// sapi/fpm/tests/tester.inc looks for php-fpm).
+    pub fpm_php: Option<PathBuf>,
 }
 
 /// The CGI SAPI binary and the arguments that come first (`goro --cgi`).
@@ -129,6 +133,9 @@ pub const ONLINE_TESTS: &[&str] = &[
     "ext/curl/tests/bug71523.phpt",
     "ext/curl/tests/curl_basic_008.phpt",
     "ext/curl/tests/curl_basic_010.phpt",
+    // WSDLs from unknown hosts ("i_dont_exist.com")
+    "ext/soap/tests/bugs/bug34657.phpt",
+    "ext/soap/tests/bugs/bug70469.phpt",
     "ext/standard/tests/file/file_get_contents_error002.phpt",
     "ext/standard/tests/file/file_get_contents_with_custom_uri_parser.phpt",
     "ext/standard/tests/network/gethostbyname_basic001.phpt",
@@ -143,6 +150,8 @@ pub const HEAVY_TESTS: &[&str] = &[
     "file_get_contents_file_put_contents_5gb.phpt",
     // a 2 GB string
     "gh15613.phpt",
+    // a 2 GB string with memory_limit=6144M
+    "soap_qname_crash.phpt",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -469,11 +478,38 @@ fn prepare(
             }
         }
     }
+    // php-src's CI loads zend_test for every test; a test that only asks
+    // for it in SKIPIF (`function_exists('zend_test_…')`) gets it too, when
+    // the binary can load it.
+    if phpt
+        .get("SKIPIF")
+        .is_some_and(|s| s.windows(9).any(|w| w == b"zend_test"))
+        && !phpt
+            .get_list("EXTENSIONS", false)
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case("zend_test"))
+        && let ExtAction::Load(setting) = cfg.extensions.action("zend_test")
+    {
+        let (k, v) = setting.split_once('=').unwrap_or((&setting, ""));
+        push(k, v);
+    }
     let ini = parse_ini(&phpt.get_list("INI", false), &dir, &cfg.tmp);
     for (k, v) in &ini {
         push(k, v);
     }
     let mut env = base_env(cfg);
+    if let Some(p) = &cfg.fpm_php
+        && dir.ends_with("sapi/fpm/tests")
+    {
+        env.push(("TEST_PHP_EXECUTABLE".into(), p.clone().into_os_string()));
+        // tester.inc passes -dextension=NAME for the extensions a test
+        // starts FPM with only when this is set; goro's are built in, but
+        // zend_test exists only on request.
+        env.push((
+            "TEST_FPM_EXTENSION_DIR".into(),
+            cfg.tmp.clone().into_os_string(),
+        ));
+    }
     env.extend(extra_env.iter().cloned());
     for line in phpt.get_list("ENV", false) {
         let (k, v) = line.split_once('=').unwrap_or((&line, ""));

@@ -55,6 +55,8 @@ fn usage() -> &'static str {
                    `goro --cgi -h`.
   --phpdbg         Run as the phpdbg debugger (as when invoked as phpdbg);
                    see `goro --phpdbg -h`.
+  --fpm            Run as the FastCGI Process Manager (as when invoked as
+                   php-fpm); see `goro --fpm -h`.
 
 "
 }
@@ -236,6 +238,17 @@ fn main() {
     } else {
         (as_phpdbg && !cgi_mode, args)
     };
+    // The FPM SAPI: `goro --fpm ...`, or goro run as php-fpm.
+    let as_fpm = std::env::args_os().next().is_some_and(|a0| {
+        std::path::Path::new(&a0)
+            .file_name()
+            .is_some_and(|n| n.as_bytes().starts_with(b"php-fpm"))
+    });
+    let (fpm_mode, args) = if args.first().is_some_and(|a| a == "--fpm") {
+        (true, args[1..].to_vec())
+    } else {
+        (as_fpm && !cgi_mode, args)
+    };
     let code = std::thread::Builder::new()
         .name("php".into())
         .stack_size(STACK_SIZE)
@@ -243,6 +256,19 @@ fn main() {
             let pid = std::process::id();
             let code = if phpdbg_mode {
                 phpdbg(args)
+            } else if fpm_mode {
+                goro_engine::fpm::main(
+                    std::env::args_os().collect(),
+                    args,
+                    goro_engine::fpm::Hooks {
+                        version: format!(
+                            "PHP 8.5.4 (fpm-fcgi) (built: {}) (NTS)\nCopyright (c) The PHP Group\nZend Engine v4.5.4, Copyright (c) Zend Technologies\n    with goro-rs {}, a clean-room implementation",
+                            BUILT,
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        cli,
+                    },
+                )
             } else if cgi_mode {
                 cgi(args)
             } else {

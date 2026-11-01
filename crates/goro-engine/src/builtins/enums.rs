@@ -56,6 +56,15 @@ fn lookup(vm: &mut Vm, a: &mut Args, try_: bool) -> R<Value> {
                 ));
             }
         }
+        // strict_types: no int to string coercion (observed on PHP 8.5;
+        // test Zend/tests/enum/internal_enums_strict_types.phpt).
+        (Value::Int(_), false) if vm.caller_strict() => {
+            return vm.type_error(&format!(
+                "{}::{}(): Argument #1 ($value) must be of type string, int given",
+                cls.name.dname(),
+                if try_ { "tryFrom" } else { "from" }
+            ));
+        }
         (Value::Int(i), false) => Value::Str(goro_runtime::convert::int_to_string(*i)),
         (Value::Float(f), true) if f.fract() == 0.0 => Value::Int(*f as i64),
         (other, _) => {

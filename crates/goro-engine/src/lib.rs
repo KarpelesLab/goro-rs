@@ -24,6 +24,7 @@ pub mod cgi;
 pub mod class;
 pub mod cli_server;
 pub mod compiler;
+pub mod fpm;
 pub mod func;
 pub mod phpdbg;
 pub mod registry;
@@ -171,6 +172,14 @@ pub fn startup_with(
 ) -> Vm {
     let mut modules = builtins::modules();
     modules.extend(extra.iter().copied());
+    // The test-only zend_test emulation exists only when a startup setting
+    // asks for it (`-d extension=zend_test`), as the shared module would.
+    if ini
+        .iter()
+        .any(|(k, v)| k == b"extension" && builtins::zend_test::is_requested(v))
+    {
+        modules.push(&builtins::zend_test::MODULE);
+    }
     let mut vm = Vm::new(&modules);
     before(&mut vm);
     for (k, v) in ini {

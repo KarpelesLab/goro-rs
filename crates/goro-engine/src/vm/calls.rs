@@ -2255,7 +2255,7 @@ impl Vm {
             && func.scope().is_none()
             && !matches!(
                 func.lname.as_bytes(),
-                b"call_user_func" | b"forward_static_call"
+                b"call_user_func" | b"forward_static_call" | b"zend_object_init_with_constructor"
             )
         {
             let r = self.throw(
