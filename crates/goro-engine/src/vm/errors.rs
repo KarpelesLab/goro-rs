@@ -774,10 +774,7 @@ impl Vm {
             } else {
                 let caller = &ex.frames[i - 1];
                 let cip = caller.ip().saturating_sub(1);
-                (
-                    Some(caller.code().file.clone()),
-                    caller.code().line_of(cip as usize),
-                )
+                (Some(caller.code().file.clone()), caller.code().line_of(cip))
             };
             if code.flags & crate::bytecode::fflags::PSEUDO_MAIN != 0 {
                 // (6: a front controller's file, without a frame of its own)
