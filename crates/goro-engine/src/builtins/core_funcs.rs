@@ -1776,6 +1776,12 @@ fn error_log(vm: &mut Vm, a: &mut Args) -> R<Value> {
                     .is_ok();
                 return Ok(Value::Bool(ok));
             }
+            if vm.out.sapi.fpm {
+                // FPM's log and the web server's (FCGI_STDERR; tests
+                // sapi/fpm/tests/log-bm-*.phpt).
+                crate::fpm::request::sapi_log(&msg);
+                return Ok(Value::Bool(true));
+            }
             vm.out.flush();
             if vm.out.sapi.server {
                 // The web server's log (observed on PHP 8.5).
@@ -2208,6 +2214,8 @@ fn zero_int(_vm: &mut Vm, _a: &mut Args) -> R<Value> {
 fn php_sapi_name(vm: &mut Vm, _a: &mut Args) -> R<Value> {
     Ok(Value::Str(PhpStr::from(if vm.out.sapi.server {
         "cli-server"
+    } else if vm.out.sapi.fpm {
+        "fpm-fcgi"
     } else if vm.out.sapi.cgi {
         "cgi-fcgi"
     } else {

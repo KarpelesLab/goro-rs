@@ -24,6 +24,7 @@ pub mod cgi;
 pub mod class;
 pub mod cli_server;
 pub mod compiler;
+pub mod fpm;
 pub mod func;
 pub mod registry;
 pub mod request_vars;
