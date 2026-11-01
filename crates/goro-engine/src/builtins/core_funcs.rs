@@ -948,7 +948,11 @@ fn constant(vm: &mut Vm, a: &mut Args) -> R<Value> {
     }
     match vm.lookup_constant(&name)? {
         Some(v) => {
-            vm.const_deprecated(&name)?;
+            // #[\Deprecated] constants warn here too (test Zend/tests/
+            // constants/const_deprecation.phpt).
+            if vm.const_attrs.is_empty() || !vm.user_const_deprecated(&name)? {
+                vm.const_deprecated(&name)?;
+            }
             Ok(v)
         }
         None => vm.throw(
@@ -1875,6 +1879,15 @@ fn ini_set(vm: &mut Vm, a: &mut Args) -> R<Value> {
     // Test Zend/tests/fibers/negative_stack_size.
     if k.as_bytes() == b"fiber.stack_size" && crate::vm::setup::parse_size(&v) < 0 {
         vm.warn("fiber.stack_size must be a positive number")?;
+        return Ok(Value::Bool(false));
+    }
+    // Empty argument separators are refused (test Zend/tests/bug46811,
+    // observed on PHP 8.5 for both).
+    if matches!(
+        k.as_bytes(),
+        b"arg_separator.output" | b"arg_separator.input"
+    ) && v.is_empty()
+    {
         return Ok(Value::Bool(false));
     }
     let mut v = v;

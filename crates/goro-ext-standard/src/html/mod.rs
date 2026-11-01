@@ -279,6 +279,25 @@ fn encode(s: &[u8], flags: i64, cs: Charset, double_encode: bool, all: bool) -> 
     let mut out = Vec::with_capacity(s.len() + s.len() / 8);
     let mut i = 0;
     while i < s.len() {
+        // htmlspecialchars(): a run of printable ASCII without special
+        // characters is copied as is (at a character boundary those bytes
+        // are themselves in every supported charset). htmlentities() has
+        // names for more of ASCII in HTML5 (&num;, &semi;...).
+        let run = if all {
+            0
+        } else {
+            s[i..]
+                .iter()
+                .position(|&b| {
+                    !matches!(b, 0x20..=0x7E) || matches!(b, b'&' | b'"' | b'\'' | b'<' | b'>')
+                })
+                .unwrap_or(s.len() - i)
+        };
+        if run > 0 {
+            out.extend_from_slice(&s[i..i + run]);
+            i += run;
+            continue;
+        }
         let (cp, n) = match cs.decode(s, i) {
             Ok(x) => x,
             Err(consumed) => {

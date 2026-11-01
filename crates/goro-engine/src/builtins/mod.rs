@@ -79,6 +79,7 @@ pub mod xml;
 pub mod xmlreader;
 pub mod xmlstore;
 pub mod xmlwriter;
+pub mod zend_test;
 pub mod zip;
 pub mod zlib;
 

@@ -6,5 +6,6 @@ edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+memchr = "2.7"
 goro-ext-random = { path = "../goro-ext-random" }
 purecrypto = { version = "0.10", default-features = false, features = ["hash"] }

@@ -563,12 +563,9 @@ fn find(h: &[u8], n: &[u8], from: usize, ci: bool) -> Option<usize> {
         (from..=h.len() - n.len())
             .find(|&i| h[i].to_ascii_lowercase() == n0 && h[i..i + n.len()].eq_ignore_ascii_case(n))
     } else if n.len() == 1 {
-        h[from..].iter().position(|&c| c == n[0]).map(|p| p + from)
+        memchr::memchr(n[0], &h[from..]).map(|p| p + from)
     } else {
-        h[from..]
-            .windows(n.len())
-            .position(|w| w == n)
-            .map(|p| p + from)
+        memchr::memmem::find(&h[from..], n).map(|p| p + from)
     }
 }
 
@@ -595,6 +592,17 @@ pub fn replace(subject: &[u8], search: &[u8], replace: &[u8], ci: bool) -> (Vec<
     let mut out = Vec::with_capacity(subject.len());
     let mut count = 0;
     let mut pos = 0;
+    if !ci {
+        // Matches are left to right and don't overlap, as PHP replaces.
+        for p in memchr::memmem::find_iter(subject, search) {
+            out.extend_from_slice(&subject[pos..p]);
+            out.extend_from_slice(replace);
+            pos = p + search.len();
+            count += 1;
+        }
+        out.extend_from_slice(&subject[pos..]);
+        return (out, count);
+    }
     while let Some(p) = find(subject, search, pos, ci) {
         out.extend_from_slice(&subject[pos..p]);
         out.extend_from_slice(replace);
@@ -702,6 +710,10 @@ pub fn substr_count(h: &[u8], n: &[u8], offset: i64, length: Option<i64>) -> Res
         }
     };
     let hay = &h[start as usize..end as usize];
+    // Non-overlapping occurrences (PHP manual: substr_count).
+    if hay.len() >= n.len() {
+        return Ok(memchr::memmem::find_iter(hay, n).count() as i64);
+    }
     let mut count = 0;
     let mut pos = 0;
     while let Some(p) = find(hay, n, pos, false) {
@@ -777,8 +789,9 @@ pub fn explode(sep: &[u8], s: &[u8], limit: i64) -> Result<Vec<Vec<u8>>, StdErro
         l if l > 0 => l as usize,
         _ => usize::MAX,
     };
+    let finder = memchr::memmem::Finder::new(sep);
     while parts.len() + 1 < max {
-        match find(s, sep, pos, false) {
+        match finder.find(&s[pos..]).map(|p| p + pos) {
             Some(p) => {
                 parts.push(s[pos..p].to_vec());
                 pos = p + sep.len();
