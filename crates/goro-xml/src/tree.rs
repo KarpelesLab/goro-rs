@@ -621,6 +621,11 @@ pub struct Arena {
     /// not serialized (observed on PHP 8.5; test ext/dom/tests/
     /// gh16338.phpt).
     null_content: std::collections::HashSet<NodeId>,
+    /// Text written without escaping (XSLT `disable-output-escaping`).
+    no_escape: std::collections::HashSet<NodeId>,
+    /// See [`Arena::begin_defer_free`].
+    defer_free: u32,
+    deferred: Vec<NodeId>,
 }
 
 /// Iterator over a sibling chain.
@@ -664,6 +669,9 @@ impl Arena {
             unheld_docs: Vec::new(),
             generation: 0,
             null_content: Default::default(),
+            no_escape: Default::default(),
+            defer_free: 0,
+            deferred: Vec::new(),
         }
     }
 
@@ -677,11 +685,56 @@ impl Arena {
             if !self.null_content.is_empty() {
                 self.null_content.remove(&id);
             }
+            if !self.no_escape.is_empty() {
+                self.no_escape.remove(&id);
+            }
             return id;
         }
         let i = self.nodes.len() as u32;
         self.nodes.push(Some(n));
         NodeId(NonZeroU32::new(i).unwrap())
+    }
+
+    /// Until the matching [`Arena::end_defer_free`], nothing is freed: an
+    /// evaluation running user code holds node ids the code can unlink.
+    pub fn begin_defer_free(&mut self) {
+        self.defer_free += 1;
+    }
+
+    /// See [`Arena::begin_defer_free`].
+    pub fn end_defer_free(&mut self) {
+        self.defer_free -= 1;
+    }
+
+    /// Frees what was deferred, once no one defers and the evaluation that
+    /// held the ids is over.
+    pub fn flush_deferred_frees(&mut self) {
+        if self.defer_free > 0 {
+            return;
+        }
+        for n in std::mem::take(&mut self.deferred) {
+            if !self.is_live(n) || self.node(n).parent.is_some() {
+                continue;
+            }
+            let held = match &self.node(n).data {
+                NodeData::Document(d) => d.holds > 0,
+                _ => false,
+            };
+            if !held {
+                self.free_subtree(n);
+            }
+        }
+    }
+
+    /// Marks text `id` to be written without escaping (XSLT 1.0 section
+    /// 16.4, `disable-output-escaping`).
+    pub fn mark_no_escape(&mut self, id: NodeId) {
+        self.no_escape.insert(id);
+    }
+
+    /// True if text `id` is written without escaping.
+    pub fn is_no_escape(&self, id: NodeId) -> bool {
+        !self.no_escape.is_empty() && self.no_escape.contains(&id)
     }
 
     /// Marks comment `id` as made without content.
@@ -1273,6 +1326,10 @@ impl Arena {
         }
         if self.node(n).holds > 0 {
             self.detach(n);
+            return;
+        }
+        if self.defer_free > 0 {
+            self.deferred.push(n);
             return;
         }
         let mut stack = vec![n];

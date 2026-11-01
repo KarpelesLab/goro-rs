@@ -1308,6 +1308,7 @@ impl HtmlWriter<'_> {
                 self.out.push_str(&name);
                 self.out.push('>');
             }
+            NodeData::Text(t) if arena.is_no_escape(n) => self.out.push_str(t),
             NodeData::Text(t) => {
                 let t = t.clone();
                 self.text_escape(&t);
