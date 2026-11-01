@@ -912,6 +912,19 @@ fn wsdl_output(vm: &mut Vm, this: &ObjRef, version: i64) -> R<Value> {
     Ok(Value::Null)
 }
 
+/// `$_SERVER['HTTP_SOAPACTION']`, without its quotes.
+fn soap_action_header(vm: &mut Vm) -> Option<String> {
+    let p = vm.global_var_ptr(&PhpStr::from("_SERVER"), false)?;
+    // SAFETY: the pointer is the global's slot.
+    let Value::Array(a) = (unsafe { (*p).deref() }) else {
+        return None;
+    };
+    match a.get_bytes(b"HTTP_SOAPACTION").map(|v| v.deref()) {
+        Some(Value::Str(s)) => Some(s.to_string_lossy().trim_matches('"').to_string()),
+        _ => None,
+    }
+}
+
 fn fault_out(vm: &mut Vm, code: &'static str, msg: &str) -> R<Out> {
     let f = make_fault(vm, code, msg)?;
     Ok(Out::Early(f))
@@ -1003,19 +1016,28 @@ fn process(vm: &mut Vm, this: &ObjRef, request: &[u8]) -> R<Out> {
             let local = doc.local(c).to_string();
             // rpc operations by name, document ones by their first part
             // (its element, or its name for a type part).
-            let f = s
-                .functions
-                .iter()
-                .find(|f| f.rpc && f.name.eq_ignore_ascii_case(&local))
-                .or_else(|| {
-                    s.functions.iter().find(|f| {
-                        !f.rpc
-                            && f.input.parts.first().is_some_and(|p| match &p.element {
-                                Some((_, n)) => n == &local,
-                                None => p.name == local,
-                            })
+            let matches = |f: &Function| {
+                if f.rpc {
+                    f.name.eq_ignore_ascii_case(&local)
+                } else {
+                    f.input.parts.first().is_some_and(|p| match &p.element {
+                        Some((_, n)) => n == &local,
+                        None => p.name == local,
                     })
+                }
+            };
+            // The SOAPAction header chooses among operations that match
+            // (test bugs/bug49169.phpt).
+            let action = soap_action_header(vm);
+            let f = action
+                .as_ref()
+                .and_then(|a| {
+                    s.functions
+                        .iter()
+                        .find(|f| matches(f) && f.soap_action.as_deref() == Some(a.as_str()))
                 })
+                .or_else(|| s.functions.iter().find(|f| f.rpc && matches(f)))
+                .or_else(|| s.functions.iter().find(|f| !f.rpc && matches(f)))
                 .or_else(|| s.find_function(&local))
                 .cloned();
             match f {

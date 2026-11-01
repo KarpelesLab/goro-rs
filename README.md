@@ -280,6 +280,13 @@ the XML extensions each pass 87-100% of their tests that run.
   BMP, WBMP, XBM, XPM, TGA, GD and GD2 codecs written here plus JPEG,
   WebP and AVIF through oxideav. Drawing is pixel-exact against the
   tests' reference images; ext/gd: 303 of 308 tests that run pass.
+- ext/soap (engine module on goro-xml): `SoapClient`, `SoapServer`,
+  `SoapFault`, `SoapHeader`, `SoapParam`, `SoapVar`; WSDL 1.1 and XML Schema
+  parsing, SOAP 1.1/1.2 envelopes byte for byte as PHP writes them, rpc and
+  document styles, encoded and literal use, SOAP-ENC arrays, Apache maps,
+  multi-reference values, classmaps, typemaps, an HTTP(S) transport with
+  Basic and Digest authentication. The `soap.wsdl_cache*` settings are
+  accepted but WSDLs are parsed on every load.
 - `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
   xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
   error codes, messages and positions, DTDs, entities, LIBXML_* options and

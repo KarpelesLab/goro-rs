@@ -151,11 +151,11 @@ const CLASSES: &[(&str, &str)] = &[
     ),
     (
         "soap\\url",
-        r#"<?php namespace Soap; final class Url {}"#,
+        r#"<?php namespace Soap; final class Url { public function __construct() {} }"#,
     ),
     (
         "soap\\sdl",
-        r#"<?php namespace Soap; final class Sdl {}"#,
+        r#"<?php namespace Soap; final class Sdl { public function __construct() {} }"#,
     ),
 ];
 
@@ -195,6 +195,8 @@ static METHODS: &[(&str, NativeFn)] = &[
     ("soapclient::__getcookies", client::get_cookies),
     ("soapclient::__setsoapheaders", client::set_soap_headers),
     ("soapclient::__setlocation", client::set_location),
+    ("soap\\url::__construct", no_construct_url),
+    ("soap\\sdl::__construct", no_construct_sdl),
 ];
 
 const CONSTANTS: &[(&str, ConstVal)] = &[
@@ -550,6 +552,15 @@ pub fn local_time(ts: i64) -> (i64, i64, i64, i64, i64, i64, i64) {
 }
 
 // ------------------------------------------------------------ small classes
+
+// Observed on PHP 8.5: "Cannot directly construct Soap\\Sdl".
+fn no_construct_url(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.throw("Error", "Cannot directly construct Soap\\Url")
+}
+
+fn no_construct_sdl(vm: &mut Vm, _a: &mut Args) -> R<Value> {
+    vm.throw("Error", "Cannot directly construct Soap\\Sdl")
+}
 
 fn soapparam_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let this = a.this_obj().clone();
