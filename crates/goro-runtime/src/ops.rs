@@ -82,6 +82,11 @@ pub fn set_expression_operands(on: bool) {
     COMMUTED.with(|c| c.set(on));
 }
 
+/// Whether the operation being evaluated is `literal op non-literal`.
+pub fn literal_on_left() -> bool {
+    COMMUTED.with(|c| c.get())
+}
+
 fn commuted(op: BinOp) -> bool {
     matches!(
         op,

@@ -275,6 +275,7 @@ pub fn compare_arrays(a: &PhpArray, b: &PhpArray, ctx: &mut dyn Ctx) -> PhpResul
 thread_local! {
     /// Arrays whose elements are being compared.
     static COMPARING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NEST_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Recursion protection of array comparisons: comparing an array that
@@ -283,6 +284,15 @@ thread_local! {
 struct NestGuard(usize);
 
 impl NestGuard {
+    /// Notes the array as being compared, without looking for it first.
+    fn mark(a: &PhpArray) -> NestGuard {
+        let addr = a.data_addr();
+        if addr != 0 {
+            COMPARING.with(|c| c.borrow_mut().push(addr));
+        }
+        NestGuard(addr)
+    }
+
     fn enter(a: &PhpArray) -> PhpResult<NestGuard> {
         let addr = a.data_addr();
         if addr != 0 {
@@ -410,9 +420,39 @@ pub fn strict_eq_arrays(a: &PhpArray, b: &PhpArray) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter()
-        .zip(b.iter())
-        .all(|((ka, va), (kb, vb))| ka == kb && strict_eq(va, vb))
+    // Recursion goes through a reference: one on the left leading to a left
+    // array being compared is an error, which `strict_eq` cannot return (see
+    // take_nest_error). The same array on the right is no recursion (test
+    // tests/lang/operators/operator_identical_recusion-01).
+    let _g = NestGuard::mark(a);
+    a.iter().zip(b.iter()).all(|((ka, va), (kb, vb))| {
+        if refers_to_compared(va) {
+            NEST_ERROR.set(true);
+            return false;
+        }
+        ka == kb && strict_eq(va, vb)
+    })
+}
+
+/// A reference to an array whose elements are being compared.
+fn refers_to_compared(v: &Value) -> bool {
+    let Value::Ref(r) = v else {
+        return false;
+    };
+    match &*r.borrow() {
+        Value::Array(x) => {
+            let addr = x.data_addr();
+            addr != 0 && COMPARING.with(|c| c.borrow().contains(&addr))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an array `===` met a recursive array since the last call: "Nesting
+/// level too deep - recursive dependency?" (test
+/// Zend/tests/recursive_array_comparison).
+pub fn take_nest_error() -> bool {
+    NEST_ERROR.replace(false)
 }
 
 /// `$a < $b`.

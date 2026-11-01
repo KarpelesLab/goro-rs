@@ -1460,8 +1460,21 @@ impl Vm {
             Bin::Ne => compare::loose_eq(x, y, self)
                 .map(|b| Value::Bool(!b))
                 .map_err(|e| self.php_error(e)),
-            Bin::Identical => Ok(Value::Bool(compare::strict_eq(x, y))),
-            Bin::NotIdentical => Ok(Value::Bool(!compare::strict_eq(x, y))),
+            Bin::Identical | Bin::NotIdentical => {
+                compare::take_nest_error();
+                // A literal on the left moves to the right, which decides
+                // the side looked at for recursion (test
+                // Zend/tests/recursive_array_comparison).
+                let same = if ops::literal_on_left() {
+                    compare::strict_eq(y, x)
+                } else {
+                    compare::strict_eq(x, y)
+                };
+                if compare::take_nest_error() {
+                    return self.throw("Error", "Nesting level too deep - recursive dependency?");
+                }
+                Ok(Value::Bool(same == (op == Bin::Identical)))
+            }
             Bin::Lt => compare::less(x, y, self)
                 .map(Value::Bool)
                 .map_err(|e| self.php_error(e)),
