@@ -691,7 +691,7 @@ impl<'a> Compiler<'a> {
             file: self.file.clone(),
             ops: std::mem::take(&mut f.ops),
             lines: std::mem::take(&mut f.lines),
-            consts: std::mem::take(&mut f.consts),
+            consts: Consts::from_values(std::mem::take(&mut f.consts)),
             num_cvs: f.num_cvs,
             num_slots: f.max_slot,
             cv_names,

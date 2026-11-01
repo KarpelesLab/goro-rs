@@ -1071,6 +1071,70 @@ pub struct SwitchTable {
     pub default: u32,
 }
 
+/// A function's constants. They are kept as defined slots so that an operand
+/// reads the same way whether it names a constant or a variable (see
+/// `Vm::peek_slot`), and index as plain values everywhere else.
+#[derive(Debug, Default)]
+pub struct Consts(Vec<Option<Value>>);
+
+impl Consts {
+    pub fn from_values(values: Vec<Value>) -> Consts {
+        Consts(values.into_iter().map(Some).collect())
+    }
+
+    pub fn push(&mut self, v: Value) {
+        self.0.push(Some(v));
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<&Value> {
+        self.0.get(i).and_then(Option::as_ref)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Value> {
+        self.0.iter().flatten()
+    }
+
+    /// The constant as a slot.
+    ///
+    /// # Safety
+    /// `i` is in range (the compiler only emits such operands).
+    #[inline(always)]
+    pub unsafe fn slot_unchecked(&self, i: usize) -> &Option<Value> {
+        // SAFETY: the caller's.
+        unsafe { self.0.get_unchecked(i) }
+    }
+
+    /// The constant.
+    ///
+    /// # Safety
+    /// `i` is in range (the compiler only emits such operands).
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, i: usize) -> &Value {
+        // SAFETY: the caller's; every entry is `Some` (only `from_values`
+        // and `push` add entries).
+        unsafe { self.0.get_unchecked(i).as_ref().unwrap_unchecked() }
+    }
+}
+
+impl std::ops::Index<usize> for Consts {
+    type Output = Value;
+    #[inline]
+    fn index(&self, i: usize) -> &Value {
+        self.0[i].as_ref().expect("constants are always defined")
+    }
+}
+
 /// A compiled function, method, closure, file or const expression.
 #[derive(Debug)]
 pub struct FuncCode {
@@ -1081,7 +1145,7 @@ pub struct FuncCode {
     pub file: PhpStr,
     pub ops: Vec<Op>,
     pub lines: Vec<u32>,
-    pub consts: Vec<Value>,
+    pub consts: Consts,
     /// Number of named variables (slots 0..num_cvs).
     pub num_cvs: u32,
     /// Total slots (variables, hidden variables, temporaries).
