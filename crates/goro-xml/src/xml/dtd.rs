@@ -316,7 +316,10 @@ impl Parser<'_> {
         let text = match e.kind {
             EntityKind::InternalParameter => e.value.clone().unwrap_or_default(),
             _ => {
-                if !self.opts.load_dtd() {
+                // LIBXML_NOENT loads external parameter entities too
+                // (observed on PHP 8.5; tests bug67081.phpt,
+                // DOMDocument_validate_external_dtd.phpt).
+                if !self.opts.load_entities() {
                     return Ok(());
                 }
                 let sys = e.system_id.clone().unwrap_or_default();
@@ -952,11 +955,10 @@ impl Parser<'_> {
                 }
             }
             self.end_decl()?;
-            if !parameter && crate::tree::predefined_entity(&name).is_some() {
-                // Redeclaring a predefined entity: accepted when it maps to
-                // the same character (XML 1.0 4.6).
-                return Ok(());
-            }
+            // Redeclaring a predefined entity is accepted (XML 1.0 4.6); the
+            // declaration is listed but references keep the predefined
+            // character (observed on PHP 8.5; test ext/dom/tests/
+            // bug67081.phpt).
             let d = self.dtd.as_mut().unwrap();
             let map = if parameter {
                 &mut d.pentities

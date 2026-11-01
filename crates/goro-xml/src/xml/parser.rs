@@ -136,6 +136,14 @@ pub struct Parser<'l> {
     /// The declared encoding.
     pub encoding: Option<String>,
     pub(crate) stopped: bool,
+    /// After a recoverable well-formedness error in content (a tag
+    /// mismatch, an unfinished start tag) parsing goes on without building
+    /// anything, to report further errors the way libxml 2.12+ does
+    /// (tests ext/dom/tests/DOMDocument_loadXML_error1_gte2_12.phpt,
+    /// observed on PHP 8.5).
+    pub(crate) reporting: bool,
+    /// `stopped` when the current step began.
+    step_stopped: bool,
     pub(crate) halted: bool,
     pub(crate) errs: Vec<XmlError>,
     /// All errors reported so far.
@@ -219,6 +227,8 @@ impl<'l> Parser<'l> {
             version: None,
             encoding: None,
             stopped: false,
+            reporting: false,
+            step_stopped: false,
             halted: false,
             errs: Vec::new(),
             errors: Vec::new(),
@@ -816,6 +826,14 @@ impl<'l> Parser<'l> {
     /// current construct.
     pub(crate) fn fatal(&mut self, code: u32, msg: impl Into<String>) -> Halt {
         let mut m = msg.into();
+        let soft = code == 76 || (code == 73 && m.starts_with("Couldn't find end of Start Tag"));
+        self.reporting = soft
+            && (self.reporting || !self.step_stopped)
+            && !self.recover()
+            && !self.opts.sax
+            && !self.halted
+            && self.phase == Phase::Content
+            && self.entity_stack.is_empty();
         m.push('\n');
         self.report(Domain::Parser, code, LEVEL_FATAL, m);
         self.stopped = true;
@@ -885,13 +903,15 @@ impl<'l> Parser<'l> {
             }
             let save_pos = self.pos;
             let save_stopped = self.stopped;
+            let save_reporting = self.reporting;
+            self.step_stopped = self.stopped;
             let nerr = self.errs.len();
             self.hit_eof.set(false);
             let r = self.step(sink);
             match r {
                 Ok(()) => {
                     self.flush_errors(sink);
-                    if self.stopped && !self.recover() {
+                    if self.stopped && !self.recover() && !self.reporting {
                         self.phase = Phase::Done;
                     }
                 }
@@ -904,6 +924,7 @@ impl<'l> Parser<'l> {
                     }
                     self.pos = save_pos;
                     self.stopped = save_stopped;
+                    self.reporting = save_reporting;
                     self.errs.truncate(nerr);
                     return Status::NeedMore;
                 }
@@ -911,11 +932,12 @@ impl<'l> Parser<'l> {
                     if self.incomplete() && !self.halted {
                         self.pos = save_pos;
                         self.stopped = save_stopped;
+                        self.reporting = save_reporting;
                         self.errs.truncate(nerr);
                         return Status::NeedMore;
                     }
                     self.flush_errors(sink);
-                    if self.recover()
+                    if (self.recover() || self.reporting)
                         && !self.halted
                         && self.phase == Phase::Content
                         && self.pos < self.buf.len()
@@ -955,6 +977,12 @@ impl<'l> Parser<'l> {
                 Ok(())
             }
             Phase::Prolog | Phase::Epilog => {
+                if self.reporting {
+                    // Nothing more is reported once the root element is
+                    // closed (observed on PHP 8.5).
+                    self.phase = Phase::Done;
+                    return Ok(());
+                }
                 self.skip_spaces();
                 if self.eof() {
                     if !self.final_ {
@@ -1026,6 +1054,10 @@ impl<'l> Parser<'l> {
         if self.eof() {
             if !self.final_ {
                 return Err(Halt::Incomplete);
+            }
+            if self.reporting && !self.enc_error {
+                self.phase = Phase::Done;
+                return Ok(());
             }
             if self.fragment && self.stack.is_empty() && self.entity_stack.is_empty() {
                 self.flush_text(sink, false);
@@ -1782,7 +1814,7 @@ impl<'l> Parser<'l> {
         if self.incomplete() {
             return Err(Halt::Incomplete);
         }
-        if failed || self.stopped {
+        if failed || (self.stopped && !self.reporting) {
             return Err(Halt::Fatal);
         }
         let end_pos = self.pos - if empty { 2 } else { 1 };
@@ -2209,6 +2241,15 @@ impl<'l> Parser<'l> {
                 76,
                 format!("Opening and ending tag mismatch: {n} line {l} and {name}"),
             );
+            if self.reporting {
+                // The open element is closed (observed on PHP 8.5).
+                let o = self.stack.pop().unwrap();
+                self.ns.truncate(o.ns_mark);
+                if self.stack.is_empty() && !self.fragment {
+                    self.phase = Phase::Epilog;
+                }
+                return Ok(());
+            }
             if self.recover() {
                 // Pop to the matching element if open, else ignore.
                 if self.stack.iter().any(|o| *o.raw == *name) {
