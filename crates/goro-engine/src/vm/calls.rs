@@ -16,8 +16,9 @@ use crate::func::{Args, Func, FuncKind, NativeSig};
 /// Frame flag: the return value goes to a variable (assign semantics).
 pub const RET_VAR: u32 = 2048;
 
-/// `InitFCall` cache key of a user function (1: a native one).
+/// `InitFCall` cache keys: a user or a native function.
 const CACHED_USER: usize = 2;
+const CACHED_NATIVE: usize = 1;
 
 /// A resolved callee.
 #[derive(Clone)]
@@ -299,8 +300,8 @@ impl Vm {
                     0
                 } else {
                     match info.get() {
-                        Some(sig) => byref_mask(&sig.params),
-                        None => byref_mask(&self.native_sig(&c.func).params),
+                        Some(sig) => sig.byref,
+                        None => self.native_sig(&c.func).byref,
                     }
                 };
                 (
@@ -360,6 +361,47 @@ impl Vm {
     ) {
         let statics = &func.statics as *const RefCell<Vec<Option<PhpRef>>>;
         self.push_user_ex(func, this, static_class, scope, flags, None, statics);
+    }
+
+    /// [`push_callee`](Self::push_callee) of a plain native function.
+    #[inline(always)]
+    fn push_native(&mut self, func: Rc<Func>) {
+        let FuncKind::Native { info, .. } = &func.kind else {
+            // SAFETY: the callers pass native functions only.
+            unsafe { std::hint::unreachable_unchecked() }
+        };
+        let byref = match info.get() {
+            Some(sig) => sig.byref,
+            None => self.native_sig(&func).byref,
+        };
+        let scope = func.scope.get();
+        let args = self.take_args_vec();
+        let v = &mut self.ex.pending;
+        v.reserve(1);
+        // SAFETY: as in push_callee. A native call has no slots or statics.
+        unsafe {
+            use std::ptr::addr_of_mut as at;
+            let d = v.as_mut_ptr().add(v.len());
+            at!((*d).func).write(func);
+            at!((*d).base).write(std::ptr::null_mut());
+            at!((*d).mark).write(StackMark::default());
+            at!((*d).args).write(args);
+            at!((*d).argc).write(0);
+            at!((*d).extra).write(Vec::new());
+            at!((*d).named_extra).write(None);
+            at!((*d).this).write(None);
+            at!((*d).static_class).write(scope);
+            at!((*d).scope).write(scope);
+            at!((*d).closure).write(None);
+            at!((*d).flags).write(0);
+            at!((*d).magic_name).write(None);
+            at!((*d).statics).write(std::ptr::null());
+            at!((*d).has_named).write(false);
+            at!((*d).passed).write(0);
+            at!((*d).byref).write(byref);
+            at!((*d).direct).write(0);
+            v.set_len(v.len() + 1);
+        }
     }
 
     /// Pushes a call of closure object `o` when it runs user code (one
@@ -488,8 +530,14 @@ impl Vm {
         }
         let consts = &self.constants;
         let kc = |n: &[u8]| consts.get(&PhpStr::new(n)).cloned();
-        let parsed = crate::compiler::parse_native_sig(sig, Some(&kc))
+        let mut parsed = crate::compiler::parse_native_sig(sig, Some(&kc))
             .unwrap_or_else(|e| panic!("bad native signature: {}", e));
+        // Functions prepare_native_args looks at by name.
+        parsed.quick = f.scope().is_some()
+            || !matches!(
+                f.name.as_bytes(),
+                b"get_parent_class" | b"get_class_methods" | b"ini_set" | b"strtr"
+            );
         let rc = Rc::new(parsed);
         let _ = info.set(rc.clone());
         rc
@@ -552,13 +600,17 @@ impl Vm {
             self.push_user(func, None, scope, scope, 0);
             return Ok(());
         }
-        let func: Rc<Func> = if c.key != 0 {
-            let p = c.a as *const Func;
-            unsafe {
+        if c.key == CACHED_NATIVE {
+            // SAFETY: as above, a native function's.
+            let func = unsafe {
+                let p = c.a as *const Func;
                 Rc::increment_strong_count(p);
                 Rc::from_raw(p)
-            }
-        } else {
+            };
+            self.push_native(func);
+            return Ok(());
+        }
+        let func: Rc<Func> = {
             let lname = code.consts[name as usize + 1].clone();
             let found = match lname.as_str().and_then(|s| self.functions.get(s)) {
                 Some(f) => Some(f.clone()),
@@ -579,7 +631,11 @@ impl Vm {
                 Some(f) => {
                     // Functions are never removed: cache the pointer.
                     code.caches[cache as usize].set(Cache {
-                        key: if f.is_native() { 1 } else { CACHED_USER },
+                        key: if f.is_native() {
+                            CACHED_NATIVE
+                        } else {
+                            CACHED_USER
+                        },
                         a: Rc::as_ptr(&f) as usize,
                         b: 0,
                         ..Cache::default()
@@ -2165,9 +2221,9 @@ impl Vm {
     fn do_native_call(&mut self, dst: Reg, ret: *mut Slot) -> R<()> {
         let is_new = self.ex.pending.last().unwrap().flags & pending_flags::NEW != 0;
         let parts = self.take_native_pending();
-        let v = self.call_native_parts(parts, false)?;
+        let v = self.call_native_inline(parts, false)?;
         if !is_new && !ret.is_null() {
-            self.put(dst, v);
+            self.put_hot(dst, v);
         }
         Ok(())
     }
@@ -2275,6 +2331,11 @@ impl Vm {
     }
 
     fn call_native_parts(&mut self, parts: NativeParts, dynamic: bool) -> R<Value> {
+        self.call_native_inline(parts, dynamic)
+    }
+
+    #[inline(always)]
+    fn call_native_inline(&mut self, parts: NativeParts, dynamic: bool) -> R<Value> {
         let NativeParts {
             func,
             mut args,
@@ -2288,10 +2349,11 @@ impl Vm {
             unreachable!()
         };
         let handler = *handler;
-        let sig = match info.get() {
-            Some(s) => s.clone(),
-            None => self.native_sig(&func),
-        };
+        if info.get().is_none() {
+            self.native_sig(&func);
+        }
+        // (`func`, kept to the end, owns the signature.)
+        let sig: &NativeSig = info.get().unwrap();
         // The call is on the stack while its arguments are checked: their
         // errors show it in traces (observed on PHP 8.5; tests
         // Zend/tests/exceptions/exception_018 and others).
@@ -2307,43 +2369,13 @@ impl Vm {
             line: self.cur_line(),
             hidden,
         });
-        if let Err(e) = self.prepare_native_args(&func, &sig, &mut args, passed, has_named) {
+        if (has_named || dynamic || named.is_some() || !quick_native_args(sig, &args))
+            && let Err(e) =
+                self.check_native_call(&func, sig, &mut args, passed, has_named, dynamic, &named)
+        {
             self.ex.native_calls.pop();
             self.give_args_vec(args);
             return Err(e);
-        }
-        if dynamic && is_scope_introspecting(&func.lname) {
-            self.ex.native_calls.pop();
-            self.give_args_vec(args);
-            return self.throw(
-                "Error",
-                &format!("Cannot call {}() dynamically", func.name.dname()),
-            );
-        }
-        // Internal variadic functions take no extra named arguments, except
-        // the callers of callbacks (test Zend/tests/named_params/
-        // internal_variadics.phpt).
-        if named.as_ref().is_some_and(|n| !n.is_empty())
-            && func.scope().is_none()
-            && !matches!(
-                func.lname.as_bytes(),
-                b"call_user_func" | b"forward_static_call" | b"zend_object_init_with_constructor"
-            )
-        {
-            let r = self.throw(
-                "ArgumentCountError",
-                &format!(
-                    "{}() does not accept unknown named parameters",
-                    func.display_name()
-                ),
-            );
-            self.ex.native_calls.pop();
-            self.give_args_vec(args);
-            return r;
-        }
-        // (the arguments may have moved while being checked)
-        if let Some(nc) = self.ex.native_calls.last_mut() {
-            nc.args = &args as *const Vec<Value>;
         }
         let mut a = Args {
             this,
@@ -2369,6 +2401,47 @@ impl Vm {
         self.ex.native_calls.pop();
         self.give_args_vec(args);
         r
+    }
+
+    /// The general checks of a native call, on its way in.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn check_native_call(
+        &mut self,
+        func: &Rc<Func>,
+        sig: &NativeSig,
+        args: &mut [Value],
+        passed: u64,
+        has_named: bool,
+        dynamic: bool,
+        named: &Option<PhpArray>,
+    ) -> R<()> {
+        self.prepare_native_args(func, sig, args, passed, has_named)?;
+        if dynamic && is_scope_introspecting(&func.lname) {
+            return self.throw(
+                "Error",
+                &format!("Cannot call {}() dynamically", func.name.dname()),
+            );
+        }
+        // Internal variadic functions take no extra named arguments, except
+        // the callers of callbacks (test Zend/tests/named_params/
+        // internal_variadics.phpt).
+        if named.as_ref().is_some_and(|n| !n.is_empty())
+            && func.scope().is_none()
+            && !matches!(
+                func.lname.as_bytes(),
+                b"call_user_func" | b"forward_static_call" | b"zend_object_init_with_constructor"
+            )
+        {
+            return self.throw(
+                "ArgumentCountError",
+                &format!(
+                    "{}() does not accept unknown named parameters",
+                    func.display_name()
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// Argument count and type checks for a native call (PHP's parameter
@@ -4466,6 +4539,42 @@ fn names_class_of(vm: &Vm, ty: &TypeHint, o: &ObjRef) -> bool {
         }
     }
     false
+}
+
+/// Whether positional arguments of a native function need no look beyond
+/// their number and types: `prepare_native_args` would leave them as they
+/// are, raising nothing.
+#[inline]
+fn quick_native_args(sig: &NativeSig, args: &[Value]) -> bool {
+    let (n, np) = (args.len(), sig.params.len());
+    if !sig.quick || n < sig.num_required as usize || (n > np && !sig.variadic) {
+        return false;
+    }
+    for (i, a) in args.iter().enumerate() {
+        let p = &sig.params[i.min(np - 1)];
+        let Some(ty) = &p.ty else { continue };
+        let m = ty.mask;
+        if p.by_ref || m & tmask::CALLABLE != 0 {
+            return false;
+        }
+        let ok = match a {
+            Value::Ref(_) => false,
+            _ if m & tmask::MIXED != 0 => true,
+            Value::Int(_) => m & tmask::INT != 0,
+            Value::Float(_) => m & tmask::FLOAT != 0,
+            Value::Str(_) => m & tmask::STRING != 0,
+            Value::Array(_) => m & tmask::ARRAY != 0,
+            Value::Bool(true) => m & tmask::TRUE != 0,
+            Value::Bool(false) => m & tmask::FALSE != 0,
+            Value::Null => m & tmask::NULL != 0,
+            Value::Object(_) => m & tmask::OBJECT != 0,
+            Value::Resource(_) => false,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 /// Drops the frame at `f` as its drop glue would (owning fields in
