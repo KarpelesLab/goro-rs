@@ -377,6 +377,11 @@ pub fn to_xml(
         Some(Enc::Type(t)) => type_to_xml(vm, cx, t, &v, el, literal),
     };
     cx.depth -= 1;
+    if cx.depth == 0
+        && let Some(e) = PENDING.with(|p| p.borrow_mut().take())
+    {
+        return Err(crate::vm::Unwind::Throw(e));
+    }
     // A literal message names the substituted type (observed on PHP 8.5;
     // test bugs/gh18640.phpt).
     if r.is_ok()
@@ -386,6 +391,19 @@ pub fn to_xml(
         cx.set_type(el, &ns, &n);
     }
     r
+}
+
+thread_local! {
+    static PENDING: std::cell::RefCell<Option<ObjRef>> = const { std::cell::RefCell::new(None) };
+}
+
+fn pend_error(vm: &mut Vm, msg: &str) -> R<()> {
+    let e = vm.create_exception("ValueError", msg, 0)?;
+    if let Some(prev) = PENDING.with(|p| p.borrow_mut().take()) {
+        vm.set_prop_raw(&e, b"previous", Value::Object(prev));
+    }
+    PENDING.with(|p| *p.borrow_mut() = Some(e));
+    Ok(())
 }
 
 /// Whether an array contains itself (through references).
@@ -664,12 +682,16 @@ pub fn builtin_text(vm: &mut Vm, cx: &Cx, b: Bi, v: &Value) -> R<Option<String>>
         && instance_of(vm, o, "UnitEnum")
         && !matches!(b.conv, Conv::AnyType | Conv::Struct | Conv::Map | Conv::Array | Conv::AnyXml)
     {
+        // Errors are kept while the rest is written; the last one is
+        // thrown (observed on PHP 8.5; test gh15711.phpt).
         if !instance_of(vm, o, "BackedEnum") {
-            return vm.throw("ValueError", "Non-backed enums have no default serialization");
+            pend_error(vm, "Non-backed enums have no default serialization")?;
+            return Ok(Some(String::new()));
         }
         let val = vm.get_prop_raw(o, b"value");
         if matches!(b.conv, Conv::Long | Conv::BigInt) && matches!(val, Value::Str(_)) {
-            return vm.throw("ValueError", "String-backed enum cannot be serialized as int");
+            pend_error(vm, "String-backed enum cannot be serialized as int")?;
+            return Ok(Some(String::new()));
         }
         v = val;
     }
@@ -949,6 +971,12 @@ fn array_to_xml(
                 Some((ns, n)) if uniform => (cx.doc.qname(Some(el), ns, n), true),
                 _ => (String::new(), false),
             };
+            // An array of structs also declares the SOAP 1.1 encoding
+            // namespace (as the expected output of test bugs/bug41566.phpt
+            // shows).
+            if ok && matches!(&q, Some((ns, n)) if ns == NS_SOAP12_ENC && n == "Struct") {
+                cx.doc.ensure_ns(Some(el), NS_SOAP11_ENC);
+            }
             let a = cx.doc.qname(Some(el), NS_SOAP12_ENC, "itemType");
             let tv = if ok {
                 tv
@@ -1479,36 +1507,6 @@ fn complex_body(
     own_attrs_to_xml(vm, cx, sdl, t, v, el)
 }
 
-/// The element content of a complex type (the base type's first for
-/// extensions).
-fn content_to_xml(
-    vm: &mut Vm,
-    cx: &mut Cx,
-    sdl: &Rc<Sdl>,
-    t: TId,
-    v: &Value,
-    el: El,
-    literal: bool,
-) -> R<()> {
-    let ty = &sdl.types[t];
-    if ty.deriv == Deriv::ComplexExtension
-        && let Some(Enc::Type(b)) = ty.base.as_ref().and_then(|b| sdl.resolve(b))
-        && b != t
-        && sdl.types[b].kind == Kind::Complex
-    {
-        content_to_xml(vm, cx, sdl, b, v, el, literal)?;
-    }
-    if let Some(m) = ty.model.clone() {
-        model_to_xml(vm, cx, sdl, &m, v, el, literal, true)?;
-    } else if ty.deriv == Deriv::None && ty.attrs.is_empty() && !matches!(v, Value::Null) {
-        // A complex type without content model: the value's fields.
-        if ty.mixed || sdl.types[t].attrs.is_empty() {
-            // nothing declared: nothing written.
-        }
-    }
-    Ok(())
-}
-
 /// The attributes type `t` declares.
 fn own_attrs_to_xml(
     vm: &mut Vm,
@@ -1676,6 +1674,11 @@ fn model_inner(
     }
 }
 
+/// Whether an element declaration is `ref="xsd:schema"`.
+pub fn is_schema_ref(decl: &SType) -> bool {
+    matches!(&decl.r#ref, Some((ns, n)) if ns == NS_XSD && n == "schema")
+}
+
 /// Markup inserted as is: the well-known prefixes it uses get declared
 /// on the envelope (observed on PHP 8.5, which parses it in the
 /// document's context; test bugs/bug30106.phpt).
@@ -1742,6 +1745,16 @@ fn element_to_xml(
     let min = m.min;
     let max = if cx.rep > 0 { -1 } else { m.max };
     let mut val = get_field(vm, v, &name)?;
+    // A reference to xsd:schema holds markup (`<anyXML>` in __getTypes();
+    // observed on PHP 8.5; test bugs/bug30106.phpt).
+    if is_schema_ref(decl) {
+        if let Some(Value::Str(s)) = &val {
+            let raw = s.to_string_lossy();
+            declare_raw_prefixes(cx, el, &raw);
+            cx.doc.add_raw(el, &raw);
+        }
+        return Ok(true);
+    }
     // A list for a struct whose element repeats: the list is that
     // element's values (observed on PHP 8.5; tests
     // interop/Round3/GroupD/r3_groupD_doclit_002w.phpt).
@@ -1776,6 +1789,11 @@ fn element_to_xml(
             }
             if !strict {
                 return Ok(false);
+            }
+            // A scalar for a struct: nothing to take fields from (observed
+            // on PHP 8.5; test bugs/bug73237.phpt).
+            if !matches!(v, Value::Object(_) | Value::Array(_)) {
+                return Ok(true);
             }
             if let Some(d) = ed.fixed.clone().or(ed.default.clone()) {
                 let c = cx.doc.add_child(el, &name);

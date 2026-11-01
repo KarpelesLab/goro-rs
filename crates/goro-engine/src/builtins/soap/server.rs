@@ -698,7 +698,8 @@ pub fn get_last_response(_vm: &mut Vm, a: &mut Args) -> R<Value> {
 pub fn fault(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let this = a.this_obj().clone();
     let code = a.str(0).to_string_lossy();
-    let string = a.str(1).to_string_lossy();
+    let raw_string = a.str(1);
+    let string = raw_string.to_string_lossy();
     let actor = a.opt_str(2).map(|s| s.to_string_lossy()).filter(|s| !s.is_empty());
     let details = a.val(3);
     let name = a.opt_str(4).map(|s| s.to_string_lossy()).filter(|s| !s.is_empty());
@@ -716,6 +717,7 @@ pub fn fault(vm: &mut Vm, a: &mut Args) -> R<Value> {
         Value::Null,
         &lang,
     );
+    super::set_fault_string(vm, &f, raw_string);
     let (version, sdl, st, headers) = with(&this, |d| {
         (d.version, d.sdl.clone(), d.state.clone(), d.out_headers.clone())
     })
@@ -826,10 +828,9 @@ pub fn handle(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         Err(e) => return Err(e),
     };
-    let ver = match &out {
-        Out::Doc(_) => version,
-        _ => version,
-    };
+    // The request's SOAP version.
+    let _ = version;
+    let ver = with(&this, |d| d.version).unwrap_or(1);
     match out {
         Out::Doc(xml) => {
             store_last(&this, xml.as_bytes());

@@ -160,11 +160,6 @@ fn fetch(vm: &mut Vm, a: &Args, u: &str) -> Result<Vec<u8>, String> {
         return std::fs::read(&path)
             .map_err(|_| format!("failed to load \"{u}\": No such file or directory\n"));
     }
-    if let Some(url) = super::http::parse_url(u)
-        && super::http::refuse_remote(&url.host)
-    {
-        return Err(format!("failed to load external entity \"{u}\""));
-    }
     match super::super::file::open_stream(vm, a, u.as_bytes(), b"rb", true) {
         Ok(Some(mut s)) => Ok(super::super::file::read_rest(vm, &mut s)),
         _ => Err(format!("failed to load \"{u}\": No such file or directory\n")),
@@ -1037,6 +1032,7 @@ fn parse_fault(
     let d = dx.d;
     let mut code = None;
     let mut string = String::new();
+    let mut raw_string: Option<PhpStr> = None;
     let mut actor = None;
     let mut detail = Value::Null;
     let mut lang = String::new();
@@ -1054,7 +1050,8 @@ fn parse_fault(
                     let enc = super::types::by_code(super::types::XSD_STRING)
                         .map(super::sdl::Enc::Builtin);
                     let v = from_xml(vm, dx, enc, c)?;
-                    string = vm.to_php_str(&v)?.to_string_lossy();
+                    raw_string = Some(vm.to_php_str(&v)?);
+                    string = raw_string.as_ref().map(|s| s.to_string_lossy()).unwrap_or_default();
                 }
                 "faultactor" => actor = Some(d.text(c)),
                 "detail" => detail = fault_detail(vm, dx, c, func)?,
@@ -1072,6 +1069,10 @@ fn parse_fault(
                 "Reason" => {
                     for t in d.kids(c) {
                         if d.local(t) == "Text" {
+                            let enc = super::types::by_code(super::types::XSD_STRING)
+                                .map(super::sdl::Enc::Builtin);
+                            let v = from_xml(vm, dx, enc, t)?;
+                            raw_string = Some(vm.to_php_str(&v)?);
                             string = d.text(t);
                             if let Some(l) = d.attr_ns(t, super::xmlout::NS_XML, "lang") {
                                 lang = l;
@@ -1107,6 +1108,9 @@ fn parse_fault(
         Value::Null,
         "",
     );
+    if let Some(r) = raw_string {
+        super::set_fault_string(vm, &o, r);
+    }
     Ok(Value::Object(o))
 }
 
@@ -1160,7 +1164,7 @@ pub fn do_request(vm: &mut Vm, a: &mut Args) -> R<Value> {
     let action = a.str(2).to_string_lossy();
     let version = a.int_or(3, 1);
     let one_way = a.bool_or(4, false);
-    match super::http::send(vm, &this, request.as_bytes(), &location, &action, version, one_way)? {
+    match super::http::send(vm, a, &this, request.as_bytes(), &location, &action, version, one_way)? {
         Ok(resp) => Ok(Value::Str(PhpStr::from(resp))),
         Err((code, msg)) => {
             let f = make_fault(vm, code, &msg)?;

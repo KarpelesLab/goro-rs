@@ -474,6 +474,12 @@ pub fn init_fault(
     vm.set_prop_raw(o, b"lang", Value::Str(PhpStr::from(l)));
 }
 
+/// Sets a fault's string from bytes (any charset).
+pub fn set_fault_string(vm: &mut Vm, o: &ObjRef, s: PhpStr) {
+    vm.set_prop_raw(o, b"message", Value::Str(s.clone()));
+    vm.set_prop_raw(o, b"faultstring", Value::Str(s));
+}
+
 pub fn is_fault_obj(vm: &mut Vm, v: &Value) -> bool {
     match v {
         Value::Object(o) => encode::instance_of(vm, o, "SoapFault"),
@@ -617,7 +623,8 @@ fn soapfault_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         }
         _ => None,
     };
-    let string = a.str(1).to_string_lossy();
+    let raw = a.str(1);
+    let string = raw.to_string_lossy();
     let actor = a.opt_str(2).map(|s| s.to_string_lossy());
     let name = a.opt_str(4).map(|s| s.to_string_lossy());
     let lang = a.str(6).to_string_lossy();
@@ -632,6 +639,7 @@ fn soapfault_construct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         a.val(5),
         &lang,
     );
+    set_fault_string(vm, &this, raw);
     Ok(Value::Null)
 }
 

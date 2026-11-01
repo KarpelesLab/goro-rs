@@ -5,20 +5,16 @@
 //! responses, chunked bodies, redirects (observed on PHP 8.5; tests with
 //! a local server in ext/soap/tests).
 
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use goro_runtime::{Key, ObjRef, PhpArray, PhpStr, Value};
 
+use super::super::sockets::{Sock, connect_client};
+use super::super::streams::NativeStream;
 use super::encode::base64;
 use super::str_prop;
+use crate::func::Args;
 use crate::vm::{R, Vm};
-
-/// Set while developing: refuse hosts other than loopback ones and report
-/// the attempt on stderr (so tests that would reach the Internet are
-/// found and listed as online tests).
-const DEV_REFUSE_REMOTE: bool = true;
 
 pub struct Url {
     pub scheme: String,
@@ -83,34 +79,13 @@ pub fn parse_url(s: &str) -> Option<Url> {
     })
 }
 
-/// While developing: refuses (and logs) hosts other than loopback ones.
-pub fn refuse_remote(host: &str) -> bool {
-    if !DEV_REFUSE_REMOTE || is_loopback(host) {
-        return false;
-    }
-    let script = std::env::args().collect::<Vec<_>>().join(" ");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/claude-1000/goro-work/soap/remote.log")
-    {
-        let _ = writeln!(f, "{} {}", host, script);
-    }
-    true
-}
-
-fn is_loopback(host: &str) -> bool {
-    host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-}
-
 type Fault = (&'static str, String);
 
 /// Sends a request: the response body, or a fault (code, message).
+#[allow(clippy::too_many_arguments)]
 pub fn send(
     vm: &mut Vm,
+    a: &Args,
     client: &ObjRef,
     request: &[u8],
     location: &str,
@@ -125,12 +100,20 @@ pub fn send(
         let Some(url) = parse_url(&location) else {
             return Ok(Err(("HTTP", "Unable to parse URL".into())));
         };
-        if url.scheme == "https" {
-            return Ok(Err(("HTTP", "SSL support is not available in this build".into())));
-        }
-        if refuse_remote(&url.host) {
-            return Ok(Err(("HTTP", "Could not connect to host".into())));
-        }
+        // Through a proxy: the request line has the absolute URL (RFC 9112
+        // section 3.2.2), https is tunnelled with CONNECT.
+        let proxy = str_prop(vm, client, "_proxy_host").map(|h| {
+            let port = match vm.get_prop_raw(client, b"_proxy_port") {
+                Value::Int(n) if n > 0 => n as u16,
+                _ => 80,
+            };
+            (h, port)
+        });
+        let https = url.scheme == "https";
+        let (chost, cport) = match &proxy {
+            Some((h, p)) => (h.clone(), *p),
+            None => (url.host.clone(), url.port),
+        };
         let head = request_head(
             vm,
             client,
@@ -152,27 +135,50 @@ pub fn send(
             Value::Int(n) if n > 0 => Duration::from_secs(n as u64),
             _ => Duration::from_secs(60),
         };
-        let addrs: Vec<_> = match (url.host.as_str(), url.port).to_socket_addrs() {
-            Ok(a) => a.collect(),
-            Err(_) => return Ok(Err(("HTTP", "Could not connect to host".into()))),
+        let addr = if chost.contains(':') {
+            format!("tcp://[{chost}]:{cport}")
+        } else {
+            format!("tcp://{chost}:{cport}")
         };
-        let mut stream = None;
-        for a in addrs {
-            if let Ok(s) = TcpStream::connect_timeout(&a, timeout) {
-                stream = Some(s);
-                break;
-            }
-        }
-        let Some(mut s) = stream else {
+        vm.out.flush();
+        let Ok(mut s) = connect_client(addr.as_bytes(), Some(timeout)) else {
             return Ok(Err(("HTTP", "Could not connect to host".into())));
         };
-        let _ = s.set_read_timeout(Some(Duration::from_secs(60)));
+        s.ctx = Some(vm.get_prop_raw(client, b"_stream_context"));
+        s.host = url.host.clone().into_bytes();
+        let read_secs = vm
+            .get_ini(b"default_socket_timeout")
+            .and_then(|v| v.to_string_lossy().trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(60);
+        s.timeout = Some(Duration::from_secs(read_secs));
+        if https {
+            if proxy.is_some() {
+                let c = format!(
+                    "CONNECT {h}:{p} HTTP/1.1\r\nHost: {h}:{p}\r\n{auth}\r\n",
+                    h = url.host,
+                    p = url.port,
+                    auth = proxy_auth(vm, client)
+                );
+                if write_all(vm, &mut s, c.as_bytes()).is_err() {
+                    return Ok(Err(("HTTP", "Could not connect to host".into())));
+                }
+                match read_head(vm, &mut s) {
+                    Some(r) if (200..300).contains(&r.status) => {}
+                    _ => return Ok(Err(("HTTP", "Could not connect to host".into()))),
+                }
+            }
+            let r = super::super::openssl::tls::enable(vm, a, &mut s, None, false)?;
+            if r != super::super::openssl::tls::Enabled::Yes {
+                return Ok(Err(("HTTP", "Could not connect to host".into())));
+            }
+        }
         let mut msg = head.into_bytes();
         msg.extend_from_slice(request);
-        if s.write_all(&msg).is_err() {
+        if write_all(vm, &mut s, &msg).is_err() {
             return Ok(Err(("HTTP", "Failed Sending HTTP SOAP request".into())));
         }
-        let resp = match read_response(&mut s) {
+        let resp = match read_response(vm, &mut s) {
             Some(r) => r,
             None => {
                 return Ok(Err(("HTTP", "Error Fetching http headers".into())));
@@ -363,6 +369,30 @@ fn digest_header(user: &str, pass: &str, uri: &str, ch: &[(String, String)]) -> 
     h
 }
 
+fn proxy_auth(vm: &mut Vm, client: &ObjRef) -> String {
+    match str_prop(vm, client, "_proxy_login") {
+        Some(l) => {
+            let p = str_prop(vm, client, "_proxy_password").unwrap_or_default();
+            format!(
+                "Proxy-Authorization: Basic {}\r\n",
+                base64(format!("{l}:{p}").as_bytes())
+            )
+        }
+        None => String::new(),
+    }
+}
+
+fn write_all(vm: &mut Vm, s: &mut Sock, mut data: &[u8]) -> std::io::Result<()> {
+    while !data.is_empty() {
+        let n = s.write(vm, data)?;
+        if n == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+        }
+        data = &data[n..];
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn request_head(
     vm: &mut Vm,
@@ -373,7 +403,15 @@ fn request_head(
     version: i64,
     challenge: Option<&[(String, String)]>,
 ) -> String {
-    let mut h = format!("POST {} HTTP/1.1\r\n", url.path);
+    let through_proxy = str_prop(vm, client, "_proxy_host").is_some() && url.scheme != "https";
+    let mut h = if through_proxy {
+        format!(
+            "POST {}://{}:{}{} HTTP/1.1\r\n",
+            url.scheme, url.host, url.port, url.path
+        )
+    } else {
+        format!("POST {} HTTP/1.1\r\n", url.path)
+    };
     let default_port = if url.scheme == "https" { 443 } else { 80 };
     if url.port == default_port {
         h.push_str(&format!("Host: {}\r\n", url.host));
@@ -478,6 +516,9 @@ fn request_head(
             ));
         }
     }
+    if through_proxy {
+        h.push_str(&proxy_auth(vm, client));
+    }
     if let Value::Array(c) = vm.get_prop_raw(client, b"_cookies")
         && !c.is_empty()
     {
@@ -514,21 +555,22 @@ struct Resp {
     body: Vec<u8>,
 }
 
-fn read_response(s: &mut TcpStream) -> Option<Resp> {
+/// Reads up to the end of the head; the bytes after it are in `body`.
+fn read_head(vm: &mut Vm, s: &mut Sock) -> Option<Resp> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     let head_end = loop {
         if let Some(i) = find(&buf, b"\r\n\r\n") {
             break i;
         }
-        let n = s.read(&mut tmp).ok()?;
+        let n = s.read(vm, &mut tmp).ok()?;
         if n == 0 {
             return None;
         }
         buf.extend_from_slice(&tmp[..n]);
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
-    let mut rest = buf[head_end + 4..].to_vec();
+    let rest = buf[head_end + 4..].to_vec();
     let mut lines = head.split("\r\n");
     let status_line = lines.next()?;
     let mut sp = status_line.splitn(3, ' ');
@@ -541,6 +583,24 @@ fn read_response(s: &mut TcpStream) -> Option<Resp> {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
+    Some(Resp {
+        status,
+        reason,
+        head,
+        headers,
+        body: rest,
+    })
+}
+
+fn read_response(vm: &mut Vm, s: &mut Sock) -> Option<Resp> {
+    let mut tmp = [0u8; 8192];
+    let Resp {
+        status,
+        reason,
+        head,
+        headers,
+        body: mut rest,
+    } = read_head(vm, s)?;
     let chunked = header(&headers, "transfer-encoding")
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
     let body = if chunked {
@@ -548,7 +608,7 @@ fn read_response(s: &mut TcpStream) -> Option<Resp> {
             if let Some(b) = dechunk(&rest) {
                 break b;
             }
-            let n = s.read(&mut tmp).ok()?;
+            let n = s.read(vm, &mut tmp).ok()?;
             if n == 0 {
                 break dechunk_partial(&rest);
             }
@@ -556,7 +616,7 @@ fn read_response(s: &mut TcpStream) -> Option<Resp> {
         }
     } else if let Some(len) = header(&headers, "content-length").and_then(|v| v.parse::<usize>().ok()) {
         while rest.len() < len {
-            let n = s.read(&mut tmp).ok()?;
+            let n = s.read(vm, &mut tmp).ok()?;
             if n == 0 {
                 break;
             }
@@ -566,7 +626,7 @@ fn read_response(s: &mut TcpStream) -> Option<Resp> {
         rest
     } else {
         loop {
-            match s.read(&mut tmp) {
+            match s.read(vm, &mut tmp) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => rest.extend_from_slice(&tmp[..n]),
             }

@@ -148,6 +148,11 @@ pub fn from_xml(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Valu
 fn decode_node(vm: &mut Vm, dx: &mut Dx, enc: Option<Enc>, n: NodeId) -> R<Value> {
     let d = dx.d;
     let mut enc = enc;
+    // No declared type works like anyType (observed on PHP 8.5; test
+    // bugs/bug73237.phpt).
+    if enc.is_none() {
+        return any_type(vm, dx, n);
+    }
     if let Some(Enc::Builtin(b)) = enc
         && b.conv == Conv::AnyType
     {
@@ -906,7 +911,13 @@ fn model(
             let ed_id = sdl.deref_element(e);
             let ed = &sdl.types[ed_id];
             let name = ed.name.clone();
-            let enc = ed.base.as_ref().and_then(|b| sdl.resolve(b));
+            // No type at all: anyType (test
+            // interop/Round4/GroupI/r4_groupI_xsd_028w.phpt).
+            let enc = match &ed.base {
+                Some(b) => sdl.resolve(b),
+                None if ed.r#ref.is_none() => Some(Enc::Builtin(types::get(types::XSD_ANYTYPE))),
+                None => None,
+            };
             let d = dx.d;
             let nodes: Vec<NodeId> = d
                 .kids(n)
@@ -920,11 +931,19 @@ fn model(
                 }
                 return Ok(());
             }
+            // ref="xsd:schema": the markup (test bugs/bug30106.phpt).
+            if super::encode::is_schema_ref(&sdl.types[e]) {
+                let c = nodes[0];
+                used.push(c);
+                set_prop(vm, obj, &name, Value::Str(PhpStr::from(d.to_xml(c))));
+                return Ok(());
+            }
             let multi = m.max != 1 || sdl.types[e].max != 1 || dx.rep > 0;
             let single_nil = nodes.len() == 1 && is_nil(d, nodes[0]);
-            if multi
-                && (nodes.len() > 1
-                    || (dx.features & SOAP_SINGLE_ELEMENT_ARRAYS != 0 && !single_nil))
+            // Repeated elements are arrays whatever maxOccurs says
+            // (observed on PHP 8.5; test bugs/bug73237.phpt).
+            if nodes.len() > 1
+                || (multi && dx.features & SOAP_SINGLE_ELEMENT_ARRAYS != 0 && !single_nil)
             {
                 let mut arr = PhpArray::new();
                 for c in nodes {
@@ -1005,7 +1024,10 @@ fn any_rest(
             if !pending.is_empty() {
                 let _ = arr.push(Value::Str(PhpStr::from(std::mem::take(&mut pending))));
             }
-            let v = from_xml(vm, dx, None, c)?;
+            // Typed by its xsi:type, not wrapped (test any.phpt).
+            let enc = xsi_type(d, c)
+                .and_then(|(ns, nm)| super::encode::enc_for(dx.sdl.as_deref(), &ns, &nm));
+            let v = from_xml(vm, dx, enc, c)?;
             arr.insert(Key::from(d.local(c)), v);
             typed_any = true;
         } else {
