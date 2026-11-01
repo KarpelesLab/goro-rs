@@ -399,7 +399,6 @@ struct Compiler<'c> {
     aliases: HashMap<String, (Option<String>, String)>,
     /// Prefixes of the whole document, for `Dom\` stylesheets.
     extra_ns: Option<Vec<(String, String)>>,
-    rules: Vec<(u32, Vec<Pattern>, f64, u32)>,
     version_10: bool,
 }
 
@@ -417,7 +416,6 @@ pub fn compile(arena: &mut Arena, doc: NodeId, host: &mut dyn Host) -> Option<St
         next_pos: 0,
         aliases: HashMap::new(),
         extra_ns: None,
-        rules: Vec::new(),
         version_10: true,
     };
     c.ss.mode_ids.insert(None, 0);
@@ -476,12 +474,12 @@ impl Compiler<'_> {
     // ----- modules ----------------------------------------------------------
 
     fn run(&mut self, doc: NodeId) {
-        let Some(root) = self.arena.document_element(doc) else {
+        if self.arena.document_element(doc).is_none() {
             self.host
                 .report(self.arena, "xsltParseStylesheetProcess : empty stylesheet");
             self.errors += 1;
             return;
-        };
+        }
         if self.arena.is_modern(doc) {
             // Prefixes used anywhere count as declared on the stylesheet
             // element (test auto_registration_namespaces_new_dom.phpt).
@@ -500,7 +498,6 @@ impl Compiler<'_> {
             }
             self.extra_ns = Some(all);
         }
-        let _ = root;
         self.module_tree(doc);
     }
 
@@ -673,13 +670,12 @@ impl Compiler<'_> {
                 scope.ext = Rc::new(v);
             }
         }
-        match self.arena.get_attr_node_ns(el, Some(XML_NS), "space") {
-            Some(a) => match self.arena.attr_value(a).as_str() {
+        if let Some(a) = self.arena.get_attr_node_ns(el, Some(XML_NS), "space") {
+            match self.arena.attr_value(a).as_str() {
                 "preserve" => scope.preserve = true,
                 "default" => scope.preserve = false,
                 _ => {}
-            },
-            None => {}
+            }
         }
         scope
     }
@@ -1223,7 +1219,6 @@ impl Compiler<'_> {
     }
 
     fn finish_rules(&mut self) {
-        let _ = &self.rules;
         // Best first: precedence, priority, then the last in the stylesheet
         // (section 5.5).
         fn order(v: &mut [Entry]) {

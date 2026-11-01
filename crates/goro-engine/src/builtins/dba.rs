@@ -508,10 +508,10 @@ impl Ini {
                         out.push(Vec::new());
                     }
                 }
-                IniLine::Entry(n, v) if cur == group && n == name => {
-                    if !name.is_empty() || !group.is_empty() {
-                        out.push(v.clone());
-                    }
+                IniLine::Entry(n, v)
+                    if cur == group && n == name && (!name.is_empty() || !group.is_empty()) =>
+                {
+                    out.push(v.clone());
                 }
                 _ => {}
             }

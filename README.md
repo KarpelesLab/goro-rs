@@ -290,6 +290,12 @@ the XML extensions each pass 87-100% of their tests that run.
   multi-reference values, classmaps, typemaps, an HTTP(S) transport with
   Basic and Digest authentication. The `soap.wsdl_cache*` settings are
   accepted but WSDLs are parsed on every load.
+- ext/xsl: `XSLTProcessor` on an XSLT 1.0 engine in `goro-xml`, with
+  `php:function()`, security preferences and EXSLT common, dates (the
+  functions that read a date), functions, math, sets and strings.
+  `setProfiling()` writes only the profile's header.
+- ext/dba: the `cdb`, `cdb_make`, `flatfile` and `inifile` handlers. Handlers
+  that need libraries (db4, gdbm, qdbm, lmdb, tcadb) are not built.
 - `goro-xml`: the XML core for ext/dom, simplexml, ext/xml, xmlreader and
   xmlwriter (not yet wired): XML 1.0 + namespaces parser with PHP's libxml
   error codes, messages and positions, DTDs, entities, LIBXML_* options and

@@ -58,6 +58,9 @@ enum Sink {
     Capture(String),
 }
 
+/// The nodes of one `xsl:key` in one document, by key value.
+type KeyTable = Rc<HashMap<String, Vec<NodeId>>>;
+
 pub(super) struct Tx<'a> {
     pub(super) ss: &'a Stylesheet,
     pub(super) host: &'a mut dyn Host,
@@ -79,7 +82,7 @@ pub(super) struct Tx<'a> {
     rtfs: Vec<NodeId>,
     late_free: u32,
     docs: HashMap<String, NodeId>,
-    keys: HashMap<(Str, NodeId), Rc<HashMap<String, Vec<NodeId>>>>,
+    keys: HashMap<(Str, NodeId), KeyTable>,
     building_keys: HashSet<(Str, NodeId)>,
     cdata_names: HashSet<&'a str>,
     func_result: Option<Value>,
@@ -334,7 +337,7 @@ impl<'a> Tx<'a> {
     fn run(&mut self, ar: &mut Arena, c: CallContext) -> F<()> {
         self.frames.push(0);
         for i in 0..self.ss.globals.len() {
-            self.global_value(ar, i, c)?;
+            self.global_value(ar, i)?;
         }
         self.apply_one(ar, 0, c, &[], None)
     }
@@ -356,7 +359,7 @@ impl<'a> Tx<'a> {
         }
     }
 
-    fn global_value(&mut self, ar: &mut Arena, i: usize, c: CallContext) -> F<Value> {
+    fn global_value(&mut self, ar: &mut Arena, i: usize) -> F<Value> {
         match &self.globals[i] {
             GlobalState::Done(v) => return Ok(v.clone()),
             GlobalState::Computing => {
@@ -387,7 +390,6 @@ impl<'a> Tx<'a> {
             pos: 1,
             size: 1,
         };
-        let _ = c;
         let r = self.var_value(ar, &g.value, root);
         self.frame_base = save_base;
         let (v, rtf) = r?;
@@ -1230,6 +1232,7 @@ impl<'a> Tx<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exec_apply(
         &mut self,
         ar: &mut Arena,
@@ -2330,13 +2333,8 @@ impl<'a> FunctionHandler for Tx<'a> {
             .iter()
             .position(|g| &*g.name.local == local && &*g.name.ns == ns)
         {
-            let c = CallContext {
-                node: self.source_root,
-                pos: 1,
-                size: 1,
-            };
             return self
-                .global_value(arena, i, c)
+                .global_value(arena, i)
                 .map_err(|_| XPathError::callback("", None));
         }
         Err(XPathError::with_name(XPathErrorKind::UndefVariable, local))

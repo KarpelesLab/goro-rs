@@ -202,7 +202,10 @@ fn zone_ok(s: &[u8]) -> bool {
     r.is_empty() && h <= 14 && m < 60
 }
 
-fn parse_time(s: &[u8]) -> Option<((i64, i64, f64), &[u8])> {
+/// Hour, minute, second.
+type Hms = (i64, i64, f64);
+
+fn parse_time(s: &[u8]) -> Option<(Hms, &[u8])> {
     let (h, r) = digits(s, 2)?;
     if r.first() != Some(&b':') {
         return None;

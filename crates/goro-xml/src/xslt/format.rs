@@ -88,8 +88,7 @@ pub fn format_number(n: f64, pattern: &str, df: &DecimalFormat) -> String {
         None => (pattern, None),
     };
     let p = parse_sub(pos, df);
-    let negative = n < 0.0 || (n == 0.0 && n.is_sign_negative() && false);
-    let (prefix, suffix) = if negative {
+    let (prefix, suffix) = if n < 0.0 {
         match neg {
             Some(x) => {
                 let q = parse_sub(x, df);
@@ -129,7 +128,7 @@ pub fn format_number(n: f64, pattern: &str, df: &DecimalFormat) -> String {
     for (i, c) in int.chars().enumerate() {
         out.push(digit(c));
         let left = len - i - 1;
-        if p.group > 0 && left > 0 && left % p.group == 0 {
+        if p.group > 0 && left > 0 && left.is_multiple_of(p.group) {
             out.push(df.grouping_separator);
         }
     }
@@ -193,7 +192,7 @@ fn decimal(n: u64, width: usize, group: Option<(&str, usize)>) -> String {
     for (i, c) in digits.chars().enumerate() {
         out.push(c);
         let left = len - i - 1;
-        if left > 0 && left % size == 0 {
+        if left > 0 && left.is_multiple_of(size) {
             out.push_str(sep);
         }
     }
@@ -227,8 +226,8 @@ pub fn format_numbers(nums: &[f64], format: &str, group: Option<(&str, usize)>) 
     if tokens.first().is_some_and(|t| !t.0) {
         prefix = tokens.remove(0).1;
     }
-    if tokens.last().is_some_and(|t| !t.0) {
-        suffix = tokens.pop().unwrap().1;
+    if let Some((_, s)) = tokens.pop_if(|t| !t.0) {
+        suffix = s;
     }
     let mut out = prefix;
     let mut idx = 0;

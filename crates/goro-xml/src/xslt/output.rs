@@ -21,10 +21,10 @@ pub fn effective_method(arena: &Arena, doc: NodeId, spec: &OutputSpec) -> OutMet
                     OutMethod::Xml
                 };
             }
-            NodeData::Text(t) | NodeData::CData(t) => {
-                if !t.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r')) {
-                    return OutMethod::Xml;
-                }
+            NodeData::Text(t) | NodeData::CData(t)
+                if !t.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r')) =>
+            {
+                return OutMethod::Xml;
             }
             _ => {}
         }
