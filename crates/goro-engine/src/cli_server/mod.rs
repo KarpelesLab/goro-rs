@@ -257,6 +257,8 @@ struct Pending {
     stream: std::net::TcpStream,
     peer: std::net::SocketAddr,
     buf: Vec<u8>,
+    /// The request's whole length, once its headers told.
+    want: usize,
 }
 
 /// Longest request path served (longer requests are dropped; test
@@ -309,7 +311,8 @@ fn run_loop(listener: &std::net::TcpListener, vm: &mut Vm, cfg: &Config) -> ! {
                     }
                 }
             }
-            match http1::parse(&conns[i].buf) {
+            let conn = &mut conns[i];
+            match http1::parse_taking(&mut conn.buf, &mut conn.want) {
                 http1::Parse::Done(req) => {
                     let c = conns.remove(i);
                     let path_len = req
@@ -352,6 +355,7 @@ fn run_loop(listener: &std::net::TcpListener, vm: &mut Vm, cfg: &Config) -> ! {
                             stream,
                             peer,
                             buf: Vec::new(),
+                            want: 0,
                         });
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}

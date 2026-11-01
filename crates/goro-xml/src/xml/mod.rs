@@ -186,6 +186,10 @@ pub trait Sink {
     fn end_element(&mut self, name: &QName);
     /// Character data.
     fn text(&mut self, text: &str);
+    /// Whether character data is read at all.
+    fn wants_text(&self) -> bool {
+        true
+    }
     /// Character data the sink may keep.
     fn text_owned(&mut self, text: String) {
         self.text(&text)

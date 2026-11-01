@@ -177,6 +177,8 @@ fn html_escape(s: &[u8]) -> Vec<u8> {
 pub struct Ctx<'a> {
     pub cfg: &'a Config,
     pub req: &'a Request,
+    /// The request's body, until the response takes it for php://input.
+    pub body: &'a std::cell::RefCell<Vec<u8>>,
     pub peer: std::net::SocketAddr,
     /// The path part of the target, percent-decoded.
     pub path: Vec<u8>,
@@ -353,12 +355,13 @@ fn server_vars(c: &Ctx, script_name: &[u8], filename: &[u8], path_info: &[u8]) -
 
 /// Sets the superglobals of the request.
 fn set_globals(vm: &mut Vm, c: &Ctx, server: PhpArray) {
+    let body = c.body.borrow();
     let data = crate::request_vars::RequestData {
         method: &c.req.method,
         query: c.query.as_deref(),
         content_type: c.req.header(b"content-type"),
         content_length: None,
-        body: &c.req.body,
+        body: &body,
         cookie: c.req.header(b"cookie"),
     };
     crate::request_vars::set_globals(vm, &data, server);
@@ -407,7 +410,8 @@ fn start_response(vm: &mut Vm, c: &Ctx, stream: std::net::TcpStream) {
     if expose {
         s.headers.push(b"X-Powered-By: PHP/8.5.4".to_vec());
     }
-    s.input = c.req.body.clone();
+    // Moved, not copied: it may be gigabytes (test sapi/cli/tests/upload_2G).
+    s.input = c.body.take();
     s.request_headers = c.req.headers.clone();
     s.conn = Some(Conn {
         transport: Box::new(super::http1::H1Transport(stream)),
@@ -452,10 +456,11 @@ fn finish(vm: &mut Vm) {
 pub fn handle(
     vm: &mut Vm,
     cfg: &Config,
-    req: Request,
+    mut req: Request,
     stream: std::net::TcpStream,
     peer: std::net::SocketAddr,
 ) {
+    let body = std::cell::RefCell::new(std::mem::take(&mut req.body));
     let mut target = &req.target[..];
     // An absolute-form target (RFC 9112 3.2.2): the path follows the
     // authority (observed on PHP 8.5: SCRIPT_NAME is the path).
@@ -475,6 +480,7 @@ pub fn handle(
     let c = Ctx {
         cfg,
         req: &req,
+        body: &body,
         peer,
         path,
         query,

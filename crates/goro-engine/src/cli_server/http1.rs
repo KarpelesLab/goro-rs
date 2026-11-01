@@ -58,6 +58,39 @@ fn line_end(buf: &[u8], i: usize) -> Option<(usize, usize)> {
 
 /// Parses a request from the bytes received so far.
 pub fn parse(buf: &[u8]) -> Parse {
+    parse_inner(buf, None)
+}
+
+/// [`parse`] of a connection's buffer. A body of known length is not copied:
+/// the buffer becomes the request's body. `want` remembers the whole length
+/// once known, so that a large upload is neither parsed again at each read
+/// nor grown by doubling (test sapi/cli/tests/upload_2G).
+pub fn parse_taking(buf: &mut Vec<u8>, want: &mut usize) -> Parse {
+    if buf.len() < *want {
+        return Parse::Incomplete;
+    }
+    let mut sized = (0, None);
+    match parse_inner(buf, Some(&mut sized)) {
+        Parse::Done(mut req) => {
+            if let Some(len) = sized.1 {
+                buf.truncate(sized.0 + len);
+                buf.drain(..sized.0);
+                req.body = std::mem::take(buf);
+            }
+            Parse::Done(req)
+        }
+        Parse::Incomplete => {
+            if let Some(len) = sized.1 {
+                *want = sized.0 + len;
+                buf.reserve_exact(*want - buf.len());
+            }
+            Parse::Incomplete
+        }
+        other => other,
+    }
+}
+
+fn parse_inner(buf: &[u8], mut sized_body: Option<&mut (usize, Option<usize>)>) -> Parse {
     // Leading empty lines are ignored (RFC 9112 2.2).
     let mut i = 0;
     while i < buf.len() && (buf[i] == b'\r' || buf[i] == b'\n') {
@@ -125,6 +158,9 @@ pub fn parse(buf: &[u8]) -> Parse {
             .map(|(_, v)| v.clone())
     };
     let rest = &buf[body_start..];
+    if let Some(sized) = sized_body.as_deref_mut() {
+        sized.0 = body_start;
+    }
     let body = if find(b"transfer-encoding")
         .is_some_and(|v| v.to_ascii_lowercase().ends_with(b"chunked"))
     {
@@ -149,10 +185,17 @@ pub fn parse(buf: &[u8]) -> Parse {
             }
             None => 0,
         };
+        if let Some(sized) = sized_body.as_deref_mut() {
+            sized.1 = Some(len);
+        }
         if rest.len() < len {
             return Parse::Incomplete;
         }
-        rest[..len].to_vec()
+        if sized_body.is_some() {
+            Vec::new()
+        } else {
+            rest[..len].to_vec()
+        }
     };
     Parse::Done(Request {
         method: method.to_vec(),

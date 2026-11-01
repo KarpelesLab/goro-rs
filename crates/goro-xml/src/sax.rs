@@ -477,6 +477,10 @@ impl Sink for Adaptor<'_> {
         self.ns_stack.pop();
     }
 
+    fn wants_text(&self) -> bool {
+        self.handlers.cdata || self.handlers.default
+    }
+
     fn text(&mut self, text: &str) {
         let b = self.out(text);
         if self.handlers.cdata {

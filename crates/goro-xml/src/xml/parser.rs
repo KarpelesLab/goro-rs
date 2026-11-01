@@ -536,11 +536,22 @@ impl<'l> Parser<'l> {
             self.cr_positions
                 .extend(d.cr.iter().map(|p| (((p >> 1) + base) << 1) | (p & 1)));
         }
-        self.buf.extend_from_slice(&d.text);
+        self.append_decoded(&d.text);
         if d.error_at.is_some() {
             self.enc_error = true;
         }
         self.raw = raw[cut..].to_vec();
+    }
+
+    /// Appends to the decoded input. A large buffer grows by an eighth, not
+    /// by doubling: input fed in chunks stays as a whole, and doubling two
+    /// gigabytes would ask for four (test ext/xml/tests/bug81481).
+    fn append_decoded(&mut self, text: &[u8]) {
+        const LARGE: usize = 64 << 20;
+        if self.buf.len() >= LARGE && self.buf.capacity() - self.buf.len() < text.len() {
+            self.buf.reserve_exact(text.len() + self.buf.len() / 8);
+        }
+        self.buf.extend_from_slice(text);
     }
 
     fn decode_more(&mut self, is_final: bool) {
@@ -610,7 +621,7 @@ impl<'l> Parser<'l> {
             self.cr_positions
                 .extend(d.cr.iter().map(|p| (((p >> 1) + base) << 1) | (p & 1)));
         }
-        self.buf.extend_from_slice(&d.text);
+        self.append_decoded(&d.text);
         if d.error_at.is_some() {
             self.enc_error = true;
         }
@@ -1216,6 +1227,14 @@ impl<'l> Parser<'l> {
                     return;
                 }
             }
+            // The next piece of the same run, from the next chunk of input.
+            if let Some((a, b)) = self.text_span
+                && b == start
+                && self.entity_stack.is_empty()
+            {
+                self.text_span = Some((a, end));
+                return;
+            }
             self.text_materialize();
             let s = unsafe { std::str::from_utf8_unchecked(&self.buf[start..end]) };
             self.text.push_str(s);
@@ -1240,6 +1259,23 @@ impl<'l> Parser<'l> {
         }
         if self.opts.sax {
             self.emit_position(sink, self.pos);
+        }
+        // Nobody reads it: no copy of what may be gigabytes (test
+        // ext/xml/tests/bug81481).
+        if !sink.wants_text() {
+            let blank = match self.text_span {
+                Some((a, b)) => self.buf[a..b].iter().copied().all(is_space),
+                None => self.text.bytes().all(is_space),
+            };
+            let ignorable = blank && self.is_ignorable_blank(before_end_tag);
+            self.text_span = None;
+            self.text.clear();
+            if let Some(o) = self.stack.last_mut()
+                && !ignorable
+            {
+                o.had_text = true;
+            }
+            return;
         }
         let text = match self.text_span.take() {
             Some((a, b)) => String::from(unsafe { std::str::from_utf8_unchecked(&self.buf[a..b]) }),
