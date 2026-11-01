@@ -774,7 +774,7 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// A directory stream with no URI: an archive's in-memory listing.
+/// A directory stream of a native wrapper: an archive's in-memory listing.
 pub(crate) fn is_listing_without_uri(r: &ResRef) -> bool {
     let data = r.res().data.borrow();
     data.as_ref()
@@ -782,7 +782,7 @@ pub(crate) fn is_listing_without_uri(r: &ResRef) -> bool {
         .and_then(|c| {
             c.try_borrow()
                 .ok()
-                .map(|s| s.stream_type == "dir" && s.uri.is_empty())
+                .map(|s| s.stream_type == "dir" && s.wrapper.is_empty())
         })
         .unwrap_or(false)
 }
