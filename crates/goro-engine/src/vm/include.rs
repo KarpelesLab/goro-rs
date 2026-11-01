@@ -295,7 +295,7 @@ impl Vm {
         let frame = Frame {
             code: Rc::as_ptr(&main),
             func,
-            ip: 0,
+            pc: main.ops.as_ptr(),
             base,
             this: None,
             static_class: std::ptr::null(),
@@ -652,7 +652,7 @@ impl Vm {
         let frame = Frame {
             code: Rc::as_ptr(&main),
             func,
-            ip: 0,
+            pc: main.ops.as_ptr(),
             base,
             this,
             static_class,

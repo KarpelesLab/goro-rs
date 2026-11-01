@@ -111,7 +111,7 @@ macro_rules! enter_simple_frame {
             }
         }
         if let Some(top) = $vm.ex.frames.last_mut() {
-            top.ip = $vm.ex.ip as u32;
+            top.pc = $vm.ex.top.pc;
         }
         let native_base = $vm.ex.native_calls.len() as u32;
         let frames = &mut $vm.ex.frames;
@@ -121,7 +121,7 @@ macro_rules! enter_simple_frame {
             let d = frames.as_mut_ptr().add(frames.len());
             at!((*d).code).write(code as *const FuncCode);
             at!((*d).func).write($func);
-            at!((*d).ip).write(0);
+            at!((*d).pc).write(code.ops.as_ptr());
             at!((*d).base).write(base);
             at!((*d).this).write($this);
             at!((*d).static_class).write($sc);
@@ -142,7 +142,6 @@ macro_rules! enter_simple_frame {
             frames.set_len(frames.len() + 1);
         }
         $vm.ex.top = super::TopFrame::of(base, code);
-        $vm.ex.ip = 0;
     }};
 }
 
@@ -2865,7 +2864,7 @@ impl Vm {
         let frame = Frame {
             code: code as *const FuncCode,
             func: func.clone(),
-            ip: 0,
+            pc: code.ops.as_ptr(),
             base: p.base,
             this: p.this.take(),
             static_class,
@@ -2921,7 +2920,7 @@ impl Vm {
             let f = self.ex.frames.pop().unwrap();
             self.ex.sync_top();
             if let Some(top) = self.ex.frames.last() {
-                self.ex.ip = top.ip as usize;
+                self.ex.top.pc = top.pc;
             }
             let g = self.create_generator(f)?;
             if !ret.is_null() {
@@ -3311,11 +3310,10 @@ impl Vm {
 
     pub(crate) fn push_frame(&mut self, f: Frame) {
         if let Some(top) = self.ex.frames.last_mut() {
-            top.ip = self.ex.ip as u32;
+            top.pc = self.ex.top.pc;
         }
         self.ex.frames.push(f);
         self.ex.sync_top();
-        self.ex.ip = 0;
     }
 
     /// Removes the top frame, releasing its variables.
@@ -3323,7 +3321,7 @@ impl Vm {
         let f = self.ex.frames.pop().expect("pop without frame");
         self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
-            self.ex.ip = top.ip as usize;
+            self.ex.top.pc = top.pc;
         }
         // Pending calls opened in the frame.
         while self.ex.pending.len() > f.pending_base as usize {
@@ -3389,7 +3387,7 @@ impl Vm {
         match self.ex.frames.last() {
             Some(top) => {
                 self.ex.top = super::TopFrame::of(top.base, top.code);
-                self.ex.ip = top.ip as usize;
+                self.ex.top.pc = top.pc;
             }
             None => self.ex.top = super::TopFrame::default(),
         }
@@ -3471,7 +3469,7 @@ impl Vm {
             drop_frame_in_place(fp);
             let top = &*self.ex.frames.as_ptr().add(len - 2);
             self.ex.top = super::TopFrame::of(top.base, top.code);
-            self.ex.ip = top.ip as usize;
+            self.ex.top.pc = top.pc;
         }
         true
     }
@@ -3489,7 +3487,7 @@ impl Vm {
         let f = self.ex.frames.pop().unwrap();
         self.ex.sync_top();
         if let Some(top) = self.ex.frames.last() {
-            self.ex.ip = top.ip as usize;
+            self.ex.top.pc = top.pc;
         }
         self.release_frame(f);
         self.deliver_return(v, flags, ret)
@@ -4223,7 +4221,7 @@ impl Vm {
 
     pub(crate) fn static_init(&mut self, index: u32, v: Value) -> R<()> {
         // The variable is the one bound by the preceding BindStatic.
-        let ip = self.ex.ip;
+        let ip = self.ex.ip();
         let code = self.code_ref();
         let mut var = NONE;
         for k in (0..ip).rev() {
@@ -4335,7 +4333,7 @@ impl Vm {
         if code.discarded_calls.is_empty() {
             return false;
         }
-        let ip = self.ex.ip.saturating_sub(1) as u32;
+        let ip = self.ex.ip().saturating_sub(1) as u32;
         code.discarded_calls.binary_search(&ip).is_ok()
     }
 

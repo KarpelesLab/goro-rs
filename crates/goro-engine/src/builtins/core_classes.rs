@@ -805,7 +805,7 @@ fn gen_destruct(vm: &mut Vm, a: &mut Args) -> R<Value> {
         .with_gen(&g, |d| {
             d.state == crate::vm::iter::GenState::Suspended
                 && d.frame.as_ref().is_some_and(|f| {
-                    let ip = f.ip.saturating_sub(1);
+                    let ip = f.ip().saturating_sub(1) as u32;
                     f.code()
                         .try_ranges
                         .iter()

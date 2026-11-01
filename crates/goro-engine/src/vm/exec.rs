@@ -534,10 +534,10 @@ impl Vm {
             self.run_pending_destructors()?;
         }
         loop {
-            let ip = self.ex.ip;
-            // SAFETY: the running frame's code; ip stays within it.
-            let op = unsafe { &*self.ex.top.ops.add(ip) };
-            self.ex.ip = ip + 1;
+            let pc = self.ex.top.pc;
+            // SAFETY: the running frame's code; pc stays within it.
+            let op = unsafe { &*pc };
+            self.ex.top.pc = unsafe { pc.add(1) };
             match *op {
                 Op::Nop | Op::Ticks => {}
                 Op::Assign { dst, src } => {
@@ -732,7 +732,7 @@ impl Vm {
                     self.op_incdec_var(op, var, res)?
                 }
                 Op::Jmp { t } => {
-                    self.ex.ip = t as usize;
+                    self.ex.set_ip(t as usize);
                     if goro_runtime::mem::pending() {
                         return Err(self.memory_exhausted());
                     }
@@ -744,7 +744,7 @@ impl Vm {
                         // keep its stale value.
                         let b = *b;
                         if !b {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     }
@@ -752,7 +752,7 @@ impl Vm {
                     let b = self.to_bool(&v);
                     drop(v);
                     if !b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNZ { c, t } => {
@@ -764,7 +764,7 @@ impl Vm {
                         // keep its stale value.
                         let b = *b;
                         if b {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     }
@@ -772,7 +772,7 @@ impl Vm {
                     let b = self.to_bool(&v);
                     drop(v);
                     if b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpLt { a, b, t } => {
@@ -781,13 +781,13 @@ impl Vm {
                     }
                     let r = if let (Some(x), Some(y)) = (self.peek_int(a), self.peek_int(b)) {
                         if x < y {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     } else if let Some(r) = fast_cmp(Bin::Lt, self.peek_slot(a), self.peek_slot(b))
                     {
                         if r {
-                            self.ex.ip = t as usize;
+                            self.ex.set_ip(t as usize);
                         }
                         continue;
                     } else {
@@ -799,7 +799,7 @@ impl Vm {
                         r
                     };
                     if r {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpZEx { c, res, t } => {
@@ -807,7 +807,7 @@ impl Vm {
                     let b = self.to_bool(&v);
                     self.put(res, Value::Bool(b));
                     if !b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNZEx { c, res, t } => {
@@ -815,14 +815,14 @@ impl Vm {
                     let b = self.to_bool(&v);
                     self.put(res, Value::Bool(b));
                     if b {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpSet { c, res, t } => {
                     let v = self.get_quiet(c);
                     if !v.is_null() {
                         self.put(res, v);
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNull { c, res, t } => {
@@ -838,7 +838,7 @@ impl Vm {
                         if res != NONE {
                             self.put(res, Value::Null);
                         }
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::Switch { .. } => {
@@ -885,7 +885,7 @@ impl Vm {
                 Op::RecvDefault { param, t } => {
                     let p = self.slot_ptr(param);
                     if unsafe { (*p).is_some() } {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::RecvCheck { param } => self.recv_check(param)?,
@@ -1064,13 +1064,13 @@ impl Vm {
                 }
                 Op::JmpArgByRef { arg, t } => {
                     if self.pending_arg_by_ref(arg) {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::JmpNamedArgByRef { name, t } => {
                     let n = self.peek(name).cloned().unwrap_or_default();
                     if self.pending_named_by_ref(&n) {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::DoCall { dst } => {
@@ -1120,7 +1120,7 @@ impl Vm {
                 }
                 Op::BindStatic { var, index, t } => {
                     if self.bind_static(var, index)? {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::StaticInit { index, src } => {
@@ -1205,17 +1205,17 @@ impl Vm {
                     return Err(Unwind::Throw(ex));
                 }
                 Op::FastCall { t, ret } => {
-                    let back = self.ex.ip as i64;
+                    let back = self.ex.ip() as i64;
                     let p = self.slot_ptr(ret);
                     let old = unsafe { (*p).replace(Value::Int(back)) };
                     drop(old);
-                    self.ex.ip = t as usize;
+                    self.ex.set_ip(t as usize);
                 }
                 Op::FastRet { ret, try_index } => {
                     let p = self.slot_ptr(ret);
                     let v = unsafe { (*p).take() };
                     match v {
-                        Some(Value::Int(back)) => self.ex.ip = back as usize,
+                        Some(Value::Int(back)) => self.ex.set_ip(back as usize),
                         _ => {
                             // An exception is pending: rethrow it.
                             let tr = self.code_ref().try_ranges[try_index as usize];
@@ -1238,12 +1238,12 @@ impl Vm {
                     t,
                 } => {
                     if !self.fe_reset(iter, src, by_ref)? {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::FeFetch { iter, val, key, t } => {
                     if !self.fe_fetch(iter, val, key)? {
-                        self.ex.ip = t as usize;
+                        self.ex.set_ip(t as usize);
                     }
                 }
                 Op::FeFree { iter } => self.fe_free(iter)?,

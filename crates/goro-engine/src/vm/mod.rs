@@ -109,8 +109,9 @@ pub struct StackMark {
 pub struct Frame {
     pub func: Rc<Func>,
     pub code: *const FuncCode,
-    /// Saved instruction pointer (the running frame's is [`Vm::ip`]).
-    pub ip: u32,
+    /// Saved position: the next instruction to run (the running frame's
+    /// is in [`TopFrame::pc`]). Points into the code, which `func` owns.
+    pub pc: *const Op,
     pub base: *mut Slot,
     pub this: Option<ObjRef>,
     /// Late static binding class.
@@ -149,6 +150,12 @@ impl Frame {
     pub fn code(&self) -> &FuncCode {
         // SAFETY: the frame holds `func`, which owns the code.
         unsafe { &*self.code }
+    }
+
+    /// The saved position as an instruction index.
+    pub fn ip(&self) -> usize {
+        // SAFETY: `pc` points into the code's instructions.
+        unsafe { self.pc.offset_from(self.code().ops.as_ptr()) as usize }
     }
 }
 
@@ -308,7 +315,6 @@ fn new_chunk(n: usize) -> Box<[Slot]> {
 #[derive(Default)]
 pub struct ExecState {
     pub frames: Vec<Frame>,
-    pub ip: usize,
     pub stack: SlotStack,
     pub pending: Vec<Pending>,
     pub native_calls: Vec<NativeCall>,
@@ -330,8 +336,10 @@ pub struct TypedRefSource {
 pub struct TopFrame {
     pub base: *mut Slot,
     pub code: *const FuncCode,
-    /// The code's instructions (the dispatch loop reads them through it).
+    /// The code's instructions.
     pub ops: *const Op,
+    /// The next instruction to run.
+    pub pc: *const Op,
 }
 
 impl TopFrame {
@@ -340,7 +348,12 @@ impl TopFrame {
     pub fn of(base: *mut Slot, code: *const FuncCode) -> TopFrame {
         // SAFETY: frames point to live code.
         let ops = unsafe { (*code).ops.as_ptr() };
-        TopFrame { base, code, ops }
+        TopFrame {
+            base,
+            code,
+            ops,
+            pc: ops,
+        }
     }
 }
 
@@ -350,11 +363,29 @@ impl Default for TopFrame {
             base: std::ptr::null_mut(),
             code: std::ptr::null(),
             ops: std::ptr::null(),
+            pc: std::ptr::null(),
         }
     }
 }
 
 impl ExecState {
+    /// The running position as an instruction index.
+    #[inline]
+    pub fn ip(&self) -> usize {
+        if self.top.ops.is_null() {
+            return 0;
+        }
+        // SAFETY: `pc` points into the running code's instructions.
+        unsafe { self.top.pc.offset_from(self.top.ops) as usize }
+    }
+
+    /// Continues the running code at instruction `i`.
+    #[inline(always)]
+    pub fn set_ip(&mut self, i: usize) {
+        // SAFETY: jump targets are within the code (one past its end at most).
+        self.top.pc = unsafe { self.top.ops.add(i) };
+    }
+
     /// Refreshes the cached top-frame pointers.
     #[inline]
     pub fn sync_top(&mut self) {
@@ -641,11 +672,11 @@ impl Vm {
         }
         match self.ex.frames.last() {
             Some(f) if !f.code().file.is_empty() => {
-                let ip = self.ex.ip.saturating_sub(1);
+                let ip = self.ex.ip().saturating_sub(1);
                 f.code().line_of(ip)
             }
             Some(_) => match self.user_frame() {
-                Some(f) => f.code().line_of(f.ip.saturating_sub(1) as usize),
+                Some(f) => f.code().line_of(f.ip().saturating_sub(1)),
                 None => 0,
             },
             None => 0,
