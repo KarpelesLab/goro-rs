@@ -28,6 +28,11 @@ pub struct Active {
     pub finished: bool,
     /// FCGI_STDERR records were sent.
     pub stderr_sent: usize,
+    /// Header lines not sent yet: they go out in one record with the
+    /// first body bytes (test sapi/fpm/tests/log-suppress-output-request-body.phpt:
+    /// the client in fcgi.inc takes a one-byte record holding "0" for an
+    /// empty one, so a short body cannot have a record of its own).
+    pub pending_head: Vec<u8>,
     pub log_limit: usize,
     /// Worker log lines are wanted at NOTICE level.
     pub log_notices: bool,
@@ -57,17 +62,21 @@ fn board<'a>(a: &Active) -> &'a Board {
 }
 
 fn send_stdout(b: &[u8]) {
-    if b.is_empty() {
-        return;
-    }
     with_active(|a| {
-        if a.finished {
+        if a.finished || (b.is_empty() && a.pending_head.is_empty()) {
             return;
         }
-        let mut out = Vec::with_capacity(b.len() + 16);
-        fcgi::stream_records(&mut out, fcgi::STDOUT, a.id, b);
+        let mut data = std::mem::take(&mut a.pending_head);
+        data.extend_from_slice(b);
+        let mut out = Vec::with_capacity(data.len() + 16);
+        fcgi::stream_records(&mut out, fcgi::STDOUT, a.id, &data);
         let _ = fcgi::write_all(a.fd, &out);
     });
+}
+
+/// flush(): what is held back goes to the web server now.
+pub fn flush_stdout() {
+    send_stdout(b"");
 }
 
 fn send_stderr(b: &[u8]) {
@@ -97,6 +106,7 @@ pub fn finish_response(app_status: u32) -> bool {
         }
         a.finished = true;
         let mut out = Vec::new();
+        fcgi::stream_records(&mut out, fcgi::STDOUT, a.id, &std::mem::take(&mut a.pending_head));
         fcgi::end_stream(&mut out, fcgi::STDOUT, a.id);
         if a.stderr_sent > 0 {
             fcgi::end_stream(&mut out, fcgi::STDERR, a.id);
@@ -138,6 +148,13 @@ pub fn sapi_log(msg: &[u8]) {
     send_stderr(&m);
     if notices {
         let mut line = LEVEL.to_vec();
+        // log_level = debug names the origin (the optional part of the
+        // lines sapi/fpm/tests/logtool.inc reads; test gh16628.phpt).
+        if super::log::level() == super::log::Level::Debug {
+            line.extend_from_slice(
+                format!("pid {}, sapi_log(), line {}: ", std::process::id(), line!()).as_bytes(),
+            );
+        }
         line.extend_from_slice(&m);
         line.push(b'\n');
         super::log::write_fd(2, &line);
@@ -155,7 +172,7 @@ impl Transport for FcgiTransport {
             out.extend_from_slice(b"\r\n");
         }
         out.extend_from_slice(b"\r\n");
-        send_stdout(&out);
+        with_active(|a| a.pending_head.extend_from_slice(&out));
     }
 
     fn write_body(&mut self, b: &[u8]) {

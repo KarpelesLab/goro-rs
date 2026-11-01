@@ -312,6 +312,7 @@ fn flush(vm: &mut Vm, _a: &mut Args) -> R<Value> {
         // sapi/fpm/tests/gh12385.phpt).
         if vm.out.sapi.fpm {
             vm.out.sapi.send_head();
+            crate::fpm::request::flush_stdout();
         }
     }
     Ok(Value::Null)

@@ -481,6 +481,13 @@ fn prepare(
         && dir.ends_with("sapi/fpm/tests")
     {
         env.push(("TEST_PHP_EXECUTABLE".into(), p.clone().into_os_string()));
+        // tester.inc passes -dextension=NAME for the extensions a test
+        // starts FPM with only when this is set; goro's are built in, but
+        // zend_test exists only on request.
+        env.push((
+            "TEST_FPM_EXTENSION_DIR".into(),
+            cfg.tmp.clone().into_os_string(),
+        ));
     }
     env.extend(extra_env.iter().cloned());
     for line in phpt.get_list("ENV", false) {

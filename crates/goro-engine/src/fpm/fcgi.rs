@@ -65,16 +65,24 @@ pub enum Incoming {
     Request(Request),
     /// The connection ended (or broke) before a complete request.
     Closed,
-    /// A signal arrived on the descriptor watched alongside.
+    /// `on_signal` asked to stop waiting.
     Interrupted,
 }
 
-/// Reads exactly `buf.len()` bytes, or fewer at end of file. `watch` is
-/// a descriptor (a signalfd) that, when readable, interrupts the wait.
-fn read_full(fd: RawFd, buf: &mut [u8], watch: Option<RawFd>) -> Result<usize, bool> {
+/// A descriptor (a signalfd) watched while waiting for data, and what to
+/// do when it is readable: true stops the wait, false goes on with what
+/// was read so far.
+pub struct Watch<'a> {
+    pub fd: RawFd,
+    pub on_signal: &'a mut dyn FnMut() -> bool,
+}
+
+/// Reads exactly `buf.len()` bytes, or fewer at end of file.
+fn read_full(fd: RawFd, buf: &mut [u8], watch: &mut Watch) -> Result<usize, bool> {
     let mut got = 0;
     while got < buf.len() {
-        if let Some(w) = watch {
+        {
+            let w = watch.fd;
             let mut fds = [
                 libc::pollfd {
                     fd,
@@ -95,8 +103,11 @@ fn read_full(fd: RawFd, buf: &mut [u8], watch: Option<RawFd>) -> Result<usize, b
                 }
                 return Err(false);
             }
-            if fds[1].revents != 0 && fds[0].revents == 0 {
+            if fds[1].revents != 0 && (watch.on_signal)() {
                 return Err(true);
+            }
+            if fds[0].revents == 0 {
+                continue;
             }
         }
         // SAFETY: reading into the unfilled part of buf.
@@ -164,8 +175,7 @@ fn header(ty: u8, id: u16, len: usize, pad: usize) -> [u8; 8] {
 }
 
 /// Appends the records of a stream's content (without the closing empty
-/// record). No padding (§3.3 makes it optional): clients that read the
-/// padding with one short read would lose their place.
+/// record). No padding (§3.3 makes it optional).
 pub fn stream_records(out: &mut Vec<u8>, ty: u8, id: u16, data: &[u8]) {
     for chunk in data.chunks(MAX_CONTENT) {
         out.extend_from_slice(&header(ty, id, chunk.len(), 0));
@@ -244,7 +254,7 @@ fn value_of(name: &[u8], max_conns: usize) -> Option<Vec<u8>> {
 
 /// Reads the next request from a connection, answering management
 /// records on the way. `max_conns` is what FCGI_MAX_CONNS reports.
-pub fn read_request(fd: RawFd, watch: Option<RawFd>, max_conns: usize) -> Incoming {
+pub fn read_request(fd: RawFd, watch: &mut Watch, max_conns: usize) -> Incoming {
     let mut req: Option<Request> = None;
     let mut params = Vec::new();
     let mut params_done = false;

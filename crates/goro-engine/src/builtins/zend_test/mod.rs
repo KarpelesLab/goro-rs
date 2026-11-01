@@ -218,7 +218,7 @@ pub static MODULE: Module = Module {
         ),
         (
             "function zend_test_log_err_debug(string $str): void",
-            null_return,
+            log_err_debug,
         ),
         ("function zend_test_gh18756(): void", null_return),
         (
@@ -396,6 +396,19 @@ fn on_ini_set(vm: &mut Vm, k: &[u8], v: &[u8]) -> R<bool> {
         _ if k.starts_with(b"zend_test.observer.") => Ok(false),
         _ => Ok(true),
     }
+}
+
+/// A message for the SAPI's log (test sapi/fpm/tests/gh16628.phpt).
+fn log_err_debug(vm: &mut Vm, a: &mut Args) -> R<Value> {
+    let msg = a.str(0);
+    if vm.out.sapi.fpm {
+        crate::fpm::request::sapi_log(&msg);
+    } else {
+        let mut line = msg.to_vec();
+        line.push(b'\n');
+        vm.write_stderr(&line);
+    }
+    Ok(Value::Null)
 }
 
 fn null_return(_vm: &mut Vm, _a: &mut Args) -> R<Value> {

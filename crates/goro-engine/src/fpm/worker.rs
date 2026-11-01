@@ -511,14 +511,24 @@ impl<'a> W<'a> {
         loop {
             let sl = self.board().slot(self.slot);
             sl.state.store(scoreboard::READING, Relaxed);
-            match fcgi::read_request(conn, Some(self.sigfd), 1) {
-                fcgi::Incoming::Closed => return,
-                fcgi::Incoming::Interrupted => {
-                    self.signals();
-                    if self.quit {
-                        return;
+            let sigfd = self.sigfd;
+            let quit = &mut self.quit;
+            let mut on_signal = || {
+                for s in read_signals(sigfd) {
+                    match s {
+                        libc::SIGTERM | libc::SIGINT => die_by(libc::SIGTERM),
+                        libc::SIGQUIT => *quit = true,
+                        _ => {}
                     }
                 }
+                *quit
+            };
+            let mut watch = fcgi::Watch {
+                fd: sigfd,
+                on_signal: &mut on_signal,
+            };
+            match fcgi::read_request(conn, &mut watch, 1) {
+                fcgi::Incoming::Closed | fcgi::Incoming::Interrupted => return,
                 fcgi::Incoming::Request(r) => {
                     let keep = self.request(conn, &r, peer);
                     if !keep || !r.keep_conn || self.quit {
@@ -758,6 +768,7 @@ impl<'a> W<'a> {
             keep_conn: r.keep_conn,
             finished: false,
             stderr_sent: 0,
+            pending_head: Vec::new(),
             log_limit: self.m.cfg.global.log_limit,
             log_notices: log::level() <= Level::Notice,
             board: &main.board as *const Board,

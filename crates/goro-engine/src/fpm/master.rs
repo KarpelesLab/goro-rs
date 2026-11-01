@@ -174,6 +174,71 @@ fn lookup_group(name: &str) -> Result<u32, i32> {
     }
 }
 
+/// The names of listen.acl_users or listen.acl_groups (comma-separated).
+fn acl_names(v: &Option<String>) -> Vec<&str> {
+    v.as_deref()
+        .map(|l| {
+            l.split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The POSIX ACL of a Unix socket (PHP manual: listen.acl_users,
+/// listen.acl_groups): read and write for the named users and groups, in
+/// the kernel's `system.posix_acl_access` format (a version, then tag,
+/// permissions and id entries ordered by tag and id; acl(5), xattr(7)).
+fn set_acl(pool: &Pool, path: &Path, mode: u32) -> Result<(), i32> {
+    const USER_OBJ: u16 = 0x01;
+    const USER: u16 = 0x02;
+    const GROUP_OBJ: u16 = 0x04;
+    const GROUP: u16 = 0x08;
+    const MASK: u16 = 0x10;
+    const OTHER: u16 = 0x20;
+    const NO_ID: u32 = u32::MAX;
+    let mut users: Vec<u32> = acl_names(&pool.listen_acl_users)
+        .into_iter()
+        .filter_map(|n| lookup_user(n).ok())
+        .collect();
+    let mut groups: Vec<u32> = acl_names(&pool.listen_acl_groups)
+        .into_iter()
+        .filter_map(|n| lookup_group(n).ok())
+        .collect();
+    if users.is_empty() && groups.is_empty() {
+        return Ok(());
+    }
+    users.sort_unstable();
+    users.dedup();
+    groups.sort_unstable();
+    groups.dedup();
+    let mut entries = vec![(USER_OBJ, ((mode >> 6) & 7) as u16, NO_ID)];
+    entries.extend(users.into_iter().map(|u| (USER, 6, u)));
+    entries.push((GROUP_OBJ, ((mode >> 3) & 7) as u16, NO_ID));
+    entries.extend(groups.into_iter().map(|g| (GROUP, 6, g)));
+    entries.push((MASK, 6, NO_ID));
+    entries.push((OTHER, (mode & 7) as u16, NO_ID));
+    let mut data = 2u32.to_le_bytes().to_vec();
+    for (tag, perm, id) in entries {
+        data.extend_from_slice(&tag.to_le_bytes());
+        data.extend_from_slice(&perm.to_le_bytes());
+        data.extend_from_slice(&id.to_le_bytes());
+    }
+    let c = cpath(path);
+    // SAFETY: setting an attribute from a valid buffer on our socket file.
+    let r = unsafe {
+        libc::setxattr(
+            c.as_ptr(),
+            c"system.posix_acl_access".as_ptr(),
+            data.as_ptr() as *const libc::c_void,
+            data.len(),
+            0,
+        )
+    };
+    if r == 0 { Ok(()) } else { Err(errno()) }
+}
+
 /// Longest Unix socket path (sun_path less its terminating zero).
 const UNIX_PATH_MAX: usize = 107;
 
@@ -244,8 +309,15 @@ fn check(cfg: &mut Config, test: bool) -> bool {
                 ));
             }
         }
-        if p.listen_acl_users.is_some() || p.listen_acl_groups.is_some() {
-            return err("listen.acl_users and listen.acl_groups are not supported");
+        for u in acl_names(&p.listen_acl_users) {
+            if lookup_user(u).is_err() {
+                return err(&format!("cannot get uid for user '{}'", u));
+            }
+        }
+        for gr in acl_names(&p.listen_acl_groups) {
+            if lookup_group(gr).is_err() {
+                return err(&format!("cannot get gid for group '{}'", gr));
+            }
         }
         if !test && !root {
             if p.user.is_some() {
@@ -483,7 +555,11 @@ fn bind_tcp(a: &std::net::SocketAddr, backlog: i32) -> Result<RawFd, i32> {
             libc::close(fd);
             return Err(e);
         }
-        Ok(high_fd(fd))
+        // Several workers wake for one connection: the ones that lose the
+        // accept() must not block in it, deaf to signals.
+        let fd = high_fd(fd);
+        set_nonblock(fd);
+        Ok(fd)
     }
 }
 
@@ -512,7 +588,11 @@ fn bind_unix(p: &Path, backlog: i32) -> Result<RawFd, i32> {
             libc::close(fd);
             return Err(e);
         }
-        Ok(high_fd(fd))
+        // Several workers wake for one connection: the ones that lose the
+        // accept() must not block in it, deaf to signals.
+        let fd = high_fd(fd);
+        set_nonblock(fd);
+        Ok(fd)
     }
 }
 
@@ -544,6 +624,7 @@ impl Master {
         if let Some(i) = inherited.iter().position(|(a, _)| a == addr_text) {
             let (_, fd) = inherited.remove(i);
             set_cloexec(fd, true);
+            set_nonblock(fd);
             let unix = addr_text.starts_with('/').then(|| PathBuf::from(addr_text));
             return Ok(Listener {
                 fd,
@@ -604,6 +685,20 @@ impl Master {
                                     gid.unwrap_or(u32::MAX),
                                 );
                             }
+                        }
+                        if let Err(e) = set_acl(pool, &p, mode) {
+                            log::pool(
+                                Level::Error,
+                                &pool.name,
+                                &format!(
+                                    "failed to set the ACL of the socket: {} ({})",
+                                    strerror(e),
+                                    e
+                                ),
+                            );
+                            // SAFETY: closing the socket we just opened.
+                            unsafe { libc::close(fd) };
+                            return Err(());
                         }
                         Ok(Listener {
                             fd,
