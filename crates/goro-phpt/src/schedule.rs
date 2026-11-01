@@ -29,6 +29,13 @@ fn find(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Tests using the same scratch files without saying so in a CONFLICTS
+/// section: one's cleanup removes the other's files mid-run.
+const SHARED_FILES: &[(&str, &str)] = &[
+    ("sapi/cli/tests/010.phpt", "sapi-cli-010-files"),
+    ("sapi/cli/tests/010-2.phpt", "sapi-cli-010-files"),
+];
+
 /// Builds jobs for `paths`, reading their CONFLICTS.
 pub fn jobs(paths: &[PathBuf]) -> Vec<Job> {
     let mut dir_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
@@ -54,6 +61,11 @@ pub fn jobs(paths: &[PathBuf]) -> Vec<Job> {
                     if phpt.has("REDIRECTTEST") {
                         conflicts.push("all".into());
                     }
+                }
+            }
+            for (suffix, key) in SHARED_FILES {
+                if p.ends_with(suffix) {
+                    conflicts.push((*key).to_string());
                 }
             }
             conflicts.sort();
