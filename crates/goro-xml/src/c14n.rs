@@ -385,10 +385,7 @@ pub fn canonicalize(arena: &Arena, node: NodeId, opts: &C14nOptions) -> String {
                     .parent(n)
                     .map(|p| (p, d.prefix.as_deref().map(str::to_string))),
                 NodeData::Attribute(a) if modern && a.name.ns.as_deref() == Some(XMLNS_NS) => {
-                    let p = match a.name.prefix {
-                        None => None,
-                        Some(_) => Some(a.name.local.to_string()),
-                    };
+                    let p = a.name.prefix.as_ref().map(|_| a.name.local.to_string());
                     arena.parent(n).map(|el| (el, p))
                 }
                 _ => None,

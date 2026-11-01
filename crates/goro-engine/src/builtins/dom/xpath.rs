@@ -745,7 +745,8 @@ pub fn xpath_hooks() -> NativeHooks {
                 // Reading `document` throws; the dump goes on and the
                 // exception follows it (test gh16316.phpt).
                 if vm.err.deferred.is_none()
-                    && let Err(e) = super::throw_dom::<()>(vm, goro_xml::tree::DomError::InvalidState)
+                    && let Err(e) =
+                        super::throw_dom::<()>(vm, goro_xml::tree::DomError::InvalidState)
                 {
                     vm.err.deferred = Some(e);
                 }
